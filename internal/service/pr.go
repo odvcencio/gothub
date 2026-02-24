@@ -1,9 +1,11 @@
 package service
 
 import (
+	"container/heap"
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -16,6 +18,7 @@ import (
 	"github.com/odvcencio/gothub/internal/entityutil"
 	"github.com/odvcencio/gothub/internal/gotstore"
 	"github.com/odvcencio/gothub/internal/models"
+	"golang.org/x/sync/errgroup"
 )
 
 // MergePreviewResponse holds the result of a structural merge preview.
@@ -76,12 +79,44 @@ const (
 	mergePreviewCacheTTL        = 30 * time.Second
 	mergePreviewCacheMaxEntries = 256
 	mergePreviewCleanupInterval = 2 * time.Second
+	mergePathWorkersMax         = 16
 )
 
 type mergePreviewCacheEntry struct {
-	resp     *MergePreviewResponse
-	cachedAt time.Time
-	expires  time.Time
+	resp    *MergePreviewResponse
+	expires time.Time
+	version uint64
+}
+
+type mergePreviewExpiryItem struct {
+	key     string
+	expires time.Time
+	version uint64
+}
+
+type mergePreviewExpiryHeap []mergePreviewExpiryItem
+
+func (h mergePreviewExpiryHeap) Len() int { return len(h) }
+
+func (h mergePreviewExpiryHeap) Less(i, j int) bool {
+	if h[i].expires.Equal(h[j].expires) {
+		return h[i].key < h[j].key
+	}
+	return h[i].expires.Before(h[j].expires)
+}
+
+func (h mergePreviewExpiryHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+
+func (h *mergePreviewExpiryHeap) Push(x any) {
+	*h = append(*h, x.(mergePreviewExpiryItem))
+}
+
+func (h *mergePreviewExpiryHeap) Pop() any {
+	old := *h
+	n := len(old)
+	item := old[n-1]
+	*h = old[:n-1]
+	return item
 }
 
 type PRService struct {
@@ -91,9 +126,11 @@ type PRService struct {
 	codeIntelSvc *CodeIntelService
 	lineageSvc   *EntityLineageService
 
-	mergePreviewMu    sync.Mutex
-	mergePreviewCache map[string]mergePreviewCacheEntry
-	mergePreviewPrune time.Time
+	mergePreviewMu      sync.RWMutex
+	mergePreviewCache   map[string]mergePreviewCacheEntry
+	mergePreviewExpiry  mergePreviewExpiryHeap
+	mergePreviewVersion uint64
+	mergePreviewPrune   time.Time
 }
 
 func NewPRService(db database.DB, repoSvc *RepoService, browseSvc *BrowseService) *PRService {
@@ -269,92 +306,30 @@ func (s *PRService) MergePreview(ctx context.Context, owner, repo string, pr *mo
 	srcMap := indexFiles(srcFiles)
 	tgtMap := indexFiles(tgtFiles)
 
-	// Collect all file paths
-	allPaths := map[string]bool{}
-	for p := range baseMap {
-		allPaths[p] = true
-	}
-	for p := range srcMap {
-		allPaths[p] = true
-	}
-	for p := range tgtMap {
-		allPaths[p] = true
+	paths := collectAllPaths(baseMap, srcMap, tgtMap)
+	results := make([]mergePreviewPathResult, len(paths))
+	if err := runPathWorkers(ctx, paths, func(i int, path string) error {
+		result, err := computeMergePreviewPath(store.Objects, path, baseMap[path], srcMap[path], tgtMap[path])
+		if err != nil {
+			return err
+		}
+		results[i] = result
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 
-	resp := &MergePreviewResponse{}
+	resp := &MergePreviewResponse{
+		Files: make([]FileMergeInfo, 0, len(paths)),
+	}
 	var totalStats merge.MergeStats
 
-	for path := range allPaths {
-		baseEntry := baseMap[path]
-		srcEntry := srcMap[path]
-		tgtEntry := tgtMap[path]
-
-		// Read blob data (empty if not present)
-		var baseData, srcData, tgtData []byte
-		if baseEntry.BlobHash != "" {
-			baseData, err = readBlobData(store.Objects, object.Hash(baseEntry.BlobHash))
-			if err != nil {
-				return nil, fmt.Errorf("read base blob %s: %w", path, err)
-			}
-		}
-		if srcEntry.BlobHash != "" {
-			srcData, err = readBlobData(store.Objects, object.Hash(srcEntry.BlobHash))
-			if err != nil {
-				return nil, fmt.Errorf("read source blob %s: %w", path, err)
-			}
-		}
-		if tgtEntry.BlobHash != "" {
-			tgtData, err = readBlobData(store.Objects, object.Hash(tgtEntry.BlobHash))
-			if err != nil {
-				return nil, fmt.Errorf("read target blob %s: %w", path, err)
-			}
-		}
-
-		// Skip files unchanged between all three
-		if baseEntry.BlobHash == srcEntry.BlobHash && baseEntry.BlobHash == tgtEntry.BlobHash {
+	for _, result := range results {
+		if !result.include {
 			continue
 		}
-
-		info := FileMergeInfo{Path: path}
-
-		// Determine file status
-		if srcEntry.BlobHash == "" && tgtEntry.BlobHash == "" {
-			continue // deleted in both
-		}
-		if baseEntry.BlobHash == "" && srcEntry.BlobHash != "" {
-			info.Status = "added"
-			resp.Files = append(resp.Files, info)
-			continue
-		}
-		if srcEntry.BlobHash == "" {
-			info.Status = "deleted"
-			resp.Files = append(resp.Files, info)
-			continue
-		}
-
-		// Three-way merge
-		result, err := merge.MergeFiles(path, baseData, tgtData, srcData)
-		if err != nil {
-			info.Status = "conflict"
-			info.ConflictCount = 1
-		} else {
-			if result.HasConflicts {
-				info.Status = "conflict"
-				info.ConflictCount = result.ConflictCount
-			} else {
-				info.Status = "clean"
-			}
-			totalStats.TotalEntities += result.Stats.TotalEntities
-			totalStats.Unchanged += result.Stats.Unchanged
-			totalStats.OursModified += result.Stats.OursModified
-			totalStats.TheirsModified += result.Stats.TheirsModified
-			totalStats.BothModified += result.Stats.BothModified
-			totalStats.Added += result.Stats.Added
-			totalStats.Deleted += result.Stats.Deleted
-			totalStats.Conflicts += result.Stats.Conflicts
-		}
-
-		resp.Files = append(resp.Files, info)
+		resp.Files = append(resp.Files, result.info)
+		accumulateMergeStats(&totalStats, result.stats)
 	}
 
 	resp.HasConflicts = totalStats.Conflicts > 0
@@ -423,77 +398,43 @@ func (s *PRService) Merge(ctx context.Context, owner, repo string, pr *models.Pu
 	baseMap := indexFiles(baseFiles)
 	srcMap := indexFiles(srcFiles)
 	tgtMap := indexFiles(tgtFiles)
-
-	allPaths := map[string]bool{}
-	for p := range baseMap {
-		allPaths[p] = true
-	}
-	for p := range srcMap {
-		allPaths[p] = true
-	}
-	for p := range tgtMap {
-		allPaths[p] = true
-	}
+	paths := collectAllPaths(baseMap, srcMap, tgtMap)
 
 	// Build merged tree entries
-	mergedEntries := map[string]object.Hash{} // path -> blob hash
+	mergedEntries := make(map[string]object.Hash, len(paths))
 	conflictedPaths := make([]string, 0, 4)
-
-	for path := range allPaths {
-		baseEntry := baseMap[path]
-		srcEntry := srcMap[path]
-		tgtEntry := tgtMap[path]
-
-		if srcEntry.BlobHash == "" {
-			// Deleted in source
-			continue
-		}
-		if tgtEntry.BlobHash == "" && baseEntry.BlobHash == "" {
-			// New in source
-			mergedEntries[path] = object.Hash(srcEntry.BlobHash)
-			continue
-		}
-		if baseEntry.BlobHash == srcEntry.BlobHash {
-			// Source unchanged, use target
-			if tgtEntry.BlobHash != "" {
-				mergedEntries[path] = object.Hash(tgtEntry.BlobHash)
-			}
-			continue
-		}
-		if baseEntry.BlobHash == tgtEntry.BlobHash {
-			// Target unchanged, use source
-			mergedEntries[path] = object.Hash(srcEntry.BlobHash)
-			continue
-		}
-
-		// Both changed — three-way merge
-		var baseData, srcData, tgtData []byte
-		if baseEntry.BlobHash != "" {
-			baseData, err = readBlobData(store.Objects, object.Hash(baseEntry.BlobHash))
-			if err != nil {
-				return "", fmt.Errorf("read base blob %s: %w", path, err)
-			}
-		}
-		srcData, err = readBlobData(store.Objects, object.Hash(srcEntry.BlobHash))
+	decisions := make([]mergePathDecision, len(paths))
+	if err := runPathWorkers(ctx, paths, func(i int, path string) error {
+		decision, err := computeMergePathDecision(store.Objects, path, baseMap[path], srcMap[path], tgtMap[path])
 		if err != nil {
-			return "", fmt.Errorf("read source blob %s: %w", path, err)
+			return err
 		}
-		tgtData, err = readBlobData(store.Objects, object.Hash(tgtEntry.BlobHash))
-		if err != nil {
-			return "", fmt.Errorf("read target blob %s: %w", path, err)
-		}
+		decisions[i] = decision
+		return nil
+	}); err != nil {
+		return "", err
+	}
 
-		result, err := merge.MergeFiles(path, baseData, tgtData, srcData)
-		if err != nil || result.HasConflicts {
-			conflictedPaths = append(conflictedPaths, path)
+	for _, decision := range decisions {
+		if !decision.include {
 			continue
 		}
-
-		blobHash, err := store.Objects.WriteBlob(&object.Blob{Data: result.Merged})
+		if decision.conflict {
+			conflictedPaths = append(conflictedPaths, decision.path)
+			continue
+		}
+		if decision.directBlobHash != "" {
+			mergedEntries[decision.path] = decision.directBlobHash
+			continue
+		}
+		if !decision.writeMergedBlob {
+			continue
+		}
+		blobHash, err := store.Objects.WriteBlob(&object.Blob{Data: decision.mergedData})
 		if err != nil {
 			return "", fmt.Errorf("write merged blob: %w", err)
 		}
-		mergedEntries[path] = blobHash
+		mergedEntries[decision.path] = blobHash
 	}
 	if len(conflictedPaths) > 0 {
 		sort.Strings(conflictedPaths)
@@ -574,66 +515,360 @@ func updateTargetBranchRef(store *gotstore.RepoStore, branch string, expectedOld
 	return nil
 }
 
-func (s *PRService) getCachedMergePreview(key string) (*MergePreviewResponse, bool) {
-	s.mergePreviewMu.Lock()
-	defer s.mergePreviewMu.Unlock()
+type mergePreviewPathResult struct {
+	include bool
+	info    FileMergeInfo
+	stats   merge.MergeStats
+}
 
+func computeMergePreviewPath(store *object.Store, path string, baseEntry, srcEntry, tgtEntry FileEntry) (mergePreviewPathResult, error) {
+	var (
+		baseData []byte
+		srcData  []byte
+		tgtData  []byte
+		err      error
+	)
+	if baseEntry.BlobHash != "" {
+		baseData, err = readBlobData(store, object.Hash(baseEntry.BlobHash))
+		if err != nil {
+			return mergePreviewPathResult{}, fmt.Errorf("read base blob %s: %w", path, err)
+		}
+	}
+	if srcEntry.BlobHash != "" {
+		srcData, err = readBlobData(store, object.Hash(srcEntry.BlobHash))
+		if err != nil {
+			return mergePreviewPathResult{}, fmt.Errorf("read source blob %s: %w", path, err)
+		}
+	}
+	if tgtEntry.BlobHash != "" {
+		tgtData, err = readBlobData(store, object.Hash(tgtEntry.BlobHash))
+		if err != nil {
+			return mergePreviewPathResult{}, fmt.Errorf("read target blob %s: %w", path, err)
+		}
+	}
+
+	// Skip files unchanged between all three.
+	if baseEntry.BlobHash == srcEntry.BlobHash && baseEntry.BlobHash == tgtEntry.BlobHash {
+		return mergePreviewPathResult{}, nil
+	}
+
+	info := FileMergeInfo{Path: path}
+	// Determine file status.
+	if srcEntry.BlobHash == "" && tgtEntry.BlobHash == "" {
+		return mergePreviewPathResult{}, nil // deleted in both
+	}
+	if baseEntry.BlobHash == "" && srcEntry.BlobHash != "" {
+		info.Status = "added"
+		return mergePreviewPathResult{include: true, info: info}, nil
+	}
+	if srcEntry.BlobHash == "" {
+		info.Status = "deleted"
+		return mergePreviewPathResult{include: true, info: info}, nil
+	}
+
+	// Three-way merge.
+	result, err := merge.MergeFiles(path, baseData, tgtData, srcData)
+	if err != nil {
+		info.Status = "conflict"
+		info.ConflictCount = 1
+		return mergePreviewPathResult{
+			include: true,
+			info:    info,
+			stats:   merge.MergeStats{Conflicts: 1},
+		}, nil
+	}
+	if result.HasConflicts {
+		info.Status = "conflict"
+		info.ConflictCount = result.ConflictCount
+	} else {
+		info.Status = "clean"
+	}
+
+	return mergePreviewPathResult{
+		include: true,
+		info:    info,
+		stats:   result.Stats,
+	}, nil
+}
+
+type mergePathDecision struct {
+	include         bool
+	path            string
+	conflict        bool
+	directBlobHash  object.Hash
+	mergedData      []byte
+	writeMergedBlob bool
+}
+
+func computeMergePathDecision(store *object.Store, path string, baseEntry, srcEntry, tgtEntry FileEntry) (mergePathDecision, error) {
+	if srcEntry.BlobHash == "" {
+		// Deleted in source.
+		return mergePathDecision{}, nil
+	}
+	if tgtEntry.BlobHash == "" && baseEntry.BlobHash == "" {
+		// New in source.
+		return mergePathDecision{
+			include:        true,
+			path:           path,
+			directBlobHash: object.Hash(srcEntry.BlobHash),
+		}, nil
+	}
+	if baseEntry.BlobHash == srcEntry.BlobHash {
+		// Source unchanged, use target.
+		if tgtEntry.BlobHash == "" {
+			return mergePathDecision{}, nil
+		}
+		return mergePathDecision{
+			include:        true,
+			path:           path,
+			directBlobHash: object.Hash(tgtEntry.BlobHash),
+		}, nil
+	}
+	if baseEntry.BlobHash == tgtEntry.BlobHash {
+		// Target unchanged, use source.
+		return mergePathDecision{
+			include:        true,
+			path:           path,
+			directBlobHash: object.Hash(srcEntry.BlobHash),
+		}, nil
+	}
+
+	// Both changed — three-way merge.
+	var (
+		baseData []byte
+		srcData  []byte
+		tgtData  []byte
+		err      error
+	)
+	if baseEntry.BlobHash != "" {
+		baseData, err = readBlobData(store, object.Hash(baseEntry.BlobHash))
+		if err != nil {
+			return mergePathDecision{}, fmt.Errorf("read base blob %s: %w", path, err)
+		}
+	}
+	srcData, err = readBlobData(store, object.Hash(srcEntry.BlobHash))
+	if err != nil {
+		return mergePathDecision{}, fmt.Errorf("read source blob %s: %w", path, err)
+	}
+	tgtData, err = readBlobData(store, object.Hash(tgtEntry.BlobHash))
+	if err != nil {
+		return mergePathDecision{}, fmt.Errorf("read target blob %s: %w", path, err)
+	}
+
+	result, err := merge.MergeFiles(path, baseData, tgtData, srcData)
+	if err != nil || result.HasConflicts {
+		return mergePathDecision{
+			include:  true,
+			path:     path,
+			conflict: true,
+		}, nil
+	}
+
+	return mergePathDecision{
+		include:         true,
+		path:            path,
+		mergedData:      result.Merged,
+		writeMergedBlob: true,
+	}, nil
+}
+
+func runPathWorkers(ctx context.Context, paths []string, fn func(i int, path string) error) error {
+	if len(paths) == 0 {
+		return nil
+	}
+	workerCount := mergePathWorkerCount(len(paths))
+	if workerCount <= 1 {
+		for i, path := range paths {
+			if err := fn(i, path); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	group, _ := errgroup.WithContext(ctx)
+	group.SetLimit(workerCount)
+	for i, path := range paths {
+		i, path := i, path
+		group.Go(func() error {
+			return fn(i, path)
+		})
+	}
+	return group.Wait()
+}
+
+func mergePathWorkerCount(pathCount int) int {
+	if pathCount <= 1 {
+		return 1
+	}
+	workers := runtime.GOMAXPROCS(0)
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > mergePathWorkersMax {
+		workers = mergePathWorkersMax
+	}
+	if workers > pathCount {
+		workers = pathCount
+	}
+	return workers
+}
+
+func (s *PRService) getCachedMergePreview(key string) (*MergePreviewResponse, bool) {
 	now := time.Now()
-	s.pruneExpiredMergePreviewCache(now)
+	s.mergePreviewMu.RLock()
 	entry, ok := s.mergePreviewCache[key]
-	if !ok || now.After(entry.expires) {
-		if ok {
-			delete(s.mergePreviewCache, key)
+	cleanupDue := s.mergePreviewCleanupDueLocked(now)
+	s.mergePreviewMu.RUnlock()
+
+	if !ok {
+		if cleanupDue {
+			s.pruneExpiredMergePreviewCache(now)
 		}
 		return nil, false
 	}
+	if !now.Before(entry.expires) {
+		s.deleteExpiredMergePreviewEntry(key, now)
+		if cleanupDue {
+			s.pruneExpiredMergePreviewCache(now)
+		}
+		return nil, false
+	}
+	if cleanupDue {
+		s.pruneExpiredMergePreviewCache(now)
+	}
+
 	return cloneMergePreviewResponse(entry.resp), true
 }
 
 func (s *PRService) setCachedMergePreview(key string, resp *MergePreviewResponse) {
+	now := time.Now()
+	cloned := cloneMergePreviewResponse(resp)
+
 	s.mergePreviewMu.Lock()
 	defer s.mergePreviewMu.Unlock()
 
-	now := time.Now()
-	s.pruneExpiredMergePreviewCache(now)
-	if len(s.mergePreviewCache) >= mergePreviewCacheMaxEntries {
-		s.evictOldestMergePreviewEntry()
+	if s.mergePreviewCache == nil {
+		s.mergePreviewCache = make(map[string]mergePreviewCacheEntry)
 	}
-	s.mergePreviewCache[key] = mergePreviewCacheEntry{
-		resp:     cloneMergePreviewResponse(resp),
-		cachedAt: now,
-		expires:  now.Add(mergePreviewCacheTTL),
-	}
-}
+	s.pruneExpiredMergePreviewCacheLocked(now)
 
-func (s *PRService) pruneExpiredMergePreviewCache(now time.Time) {
-	if !s.mergePreviewPrune.IsZero() && now.Sub(s.mergePreviewPrune) < mergePreviewCleanupInterval {
-		return
-	}
-	for key, entry := range s.mergePreviewCache {
-		if now.After(entry.expires) {
-			delete(s.mergePreviewCache, key)
+	if _, exists := s.mergePreviewCache[key]; !exists {
+		for len(s.mergePreviewCache) >= mergePreviewCacheMaxEntries {
+			s.evictOldestMergePreviewEntryLocked()
 		}
 	}
+
+	s.mergePreviewVersion++
+	entry := mergePreviewCacheEntry{
+		resp:    cloned,
+		expires: now.Add(mergePreviewCacheTTL),
+		version: s.mergePreviewVersion,
+	}
+	s.mergePreviewCache[key] = entry
+	heap.Push(&s.mergePreviewExpiry, mergePreviewExpiryItem{
+		key:     key,
+		expires: entry.expires,
+		version: entry.version,
+	})
+	s.compactMergePreviewExpiryHeapLocked()
 	s.mergePreviewPrune = now
 }
 
-func (s *PRService) evictOldestMergePreviewEntry() {
-	var (
-		oldestKey string
-		oldest    time.Time
-		set       bool
-	)
-	for key, entry := range s.mergePreviewCache {
-		if !set || entry.cachedAt.Before(oldest) {
-			set = true
-			oldest = entry.cachedAt
-			oldestKey = key
+func (s *PRService) deleteExpiredMergePreviewEntry(key string, now time.Time) {
+	s.mergePreviewMu.Lock()
+	defer s.mergePreviewMu.Unlock()
+
+	entry, ok := s.mergePreviewCache[key]
+	if !ok || now.Before(entry.expires) {
+		return
+	}
+	delete(s.mergePreviewCache, key)
+}
+
+func (s *PRService) mergePreviewCleanupDueLocked(now time.Time) bool {
+	return s.mergePreviewPrune.IsZero() || now.Sub(s.mergePreviewPrune) >= mergePreviewCleanupInterval
+}
+
+func (s *PRService) pruneExpiredMergePreviewCache(now time.Time) {
+	s.mergePreviewMu.Lock()
+	defer s.mergePreviewMu.Unlock()
+
+	if !s.mergePreviewCleanupDueLocked(now) {
+		return
+	}
+	s.pruneExpiredMergePreviewCacheLocked(now)
+	s.compactMergePreviewExpiryHeapLocked()
+	s.mergePreviewPrune = now
+}
+
+func (s *PRService) pruneExpiredMergePreviewCacheLocked(now time.Time) {
+	if len(s.mergePreviewCache) == 0 {
+		return
+	}
+
+	// Fallback for out-of-band states where map was populated without heap metadata.
+	if len(s.mergePreviewExpiry) == 0 {
+		for key, entry := range s.mergePreviewCache {
+			if !now.Before(entry.expires) {
+				delete(s.mergePreviewCache, key)
+			}
 		}
+		return
 	}
-	if set {
-		delete(s.mergePreviewCache, oldestKey)
+
+	for len(s.mergePreviewExpiry) > 0 {
+		top := s.mergePreviewExpiry[0]
+		if now.Before(top.expires) {
+			return
+		}
+		item := heap.Pop(&s.mergePreviewExpiry).(mergePreviewExpiryItem)
+		entry, ok := s.mergePreviewCache[item.key]
+		if !ok || entry.version != item.version {
+			continue
+		}
+		if now.Before(entry.expires) {
+			continue
+		}
+		delete(s.mergePreviewCache, item.key)
 	}
+}
+
+func (s *PRService) evictOldestMergePreviewEntryLocked() {
+	for len(s.mergePreviewExpiry) > 0 {
+		item := heap.Pop(&s.mergePreviewExpiry).(mergePreviewExpiryItem)
+		entry, ok := s.mergePreviewCache[item.key]
+		if !ok || entry.version != item.version {
+			continue
+		}
+		delete(s.mergePreviewCache, item.key)
+		return
+	}
+
+	for key := range s.mergePreviewCache {
+		delete(s.mergePreviewCache, key)
+		return
+	}
+}
+
+func (s *PRService) compactMergePreviewExpiryHeapLocked() {
+	maxHeapSize := len(s.mergePreviewCache) * 4
+	if maxHeapSize < mergePreviewCacheMaxEntries {
+		maxHeapSize = mergePreviewCacheMaxEntries
+	}
+	if len(s.mergePreviewExpiry) <= maxHeapSize {
+		return
+	}
+	rebuilt := make(mergePreviewExpiryHeap, 0, len(s.mergePreviewCache))
+	for key, entry := range s.mergePreviewCache {
+		rebuilt = append(rebuilt, mergePreviewExpiryItem{
+			key:     key,
+			expires: entry.expires,
+			version: entry.version,
+		})
+	}
+	heap.Init(&rebuilt)
+	s.mergePreviewExpiry = rebuilt
 }
 
 func cloneMergePreviewResponse(in *MergePreviewResponse) *MergePreviewResponse {
@@ -682,6 +917,37 @@ func normalizePage(page, perPage, defaultPerPage, maxPerPage int) (limit, offset
 }
 
 // --- helpers ---
+
+func collectAllPaths(baseMap, srcMap, tgtMap map[string]FileEntry) []string {
+	allPaths := make(map[string]struct{}, len(baseMap)+len(srcMap)+len(tgtMap))
+	for path := range baseMap {
+		allPaths[path] = struct{}{}
+	}
+	for path := range srcMap {
+		allPaths[path] = struct{}{}
+	}
+	for path := range tgtMap {
+		allPaths[path] = struct{}{}
+	}
+
+	paths := make([]string, 0, len(allPaths))
+	for path := range allPaths {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	return paths
+}
+
+func accumulateMergeStats(dst *merge.MergeStats, src merge.MergeStats) {
+	dst.TotalEntities += src.TotalEntities
+	dst.Unchanged += src.Unchanged
+	dst.OursModified += src.OursModified
+	dst.TheirsModified += src.TheirsModified
+	dst.BothModified += src.BothModified
+	dst.Added += src.Added
+	dst.Deleted += src.Deleted
+	dst.Conflicts += src.Conflicts
+}
 
 func indexFiles(files []FileEntry) map[string]FileEntry {
 	m := make(map[string]FileEntry, len(files))

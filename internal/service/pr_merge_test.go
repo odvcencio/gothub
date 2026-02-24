@@ -3,7 +3,10 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
+	"runtime"
+	"sync"
 	"testing"
 	"time"
 
@@ -138,6 +141,84 @@ func TestMergePreviewCacheExpiresEntries(t *testing.T) {
 	}
 	if len(svc.mergePreviewCache) != 0 {
 		t.Fatalf("expected expired cache entry to be pruned, got %d entries", len(svc.mergePreviewCache))
+	}
+}
+
+func TestMergePreviewCacheRemainsBounded(t *testing.T) {
+	svc := &PRService{mergePreviewCache: make(map[string]mergePreviewCacheEntry)}
+
+	total := mergePreviewCacheMaxEntries + 64
+	for i := 0; i < total; i++ {
+		svc.setCachedMergePreview(fmt.Sprintf("k-%03d", i), &MergePreviewResponse{
+			Files: []FileMergeInfo{{Path: fmt.Sprintf("file-%03d.go", i), Status: "clean"}},
+		})
+	}
+
+	if got := len(svc.mergePreviewCache); got != mergePreviewCacheMaxEntries {
+		t.Fatalf("expected bounded cache size %d, got %d", mergePreviewCacheMaxEntries, got)
+	}
+}
+
+func TestMergePreviewCacheCompactsStaleHeapEntries(t *testing.T) {
+	svc := &PRService{mergePreviewCache: make(map[string]mergePreviewCacheEntry)}
+
+	updates := mergePreviewCacheMaxEntries * 5
+	for i := 0; i < updates; i++ {
+		svc.setCachedMergePreview("shared", &MergePreviewResponse{
+			Files: []FileMergeInfo{{Path: fmt.Sprintf("file-%03d.go", i), Status: "clean"}},
+		})
+	}
+
+	svc.mergePreviewMu.RLock()
+	cacheSize := len(svc.mergePreviewCache)
+	heapSize := len(svc.mergePreviewExpiry)
+	svc.mergePreviewMu.RUnlock()
+
+	if cacheSize != 1 {
+		t.Fatalf("expected single cache entry after repeated key updates, got %d", cacheSize)
+	}
+	if heapSize > mergePreviewCacheMaxEntries {
+		t.Fatalf("expected heap compaction to cap stale metadata, got heap size %d", heapSize)
+	}
+}
+
+func TestRunPathWorkersExecutesConcurrently(t *testing.T) {
+	prev := runtime.GOMAXPROCS(4)
+	defer runtime.GOMAXPROCS(prev)
+
+	paths := []string{"a.go", "b.go", "c.go", "d.go"}
+	entered := make(chan struct{}, len(paths))
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseWorkers := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseWorkers)
+	done := make(chan error, 1)
+
+	go func() {
+		done <- runPathWorkers(context.Background(), paths, func(_ int, _ string) error {
+			entered <- struct{}{}
+			<-release
+			return nil
+		})
+	}()
+
+	timeout := time.After(2 * time.Second)
+	for i := 0; i < 2; i++ {
+		select {
+		case <-entered:
+		case <-timeout:
+			t.Fatal("expected at least two workers to run concurrently")
+		}
+	}
+
+	releaseWorkers()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("runPathWorkers returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for path workers to complete")
 	}
 }
 
