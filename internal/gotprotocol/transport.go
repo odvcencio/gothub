@@ -499,7 +499,7 @@ func parseRefUpdates(w http.ResponseWriter, r *http.Request) ([]refUpdateItem, e
 
 func parsePushedObjectType(raw string) (object.ObjectType, error) {
 	switch object.ObjectType(strings.TrimSpace(raw)) {
-	case object.TypeBlob, object.TypeTree, object.TypeCommit, object.TypeEntity, object.TypeEntityList:
+	case object.TypeBlob, object.TypeTag, object.TypeTree, object.TypeCommit, object.TypeEntity, object.TypeEntityList:
 		return object.ObjectType(strings.TrimSpace(raw)), nil
 	default:
 		return "", fmt.Errorf("unsupported object type %q", raw)
@@ -552,6 +552,15 @@ func validatePushedObject(objType object.ObjectType, data []byte, known map[obje
 	case object.TypeBlob:
 		_, err := object.UnmarshalBlob(data)
 		return err
+	case object.TypeTag:
+		tag, err := object.UnmarshalTag(data)
+		if err != nil {
+			return err
+		}
+		if err := requireRef(tag.TargetHash, object.TypeCommit, object.TypeTree, object.TypeBlob, object.TypeTag); err != nil {
+			return fmt.Errorf("tag target: %w", err)
+		}
+		return nil
 	case object.TypeEntity:
 		_, err := object.UnmarshalEntity(data)
 		return err
@@ -706,6 +715,14 @@ func WalkObjects(store *object.Store, root object.Hash, has func(object.Hash) bo
 				if err := walk(p); err != nil {
 					return err
 				}
+			}
+		case object.TypeTag:
+			tag, err := store.ReadTag(h)
+			if err != nil {
+				return err
+			}
+			if err := walk(tag.TargetHash); err != nil {
+				return err
 			}
 		case object.TypeTree:
 			tree, err := store.ReadTree(h)

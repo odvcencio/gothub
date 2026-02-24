@@ -101,6 +101,49 @@ func TestPushObjectsRejectsProvidedHashMismatch(t *testing.T) {
 	}
 }
 
+func TestPushObjectsRejectsTagWithMissingTarget(t *testing.T) {
+	store, err := gotstore.Open(filepath.Join(t.TempDir(), "repo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	h := NewHandler(func(owner, repo string) (*gotstore.RepoStore, error) { return store, nil }, nil, nil)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	targetHash := object.Hash(strings.Repeat("a", 64))
+	tagData := object.MarshalTag(&object.TagObj{
+		TargetHash: targetHash,
+		Data: []byte("object " + string(targetHash) + "\n" +
+			"type commit\n" +
+			"tag v1.0.0\n\nrelease\n"),
+	})
+	tagHash := object.HashObject(object.TypeTag, tagData)
+
+	var body bytes.Buffer
+	if err := json.NewEncoder(&body).Encode(map[string]any{
+		"type": "tag",
+		"data": tagData,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/got/alice/repo/objects", &body)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for tag with missing target, got %d", resp.StatusCode)
+	}
+	if store.Objects.Has(tagHash) {
+		t.Fatalf("invalid tag object should not be persisted")
+	}
+}
+
 func TestUpdateRefsExtractsEntitiesForCommit(t *testing.T) {
 	store, err := gotstore.Open(filepath.Join(t.TempDir(), "repo"))
 	if err != nil {
@@ -224,6 +267,52 @@ func TestWalkObjectsIncludesEntitiesFromEntityList(t *testing.T) {
 	}
 	if !containsHash(all, entityHash) {
 		t.Fatalf("expected walk to include entity object %s", entityHash)
+	}
+}
+
+func TestWalkObjectsTraversesTagTarget(t *testing.T) {
+	store, err := gotstore.Open(filepath.Join(t.TempDir(), "repo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	blobHash, err := store.Objects.WriteBlob(&object.Blob{Data: []byte("hello\n")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	treeHash, err := store.Objects.WriteTree(&object.TreeObj{
+		Entries: []object.TreeEntry{{Name: "README.md", BlobHash: blobHash}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitHash, err := store.Objects.WriteCommit(&object.CommitObj{
+		TreeHash:  treeHash,
+		Author:    "Alice <alice@example.com>",
+		Timestamp: 1700000000,
+		Message:   "init",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tagHash, err := store.Objects.WriteTag(&object.TagObj{
+		TargetHash: commitHash,
+		Data: []byte("object " + string(commitHash) + "\n" +
+			"type commit\n" +
+			"tag v1.0.0\n\nrelease\n"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	objs, err := WalkObjects(store.Objects, tagHash, func(object.Hash) bool { return false })
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []object.Hash{tagHash, commitHash, treeHash, blobHash} {
+		if !containsHash(objs, want) {
+			t.Fatalf("expected walk to include %s", want)
+		}
 	}
 }
 

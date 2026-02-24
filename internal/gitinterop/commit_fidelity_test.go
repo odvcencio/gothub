@@ -2,11 +2,16 @@ package gitinterop
 
 import (
 	"bytes"
+	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/odvcencio/got/pkg/object"
+	"github.com/odvcencio/gothub/internal/database"
+	"github.com/odvcencio/gothub/internal/gotstore"
+	"github.com/odvcencio/gothub/internal/models"
 )
 
 func TestParseGitCommitPreservesAuthorAndCommitterMetadata(t *testing.T) {
@@ -66,5 +71,106 @@ func TestGotToGitCommitUsesCommitterMetadata(t *testing.T) {
 	}
 	if !bytes.Contains(data, []byte("committer Bob <bob@example.com> 1700000100 -0700\n")) {
 		t.Fatalf("expected committer line with metadata, got %q", string(data))
+	}
+}
+
+func TestParseGitTagRewritesObjectHeaderToGotHash(t *testing.T) {
+	gitTargetHash := strings.Repeat("1", 40)
+	gotTargetHash := strings.Repeat("a", 64)
+
+	raw := []byte("object " + gitTargetHash + "\n" +
+		"type commit\n" +
+		"tag v1.0.0\n" +
+		"tagger Alice <alice@example.com> 1700000000 +0000\n\n" +
+		"release\n")
+
+	tag, err := parseGitTag(raw, func(gitHash string) (string, error) {
+		if gitHash == gitTargetHash {
+			return gotTargetHash, nil
+		}
+		return "", fmt.Errorf("missing mapping for %s", gitHash)
+	})
+	if err != nil {
+		t.Fatalf("parseGitTag: %v", err)
+	}
+	if tag.TargetHash != object.Hash(gotTargetHash) {
+		t.Fatalf("unexpected target hash: got %q want %q", tag.TargetHash, gotTargetHash)
+	}
+	if !bytes.Contains(tag.Data, []byte("object "+gotTargetHash+"\n")) {
+		t.Fatalf("expected rewritten object header, got %q", string(tag.Data))
+	}
+	if bytes.Contains(tag.Data, []byte("object "+gitTargetHash+"\n")) {
+		t.Fatalf("expected git hash to be rewritten, got %q", string(tag.Data))
+	}
+}
+
+func TestConvertGotToGitTagRestoresObjectHeader(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	db, err := database.OpenSQLite(filepath.Join(tmpDir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	user := &models.User{Username: "alice", Email: "alice@example.com", PasswordHash: "x"}
+	if err := db.CreateUser(ctx, user); err != nil {
+		t.Fatal(err)
+	}
+	repo := &models.Repository{
+		OwnerUserID:   &user.ID,
+		Name:          "repo",
+		DefaultBranch: "main",
+		StoragePath:   filepath.Join(tmpDir, "repo"),
+	}
+	if err := db.CreateRepository(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := gotstore.Open(repo.StoragePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	gitTargetHash := strings.Repeat("1", 40)
+	gotTargetHash := strings.Repeat("a", 64)
+	if err := db.SetHashMapping(ctx, &models.HashMapping{
+		RepoID:     repo.ID,
+		GitHash:    gitTargetHash,
+		GotHash:    gotTargetHash,
+		ObjectType: "commit",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	tagPayload := object.MarshalTag(&object.TagObj{
+		TargetHash: object.Hash(gotTargetHash),
+		Data: []byte("object " + gotTargetHash + "\n" +
+			"type commit\n" +
+			"tag v1.0.0\n\nrelease\n"),
+	})
+	tagHash, err := store.Objects.WriteTag(&object.TagObj{
+		TargetHash: object.Hash(gotTargetHash),
+		Data: []byte("object " + gotTargetHash + "\n" +
+			"type commit\n" +
+			"tag v1.0.0\n\nrelease\n"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	converted, err := convertGotToGitData(tagHash, object.TypeTag, tagPayload, store.Objects, ctx, db, repo.ID)
+	if err != nil {
+		t.Fatalf("convertGotToGitData: %v", err)
+	}
+	if !bytes.Contains(converted, []byte("object "+gitTargetHash+"\n")) {
+		t.Fatalf("expected tag object header to use git hash, got %q", string(converted))
+	}
+	if bytes.Contains(converted, []byte("object "+gotTargetHash+"\n")) {
+		t.Fatalf("expected got hash to be rewritten, got %q", string(converted))
 	}
 }

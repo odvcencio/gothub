@@ -254,7 +254,7 @@ func (h *SmartHTTPHandler) handleReceivePack(w http.ResponseWriter, r *http.Requ
 		}
 
 		// Convert git objects to Got format.
-		// Blobs can be written immediately; trees/commits may depend on hash mappings.
+		// Blobs can be written immediately; trees/commits/tags may depend on hash mappings.
 		var deferred []PackfileObject
 		for _, obj := range objects {
 			gitHash := GitHash(gitHashRaw(obj.Type, obj.Data))
@@ -270,7 +270,7 @@ func (h *SmartHTTPHandler) handleReceivePack(w http.ResponseWriter, r *http.Requ
 				pendingMappings = append(pendingMappings, models.HashMapping{
 					RepoID: repoID, GotHash: string(gotHash), GitHash: string(gitHash), ObjectType: "blob",
 				})
-			case OBJ_TREE, OBJ_COMMIT:
+			case OBJ_TREE, OBJ_COMMIT, OBJ_TAG:
 				deferred = append(deferred, obj)
 			}
 		}
@@ -328,6 +328,28 @@ func (h *SmartHTTPHandler) handleReceivePack(w http.ResponseWriter, r *http.Requ
 					knownGotByGit[string(gitHash)] = string(gotHash)
 					pendingMappings = append(pendingMappings, models.HashMapping{
 						RepoID: repoID, GotHash: string(gotHash), GitHash: string(gitHash), ObjectType: "commit",
+					})
+					progress = true
+				case OBJ_TAG:
+					gotTag, err := parseGitTag(obj.Data, func(gitHash string) (string, error) {
+						return resolveGotHash(gitHash, "")
+					})
+					if err != nil {
+						if errors.Is(err, sql.ErrNoRows) {
+							nextDeferred = append(nextDeferred, obj)
+							continue
+						}
+						h.sendReceivePackResult(w, fmt.Sprintf("unpack error: parse tag: %v", err), nil, nil, useSideband)
+						return
+					}
+					gotHash, err := store.Objects.WriteTag(gotTag)
+					if err != nil {
+						h.sendReceivePackResult(w, fmt.Sprintf("unpack error: write tag: %v", err), nil, nil, useSideband)
+						return
+					}
+					knownGotByGit[string(gitHash)] = string(gotHash)
+					pendingMappings = append(pendingMappings, models.HashMapping{
+						RepoID: repoID, GotHash: string(gotHash), GitHash: string(gitHash), ObjectType: "tag",
 					})
 					progress = true
 				}
@@ -857,6 +879,27 @@ func parseGitCommit(data []byte, resolveGotHash func(gitHash string) (string, er
 	return c, nil
 }
 
+func parseGitTag(data []byte, resolveGotHash func(gitHash string) (string, error)) (*object.TagObj, error) {
+	lines := strings.Split(string(data), "\n")
+	for i, line := range lines {
+		if !strings.HasPrefix(line, "object ") {
+			continue
+		}
+		gitHash := strings.TrimSpace(strings.TrimPrefix(line, "object "))
+		gotHash, err := resolveGotHash(gitHash)
+		if err != nil {
+			return nil, fmt.Errorf("missing tag target mapping %s: %w", gitHash, err)
+		}
+		lines[i] = "object " + gotHash
+		rewritten := strings.Join(lines, "\n")
+		return &object.TagObj{
+			TargetHash: object.Hash(gotHash),
+			Data:       []byte(rewritten),
+		}, nil
+	}
+	return nil, fmt.Errorf("tag is missing object header")
+}
+
 func parseGitIdentityLine(raw string) (identity string, timestamp int64, timezone string) {
 	raw = strings.TrimSpace(raw)
 	timezone = "+0000"
@@ -916,6 +959,14 @@ func walkGotObjects(store *object.Store, root object.Hash, has func(object.Hash)
 				if err := walk(p); err != nil {
 					return err
 				}
+			}
+		case object.TypeTag:
+			tag, err := store.ReadTag(h)
+			if err != nil {
+				return err
+			}
+			if err := walk(tag.TargetHash); err != nil {
+				return err
 			}
 		case object.TypeTree:
 			tree, err := store.ReadTree(h)
@@ -978,9 +1029,28 @@ func convertGotToGitData(gotHash object.Hash, objType object.ObjectType, data []
 		modeMap, _ := db.GetGitTreeEntryModes(ctx, repoID, string(gotHash))
 		_, gitData := GotToGitTree(tree, entryHashes, modeMap)
 		return gitData, nil
+	case object.TypeTag:
+		tag, err := object.UnmarshalTag(data)
+		if err != nil {
+			return nil, err
+		}
+		return gotTagDataToGit(tag.Data, ctx, db, repoID), nil
 	default:
 		return data, nil
 	}
+}
+
+func gotTagDataToGit(tagData []byte, ctx context.Context, db database.DB, repoID int64) []byte {
+	lines := strings.Split(string(tagData), "\n")
+	for i, line := range lines {
+		if !strings.HasPrefix(line, "object ") {
+			continue
+		}
+		gotHash := strings.TrimSpace(strings.TrimPrefix(line, "object "))
+		lines[i] = "object " + getGitHash(ctx, db, repoID, gotHash)
+		break
+	}
+	return []byte(strings.Join(lines, "\n"))
 }
 
 func getGitHash(ctx context.Context, db database.DB, repoID int64, gotHash string) string {
@@ -999,6 +1069,8 @@ func gotTypeToPackType(t object.ObjectType) int {
 		return OBJ_TREE
 	case object.TypeBlob:
 		return OBJ_BLOB
+	case object.TypeTag:
+		return OBJ_TAG
 	default:
 		return OBJ_BLOB
 	}
