@@ -6,6 +6,7 @@ import {
   verifyMagicLink,
   beginWebAuthnLogin,
   finishWebAuthnLogin,
+  getAuthCapabilities,
   setToken,
   getToken,
   listUserRepos,
@@ -27,11 +28,18 @@ function AuthForm() {
   const [password, setPassword] = useState('');
   const [magicToken, setMagicToken] = useState('');
   const [magicSent, setMagicSent] = useState(false);
+  const [passwordAuthEnabled, setPasswordAuthEnabled] = useState(false);
   const [info, setInfo] = useState('');
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const sessionExpired = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('session') === 'expired';
   const passkeysAvailable = browserSupportsPasskeys();
+
+  useEffect(() => {
+    getAuthCapabilities()
+      .then((caps) => setPasswordAuthEnabled(!!caps.password_auth_enabled))
+      .catch(() => setPasswordAuthEnabled(false));
+  }, []);
 
   const completeAuth = (tokenValue: string) => {
     setToken(tokenValue);
@@ -151,27 +159,33 @@ function AuthForm() {
             )}
           </div>
 
-          <details style={{ borderTop: '1px solid #30363d', paddingTop: '14px' }}>
-            <summary style={{ color: '#8b949e', cursor: 'pointer', fontSize: '13px' }}>Legacy password sign-in</summary>
-            <form onSubmit={submitLegacy} style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '10px' }}>
-              <input value={username} onInput={(e: any) => setUsername(e.target.value)} placeholder="Username" style={inputStyle} />
-              <input value={password} onInput={(e: any) => setPassword(e.target.value)} placeholder="Password" type="password" style={inputStyle} />
-              <button type="submit" disabled={submitting || !username || !password} style={{ ...secondaryButtonStyle, opacity: submitting || !username || !password ? 0.6 : 1 }}>
-                Sign in with password
-              </button>
-            </form>
-          </details>
+          {passwordAuthEnabled && (
+            <details style={{ borderTop: '1px solid #30363d', paddingTop: '14px' }}>
+              <summary style={{ color: '#8b949e', cursor: 'pointer', fontSize: '13px' }}>Legacy password sign-in</summary>
+              <form onSubmit={submitLegacy} style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '10px' }}>
+                <input value={username} onInput={(e: any) => setUsername(e.target.value)} placeholder="Username" style={inputStyle} />
+                <input value={password} onInput={(e: any) => setPassword(e.target.value)} placeholder="Password" type="password" style={inputStyle} />
+                <button type="submit" disabled={submitting || !username || !password} style={{ ...secondaryButtonStyle, opacity: submitting || !username || !password ? 0.6 : 1 }}>
+                  Sign in with password
+                </button>
+              </form>
+            </details>
+          )}
         </div>
       ) : (
         <form onSubmit={submitLegacy} style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
           <input value={username} onInput={(e: any) => setUsername(e.target.value)} placeholder="Username" style={inputStyle} />
           <input value={email} onInput={(e: any) => setEmail(e.target.value)} placeholder="Email" type="email" style={inputStyle} />
-          <input value={password} onInput={(e: any) => setPassword(e.target.value)} placeholder="Password (optional)" type="password" style={inputStyle} />
-          <button type="submit" disabled={submitting || !username || !email} style={{ ...primaryButtonStyle, opacity: submitting || !username || !email ? 0.6 : 1 }}>
+          {passwordAuthEnabled && (
+            <input value={password} onInput={(e: any) => setPassword(e.target.value)} placeholder="Password (optional)" type="password" style={inputStyle} />
+          )}
+          <button type="submit" disabled={submitting || !username || !email || (!passwordAuthEnabled && !!password)} style={{ ...primaryButtonStyle, opacity: submitting || !username || !email ? 0.6 : 1 }}>
             Create account
           </button>
           <p style={{ color: '#8b949e', margin: 0, fontSize: '12px' }}>
-            Leave password blank for a passwordless account, then add a passkey in Settings.
+            {passwordAuthEnabled
+              ? 'Leave password blank for a passwordless account, then add a passkey in Settings.'
+              : 'Password auth is disabled on this instance. Accounts are passwordless by default.'}
           </p>
         </form>
       )}

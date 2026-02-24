@@ -39,7 +39,11 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	hash := ""
-	if req.Password == "" {
+	if !s.passwordAuth && req.Password != "" {
+		jsonError(w, "password registration is disabled", http.StatusForbidden)
+		return
+	}
+	if req.Password == "" || !s.passwordAuth {
 		// Passwordless accounts keep an unusable password hash so legacy password
 		// login remains explicitly disabled for this user.
 		random := make([]byte, 32)
@@ -82,6 +86,10 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if !s.passwordAuth {
+		jsonError(w, "password login is disabled; use passkey, magic link, or SSH auth", http.StatusForbidden)
+		return
+	}
 	var req loginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, "invalid request body", http.StatusBadRequest)
@@ -128,6 +136,10 @@ func (s *Server) handleRefreshToken(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
+	if !s.passwordAuth {
+		jsonError(w, "password auth is disabled", http.StatusForbidden)
+		return
+	}
 	claims := auth.GetClaims(r.Context())
 	var req struct {
 		CurrentPassword string `json:"current_password"`

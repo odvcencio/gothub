@@ -54,6 +54,13 @@ export interface AuthResponse {
   user: APIUser;
 }
 
+export interface AuthCapabilities {
+  password_auth_enabled: boolean;
+  magic_link_enabled: boolean;
+  ssh_auth_enabled: boolean;
+  passkey_enabled: boolean;
+}
+
 export interface Notification {
   id: number;
   read_at?: string;
@@ -311,6 +318,8 @@ export const beginWebAuthnLogin = (username: string) =>
   request<{ session_id: string; options: Record<string, unknown> }>('POST', '/auth/webauthn/login/begin', { username });
 export const finishWebAuthnLogin = (sessionId: string, credential: Record<string, unknown>) =>
   request<AuthResponse>('POST', '/auth/webauthn/login/finish', { session_id: sessionId, credential });
+export const getAuthCapabilities = () =>
+  request<AuthCapabilities>('GET', '/auth/capabilities');
 export const refreshToken = () =>
   request<AuthResponse>('POST', '/auth/refresh');
 export const changePassword = (currentPassword: string, newPassword: string) =>

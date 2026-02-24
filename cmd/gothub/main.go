@@ -70,7 +70,9 @@ func cmdServe(args []string) {
 	}
 	authSvc := auth.NewService(cfg.Auth.JWTSecret, dur)
 	repoSvc := service.NewRepoService(db, cfg.Storage.Path)
-	server := api.NewServer(db, authSvc, repoSvc)
+	server := api.NewServerWithOptions(db, authSvc, repoSvc, api.ServerOptions{
+		EnablePasswordAuth: cfg.Auth.EnablePasswordAuth,
+	})
 
 	httpServer := &http.Server{
 		Addr:         cfg.Addr(),

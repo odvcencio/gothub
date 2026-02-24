@@ -32,11 +32,20 @@ type Server struct {
 	lineageSvc   *service.EntityLineageService
 	rateLimiter  *requestRateLimiter
 	passkey      *webauthn.WebAuthn
+	passwordAuth bool
 	mux          *http.ServeMux
 	handler      http.Handler
 }
 
+type ServerOptions struct {
+	EnablePasswordAuth bool
+}
+
 func NewServer(db database.DB, authSvc *auth.Service, repoSvc *service.RepoService) *Server {
+	return NewServerWithOptions(db, authSvc, repoSvc, ServerOptions{})
+}
+
+func NewServerWithOptions(db database.DB, authSvc *auth.Service, repoSvc *service.RepoService, opts ServerOptions) *Server {
 	browseSvc := service.NewBrowseService(repoSvc)
 	lineageSvc := service.NewEntityLineageService(db)
 	diffSvc := service.NewDiffService(repoSvc, browseSvc, db, lineageSvc)
@@ -61,6 +70,7 @@ func NewServer(db database.DB, authSvc *auth.Service, repoSvc *service.RepoServi
 		lineageSvc:   lineageSvc,
 		rateLimiter:  newRequestRateLimiter(),
 		passkey:      initWebAuthn(),
+		passwordAuth: opts.EnablePasswordAuth,
 		mux:          http.NewServeMux(),
 	}
 	s.routes()
@@ -97,6 +107,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/auth/webauthn/register/finish", s.requireAuth(s.handleFinishWebAuthnRegistration))
 	s.mux.HandleFunc("POST /api/v1/auth/webauthn/login/begin", s.handleBeginWebAuthnLogin)
 	s.mux.HandleFunc("POST /api/v1/auth/webauthn/login/finish", s.handleFinishWebAuthnLogin)
+	s.mux.HandleFunc("GET /api/v1/auth/capabilities", s.handleAuthCapabilities)
 	s.mux.HandleFunc("POST /api/v1/auth/refresh", s.requireAuth(s.handleRefreshToken))
 	s.mux.HandleFunc("POST /api/v1/auth/change-password", s.requireAuth(s.handleChangePassword))
 

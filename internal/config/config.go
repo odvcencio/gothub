@@ -30,8 +30,9 @@ type StorageConfig struct {
 }
 
 type AuthConfig struct {
-	JWTSecret     string `yaml:"jwt_secret"`
-	TokenDuration string `yaml:"token_duration"` // e.g. "24h"
+	JWTSecret          string `yaml:"jwt_secret"`
+	TokenDuration      string `yaml:"token_duration"` // e.g. "24h"
+	EnablePasswordAuth bool   `yaml:"enable_password_auth"`
 }
 
 func (c *Config) Addr() string {
@@ -52,8 +53,9 @@ func Default() *Config {
 			Path: "data/repos",
 		},
 		Auth: AuthConfig{
-			JWTSecret:     "change-me-in-production",
-			TokenDuration: "24h",
+			JWTSecret:          "change-me-in-production",
+			TokenDuration:      "24h",
+			EnablePasswordAuth: false,
 		},
 	}
 }
@@ -95,5 +97,10 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("GOTHUB_JWT_SECRET"); v != "" {
 		cfg.Auth.JWTSecret = v
+	}
+	if v := os.Getenv("GOTHUB_ENABLE_PASSWORD_AUTH"); v != "" {
+		if enabled, err := strconv.ParseBool(v); err == nil {
+			cfg.Auth.EnablePasswordAuth = enabled
+		}
 	}
 }

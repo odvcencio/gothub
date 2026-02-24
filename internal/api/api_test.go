@@ -46,7 +46,9 @@ func setupTestServer(t *testing.T) (*api.Server, database.DB) {
 
 	authSvc := auth.NewService("test-secret", 24*time.Hour)
 	repoSvc := service.NewRepoService(db, storagePath)
-	server := api.NewServer(db, authSvc, repoSvc)
+	server := api.NewServerWithOptions(db, authSvc, repoSvc, api.ServerOptions{
+		EnablePasswordAuth: true,
+	})
 	return server, db
 }
 
@@ -110,6 +112,72 @@ func TestRegisterAndLogin(t *testing.T) {
 		t.Fatalf("get user: expected 200, got %d", resp.StatusCode)
 	}
 	resp.Body.Close()
+}
+
+func TestPasswordAuthDisabledByDefault(t *testing.T) {
+	tmpDir := t.TempDir()
+	db, err := database.OpenSQLite(tmpDir + "/test.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Migrate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	authSvc := auth.NewService("test-secret", 24*time.Hour)
+	repoSvc := service.NewRepoService(db, tmpDir+"/repos")
+	server := api.NewServer(db, authSvc, repoSvc)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	// Password registration should be rejected when password auth is disabled.
+	resp, err := http.Post(ts.URL+"/api/v1/auth/register", "application/json", bytes.NewBufferString(`{"username":"pw","email":"pw@example.com","password":"secret123"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("password register with auth disabled: expected 403, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Passwordless registration remains available.
+	resp, err = http.Post(ts.URL+"/api/v1/auth/register", "application/json", bytes.NewBufferString(`{"username":"passless","email":"passless@example.com"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("passwordless register with auth disabled: expected 201, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Password login endpoint should be disabled.
+	resp, err = http.Post(ts.URL+"/api/v1/auth/login", "application/json", bytes.NewBufferString(`{"username":"passless","password":"irrelevant"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("password login with auth disabled: expected 403, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	resp, err = http.Get(ts.URL + "/api/v1/auth/capabilities")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("auth capabilities: expected 200, got %d", resp.StatusCode)
+	}
+	var caps struct {
+		PasswordAuthEnabled bool `json:"password_auth_enabled"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&caps); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if caps.PasswordAuthEnabled {
+		t.Fatal("expected password_auth_enabled=false by default")
+	}
 }
 
 func TestMagicLinkAuthFlow(t *testing.T) {

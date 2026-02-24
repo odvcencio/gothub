@@ -61,6 +61,9 @@ func (s *Server) authenticateProtocolUser(r *http.Request) (*models.User, bool, 
 	if !ok {
 		return nil, false, http.StatusOK, nil
 	}
+	if !s.passwordAuth {
+		return nil, false, http.StatusUnauthorized, fmt.Errorf("basic auth is disabled")
+	}
 
 	u, err := s.db.GetUserByUsername(r.Context(), username)
 	if err != nil {

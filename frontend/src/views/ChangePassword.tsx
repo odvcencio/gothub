@@ -1,5 +1,5 @@
-import { useState } from 'preact/hooks';
-import { changePassword, getToken } from '../api/client';
+import { useEffect, useState } from 'preact/hooks';
+import { changePassword, getAuthCapabilities, getToken } from '../api/client';
 
 interface Props {
   path?: string;
@@ -7,6 +7,7 @@ interface Props {
 
 export function ChangePasswordView({ path }: Props) {
   const loggedIn = !!getToken();
+  const [passwordAuthEnabled, setPasswordAuthEnabled] = useState<boolean | null>(null);
 
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -15,10 +16,27 @@ export function ChangePasswordView({ path }: Props) {
   const [success, setSuccess] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
+  useEffect(() => {
+    if (!loggedIn) return;
+    getAuthCapabilities()
+      .then((caps) => setPasswordAuthEnabled(!!caps.password_auth_enabled))
+      .catch(() => setPasswordAuthEnabled(false));
+  }, [loggedIn]);
+
   if (!loggedIn) {
     return (
       <div style={{ maxWidth: '600px', margin: '60px auto', textAlign: 'center' }}>
         <p style={{ color: '#8b949e', fontSize: '16px' }}>Sign in to change your password</p>
+      </div>
+    );
+  }
+
+  if (passwordAuthEnabled === false) {
+    return (
+      <div style={{ maxWidth: '600px', margin: '60px auto', textAlign: 'center' }}>
+        <p style={{ color: '#8b949e', fontSize: '16px' }}>
+          Password auth is disabled on this instance.
+        </p>
       </div>
     );
   }
