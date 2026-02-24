@@ -10,10 +10,11 @@ export function CodeViewer({ filename, source }: Props) {
   const [ranges, setRanges] = useState<HighlightRange[]>([]);
   const [entities, setEntities] = useState<EntityInfo[]>([]);
   const [error, setError] = useState<string>('');
+  const [entityError, setEntityError] = useState<string>('');
 
   useEffect(() => {
     highlight(filename, source).then(setRanges).catch(e => setError(e.message));
-    extractEntities(filename, source).then(setEntities).catch(() => {});
+    extractEntities(filename, source).then(setEntities).catch(e => setEntityError(e.message || 'failed to extract entities'));
   }, [filename, source]);
 
   const lines = source.split('\n');
@@ -27,10 +28,11 @@ export function CodeViewer({ filename, source }: Props) {
           </code>
         </pre>
       </div>
-      {entities.length > 0 && (
+      {(entities.length > 0 || entityError) && (
         <div style={{ width: '250px', flexShrink: 0 }}>
           <div style={{ border: '1px solid #30363d', borderRadius: '6px', padding: '12px' }}>
             <h3 style={{ fontSize: '14px', marginBottom: '8px', color: '#f0f6fc' }}>Entities</h3>
+            {entityError && <div style={{ color: '#d29922', fontSize: '12px', marginBottom: '8px' }}>{entityError}</div>}
             {entities.filter(e => e.kind === 'declaration').map(e => (
               <div key={e.key} style={{ padding: '4px 0', fontSize: '13px', fontFamily: 'monospace' }}>
                 <span style={{ color: '#8b949e' }}>{e.decl_kind} </span>

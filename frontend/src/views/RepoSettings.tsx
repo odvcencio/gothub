@@ -124,6 +124,10 @@ export function RepoSettingsView({ owner, repo }: Props) {
     getRepo(owner, repo).then(setRepoInfo).catch(e => setError(e.message));
   }, [owner, repo]);
 
+  if (!owner || !repo) {
+    return <div style={{ color: colors.red, padding: '20px' }}>Missing repository context.</div>;
+  }
+
   if (!getToken()) {
     return <div style={{ color: colors.red, padding: '20px' }}>You must be logged in to access repository settings.</div>;
   }
@@ -152,10 +156,10 @@ export function RepoSettingsView({ owner, repo }: Props) {
         ))}
       </div>
 
-      {activeTab === 'general' && <GeneralTab owner={owner!} repo={repo!} repoInfo={repoInfo} />}
-      {activeTab === 'collaborators' && <CollaboratorsTab owner={owner!} repo={repo!} />}
-      {activeTab === 'webhooks' && <WebhooksTab owner={owner!} repo={repo!} />}
-      {activeTab === 'branch-protection' && <BranchProtectionTab owner={owner!} repo={repo!} />}
+      {activeTab === 'general' && <GeneralTab owner={owner} repo={repo} repoInfo={repoInfo} />}
+      {activeTab === 'collaborators' && <CollaboratorsTab owner={owner} repo={repo} />}
+      {activeTab === 'webhooks' && <WebhooksTab owner={owner} repo={repo} />}
+      {activeTab === 'branch-protection' && <BranchProtectionTab owner={owner} repo={repo} />}
     </div>
   );
 }
@@ -649,7 +653,7 @@ function BranchProtectionTab({ owner, repo }: { owner: string; repo: string }) {
   const [protectionLoaded, setProtectionLoaded] = useState(false);
 
   useEffect(() => {
-    listBranches(owner, repo).then(b => setBranches(b || [])).catch(() => {});
+    listBranches(owner, repo).then(b => setBranches(b || [])).catch((e: any) => setError(e.message || 'failed to list branches'));
   }, [owner, repo]);
 
   const loadProtection = async (branch: string) => {

@@ -9,7 +9,7 @@ export function Header() {
 
   useEffect(() => {
     if (!loggedIn) return;
-    getUnreadNotificationsCount().then(r => setUnread(r.count)).catch(() => {});
+    getUnreadNotificationsCount().then(r => setUnread(r.count)).catch(() => setUnread(0));
   }, [loggedIn]);
 
   return (

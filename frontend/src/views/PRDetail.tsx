@@ -21,36 +21,41 @@ export function PRDetailView({ owner, repo, number }: Props) {
   const [reviews, setReviews] = useState<any[]>([]);
   const [merging, setMerging] = useState(false);
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
 
   const prNum = Number(number);
 
   useEffect(() => {
     if (!owner || !repo || !prNum) return;
     getPR(owner, repo, prNum).then(setPr).catch(e => setError(e.message));
-    listPRComments(owner, repo, prNum).then(setComments).catch(() => {});
-    listPRReviews(owner, repo, prNum).then(setReviews).catch(() => {});
+    listPRComments(owner, repo, prNum).then(setComments).catch(e => setNotice(e.message || 'failed to load comments'));
+    listPRReviews(owner, repo, prNum).then(setReviews).catch(e => setNotice(e.message || 'failed to load reviews'));
   }, [owner, repo, prNum]);
 
   useEffect(() => {
     if (!owner || !repo || !prNum) return;
     if (tab === 'files' && !diff) {
-      getPRDiff(owner, repo, prNum).then(setDiff).catch(() => {});
+      getPRDiff(owner, repo, prNum).then(setDiff).catch(e => setNotice(e.message || 'failed to load diff'));
     }
     if (tab === 'merge' && !mergePreview) {
-      getMergePreview(owner, repo, prNum).then(setMergePreview).catch(() => {});
+      getMergePreview(owner, repo, prNum).then(setMergePreview).catch(e => setNotice(e.message || 'failed to load merge preview'));
     }
     if (tab === 'merge') {
-      getMergeGate(owner, repo, prNum).then(setMergeGate).catch(() => {});
-      listPRChecks(owner, repo, prNum).then(setChecks).catch(() => {});
+      getMergeGate(owner, repo, prNum).then(setMergeGate).catch(e => setNotice(e.message || 'failed to load merge gate'));
+      listPRChecks(owner, repo, prNum).then(setChecks).catch(e => setNotice(e.message || 'failed to load checks'));
     }
   }, [tab, owner, repo, prNum, reviews.length]);
 
   const handleMerge = async () => {
+    if (!owner || !repo || !prNum) {
+      setError('missing repository context');
+      return;
+    }
     setMerging(true);
     try {
-      await mergePR(owner!, repo!, prNum);
-      getPR(owner!, repo!, prNum).then(setPr);
-      getMergeGate(owner!, repo!, prNum).then(setMergeGate).catch(() => {});
+      await mergePR(owner, repo, prNum);
+      getPR(owner, repo, prNum).then(setPr).catch(e => setNotice(e.message || 'failed to refresh pull request'));
+      getMergeGate(owner, repo, prNum).then(setMergeGate).catch(e => setNotice(e.message || 'failed to refresh merge gate'));
     } catch (e: any) {
       setError(e.message);
     }
@@ -96,11 +101,28 @@ export function PRDetailView({ owner, repo, number }: Props) {
         ))}
       </div>
 
+      {notice && (
+        <div style={{ color: '#d29922', marginBottom: '16px', padding: '10px 12px', background: '#2b230f', border: '1px solid #d29922', borderRadius: '6px', fontSize: '13px' }}>
+          {notice}
+        </div>
+      )}
+
       {tab === 'conversation' && (
-        <ConversationTab pr={pr} comments={comments} reviews={reviews}
-          owner={owner!} repo={repo!} prNum={prNum}
-          onCommentAdded={(c: any) => setComments([...comments, c])}
-          onReviewAdded={(r: any) => setReviews([...reviews, r])} />
+        owner && repo ? (
+          <ConversationTab
+            pr={pr}
+            comments={comments}
+            reviews={reviews}
+            owner={owner}
+            repo={repo}
+            prNum={prNum}
+            onCommentAdded={(c: any) => setComments([...comments, c])}
+            onReviewAdded={(r: any) => setReviews([...reviews, r])}
+            onError={(message: string) => setNotice(message)}
+          />
+        ) : (
+          <div style={{ color: '#f85149' }}>Missing repository context</div>
+        )
       )}
 
       {tab === 'files' && (
@@ -160,9 +182,10 @@ function MergeGatePanel({ gate, checks }: { gate: { allowed: boolean; reasons?: 
   );
 }
 
-function ConversationTab({ pr, comments, reviews, owner, repo, prNum, onCommentAdded, onReviewAdded }: {
+function ConversationTab({ pr, comments, reviews, owner, repo, prNum, onCommentAdded, onReviewAdded, onError }: {
   pr: any; comments: any[]; reviews: any[]; owner: string; repo: string; prNum: number;
   onCommentAdded: (c: any) => void; onReviewAdded: (r: any) => void;
+  onError: (message: string) => void;
 }) {
   const [body, setBody] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -176,7 +199,9 @@ function ConversationTab({ pr, comments, reviews, owner, repo, prNum, onCommentA
       const c = await createPRComment(owner, repo, prNum, { body });
       onCommentAdded(c);
       setBody('');
-    } catch {}
+    } catch (err: any) {
+      onError(err.message || 'failed to submit comment');
+    }
     setSubmitting(false);
   };
 
@@ -186,7 +211,9 @@ function ConversationTab({ pr, comments, reviews, owner, repo, prNum, onCommentA
       const r = await createPRReview(owner, repo, prNum, { state, body: body || undefined });
       onReviewAdded(r);
       setBody('');
-    } catch {}
+    } catch (err: any) {
+      onError(err.message || 'failed to submit review');
+    }
     setSubmitting(false);
   };
 

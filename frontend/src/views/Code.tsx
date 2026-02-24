@@ -40,9 +40,13 @@ export function CodeView({ owner, repo, ref: gitRef, path }: Props) {
     }
   }, [owner, repo, gitRef, path]);
 
+  if (!owner || !repo || !gitRef) {
+    return <div style={{ color: '#f85149', padding: '20px' }}>Missing repository context</div>;
+  }
+
   if (error) return <div style={{ color: '#f85149', padding: '20px' }}>{error}</div>;
 
-  const breadcrumbs = buildBreadcrumbs(owner!, repo!, gitRef!, path);
+  const breadcrumbs = buildBreadcrumbs(owner, repo, gitRef, path);
 
   return (
     <div>
@@ -62,7 +66,7 @@ export function CodeView({ owner, repo, ref: gitRef, path }: Props) {
 
       {isDir ? (
         entries ? (
-          <FileTree entries={entries} owner={owner!} repo={repo!} ref={gitRef!} currentPath={path || ''} />
+          <FileTree entries={entries} owner={owner} repo={repo} ref={gitRef} currentPath={path || ''} />
         ) : (
           <div style={{ color: '#8b949e', padding: '20px' }}>Loading...</div>
         )

@@ -27,8 +27,8 @@ export function OrgDetailView({ org }: Props) {
   useEffect(() => {
     if (!org) return;
     getOrg(org).then(setOrgInfo).catch(e => setError(e.message));
-    listOrgRepos(org).then(setRepos).catch(() => {});
-    listOrgMembers(org).then(setMembers).catch(() => {});
+    listOrgRepos(org).then(setRepos).catch(e => setError(e.message || 'failed to load repositories'));
+    listOrgMembers(org).then(setMembers).catch(e => setError(e.message || 'failed to load members'));
   }, [org]);
 
   const handleAddMember = async (e: Event) => {

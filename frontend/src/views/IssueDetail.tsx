@@ -20,7 +20,7 @@ export function IssueDetailView({ owner, repo, number }: Props) {
   const loadIssue = () => {
     if (!owner || !repo || !issueNumber) return;
     getIssue(owner, repo, issueNumber).then(setIssue).catch((e) => setError(e.message));
-    listIssueComments(owner, repo, issueNumber).then(setComments).catch(() => {});
+    listIssueComments(owner, repo, issueNumber).then(setComments).catch((e) => setError(e.message || 'failed to load comments'));
   };
 
   useEffect(() => {

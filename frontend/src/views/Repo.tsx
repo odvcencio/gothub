@@ -19,18 +19,18 @@ export function RepoView({ owner, repo }: Props) {
   useEffect(() => {
     if (!owner || !repo) return;
     getRepo(owner, repo).then(setRepoInfo).catch(e => setError(e.message));
-    getRepoStars(owner, repo).then(setStars).catch(() => {});
+    getRepoStars(owner, repo).then(setStars).catch(e => setError(e.message || 'failed to load stars'));
   }, [owner, repo]);
 
   useEffect(() => {
-    if (!repoInfo) return;
+    if (!owner || !repo || !repoInfo) return;
     const ref = repoInfo.default_branch || 'main';
-    listTree(owner!, repo!, ref).then(setEntries).catch(() => {});
-  }, [repoInfo]);
+    listTree(owner, repo, ref).then(setEntries).catch(e => setError(e.message || 'failed to load repository tree'));
+  }, [owner, repo, repoInfo]);
 
   useEffect(() => {
     if (!owner || !repo) return;
-    listRepoForks(owner, repo).then(setForks).catch(() => {});
+    listRepoForks(owner, repo).then(setForks).catch(e => setError(e.message || 'failed to load forks'));
   }, [owner, repo]);
 
   if (error) return <div style={{ color: '#f85149', padding: '20px' }}>{error}</div>;
@@ -133,7 +133,9 @@ export function RepoView({ owner, repo }: Props) {
       </div>
 
       {entries.length > 0 ? (
-        <FileTree entries={entries} owner={owner!} repo={repo!} ref={ref} currentPath="" />
+        owner && repo
+          ? <FileTree entries={entries} owner={owner} repo={repo} ref={ref} currentPath="" />
+          : <div style={{ color: '#f85149', padding: '20px' }}>Missing repository context</div>
       ) : (
         <div style={{ border: '1px solid #30363d', borderRadius: '6px', padding: '40px', textAlign: 'center' }}>
           <p style={{ color: '#8b949e', marginBottom: '16px' }}>This repository is empty</p>
