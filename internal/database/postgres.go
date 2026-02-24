@@ -353,6 +353,11 @@ func (p *PostgresDB) scanUser(row *sql.Row) (*models.User, error) {
 	return u, nil
 }
 
+func (p *PostgresDB) UpdateUserPassword(ctx context.Context, userID int64, passwordHash string) error {
+	_, err := p.db.ExecContext(ctx, `UPDATE users SET password_hash = $1 WHERE id = $2`, passwordHash, userID)
+	return err
+}
+
 // --- SSH Keys ---
 
 func (p *PostgresDB) CreateSSHKey(ctx context.Context, k *models.SSHKey) error {

@@ -16,6 +16,7 @@ type DB interface {
 	GetUserByID(ctx context.Context, id int64) (*models.User, error)
 	GetUserByUsername(ctx context.Context, username string) (*models.User, error)
 	GetUserByEmail(ctx context.Context, email string) (*models.User, error)
+	UpdateUserPassword(ctx context.Context, userID int64, passwordHash string) error
 
 	// SSH Keys
 	CreateSSHKey(ctx context.Context, key *models.SSHKey) error

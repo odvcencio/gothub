@@ -34,6 +34,10 @@ export const register = (username: string, email: string, password: string) =>
   request<{ token: string; user: any }>('POST', '/auth/register', { username, email, password });
 export const login = (username: string, password: string) =>
   request<{ token: string; user: any }>('POST', '/auth/login', { username, password });
+export const refreshToken = () =>
+  request<{ token: string; user: any }>('POST', '/auth/refresh');
+export const changePassword = (currentPassword: string, newPassword: string) =>
+  request<{ token: string; user: any }>('POST', '/auth/change-password', { current_password: currentPassword, new_password: newPassword });
 export const getUser = () => request<any>('GET', '/user');
 export const listNotifications = (unread?: boolean, page?: number, perPage?: number) => {
   const query = new URLSearchParams();
@@ -143,6 +147,66 @@ export const pingWebhook = (owner: string, repo: string, id: number) =>
   request<any>('POST', `/repos/${owner}/${repo}/webhooks/${id}/ping`);
 export const redeliverWebhookDelivery = (owner: string, repo: string, id: number, deliveryID: number) =>
   request<any>('POST', `/repos/${owner}/${repo}/webhooks/${id}/deliveries/${deliveryID}/redeliver`);
+
+// SSH Keys
+export const listSSHKeys = () => request<any[]>('GET', '/user/ssh-keys');
+export const createSSHKey = (name: string, publicKey: string) =>
+  request<any>('POST', '/user/ssh-keys', { name, public_key: publicKey });
+export const deleteSSHKey = (id: number) => request<void>('DELETE', `/user/ssh-keys/${id}`);
+
+// Collaborators
+export const listCollaborators = (owner: string, repo: string) =>
+  request<any[]>('GET', `/repos/${owner}/${repo}/collaborators`);
+export const addCollaborator = (owner: string, repo: string, username: string, role: string) =>
+  request<any>('POST', `/repos/${owner}/${repo}/collaborators`, { username, role });
+export const removeCollaborator = (owner: string, repo: string, username: string) =>
+  request<void>('DELETE', `/repos/${owner}/${repo}/collaborators/${username}`);
+
+// Repo management
+export const deleteRepo = (owner: string, repo: string) =>
+  request<void>('DELETE', `/repos/${owner}/${repo}`);
+
+// Organizations
+export const createOrg = (name: string, displayName: string) =>
+  request<any>('POST', '/orgs', { name, display_name: displayName });
+export const getOrg = (org: string) => request<any>('GET', `/orgs/${org}`);
+export const deleteOrg = (org: string) => request<void>('DELETE', `/orgs/${org}`);
+export const listOrgMembers = (org: string) => request<any[]>('GET', `/orgs/${org}/members`);
+export const addOrgMember = (org: string, username: string, role: string) =>
+  request<void>('POST', `/orgs/${org}/members`, { username, role });
+export const removeOrgMember = (org: string, username: string) =>
+  request<void>('DELETE', `/orgs/${org}/members/${username}`);
+export const listOrgRepos = (org: string) => request<any[]>('GET', `/orgs/${org}/repos`);
+export const listUserOrgs = () => request<any[]>('GET', '/user/orgs');
+
+// Code intelligence
+export const searchSymbols = (owner: string, repo: string, ref: string, query?: string) => {
+  const params = new URLSearchParams();
+  if (query) params.set('q', query);
+  const suffix = params.toString();
+  return request<any[]>('GET', `/repos/${owner}/${repo}/symbols/${ref}${suffix ? '?' + suffix : ''}`);
+};
+export const findReferences = (owner: string, repo: string, ref: string, name: string) =>
+  request<any[]>('GET', `/repos/${owner}/${repo}/references/${ref}?name=${encodeURIComponent(name)}`);
+export const getCallGraph = (owner: string, repo: string, ref: string, symbol: string, depth?: number, reverse?: boolean) => {
+  const params = new URLSearchParams({ symbol });
+  if (depth) params.set('depth', String(depth));
+  if (reverse) params.set('reverse', 'true');
+  return request<any>('GET', `/repos/${owner}/${repo}/callgraph/${ref}?${params.toString()}`);
+};
+
+// Entity history
+export const getEntityHistory = (owner: string, repo: string, ref: string, opts: { stableId?: string; name?: string; bodyHash?: string }) => {
+  const params = new URLSearchParams();
+  if (opts.stableId) params.set('stable_id', opts.stableId);
+  if (opts.name) params.set('name', opts.name);
+  if (opts.bodyHash) params.set('body_hash', opts.bodyHash);
+  return request<any[]>('GET', `/repos/${owner}/${repo}/entity-history/${ref}?${params.toString()}`);
+};
+
+// Semver
+export const getSemver = (owner: string, repo: string, spec: string) =>
+  request<any>('GET', `/repos/${owner}/${repo}/semver/${spec}`);
 
 // Issues
 export const createIssue = (owner: string, repo: string, data: any) =>

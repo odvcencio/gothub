@@ -74,11 +74,14 @@ export function RepoView({ owner, repo }: Props) {
         {repoInfo.description && <p style={{ color: '#8b949e', fontSize: '14px' }}>{repoInfo.description}</p>}
       </div>
 
-      <div style={{ display: 'flex', gap: '12px', marginBottom: '20px' }}>
+      <div style={{ display: 'flex', gap: '12px', marginBottom: '20px', flexWrap: 'wrap' }}>
         <a href={`/${owner}/${repo}/tree/${ref}`} style={tabStyle}>Code</a>
         <a href={`/${owner}/${repo}/commits/${ref}`} style={tabStyle}>Commits</a>
         <a href={`/${owner}/${repo}/pulls`} style={tabStyle}>Pull requests</a>
         <a href={`/${owner}/${repo}/issues`} style={tabStyle}>Issues</a>
+        <a href={`/${owner}/${repo}/symbols/${ref}`} style={tabStyle}>Symbols</a>
+        <a href={`/${owner}/${repo}/entity-history/${ref}`} style={tabStyle}>Entity History</a>
+        {loggedIn && <a href={`/${owner}/${repo}/settings`} style={tabStyle}>Settings</a>}
       </div>
 
       {entries.length > 0 ? (

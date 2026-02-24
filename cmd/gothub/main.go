@@ -4,7 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -35,27 +35,33 @@ func main() {
 }
 
 func cmdServe(args []string) {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
+
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	configPath := fs.String("config", "", "path to config file")
 	fs.Parse(args)
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		log.Fatalf("load config: %v", err)
+		slog.Error("load config", "error", err)
+		os.Exit(1)
 	}
 	if err := validateServeConfig(cfg); err != nil {
-		log.Fatalf("invalid config: %v", err)
+		slog.Error("invalid config", "error", err)
+		os.Exit(1)
 	}
 
 	db, err := openDB(cfg)
 	if err != nil {
-		log.Fatalf("open database: %v", err)
+		slog.Error("open database", "error", err)
+		os.Exit(1)
 	}
 	defer db.Close()
 
 	// Auto-migrate on startup
 	if err := db.Migrate(context.Background()); err != nil {
-		log.Fatalf("migrate: %v", err)
+		slog.Error("migrate", "error", err)
+		os.Exit(1)
 	}
 
 	dur, err := time.ParseDuration(cfg.Auth.TokenDuration)
@@ -79,39 +85,45 @@ func cmdServe(args []string) {
 	signal.Notify(done, os.Interrupt)
 
 	go func() {
-		log.Printf("gothub listening on %s", cfg.Addr())
+		slog.Info("gothub listening", "addr", cfg.Addr())
 		if err := httpServer.ListenAndServe(); err != http.ErrServerClosed {
-			log.Fatalf("listen: %v", err)
+			slog.Error("listen", "error", err)
+			os.Exit(1)
 		}
 	}()
 
 	<-done
-	log.Println("shutting down...")
+	slog.Info("shutting down")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	httpServer.Shutdown(ctx)
 }
 
 func cmdMigrate(args []string) {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
+
 	fs := flag.NewFlagSet("migrate", flag.ExitOnError)
 	configPath := fs.String("config", "", "path to config file")
 	fs.Parse(args)
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		log.Fatalf("load config: %v", err)
+		slog.Error("load config", "error", err)
+		os.Exit(1)
 	}
 
 	db, err := openDB(cfg)
 	if err != nil {
-		log.Fatalf("open database: %v", err)
+		slog.Error("open database", "error", err)
+		os.Exit(1)
 	}
 	defer db.Close()
 
 	if err := db.Migrate(context.Background()); err != nil {
-		log.Fatalf("migrate: %v", err)
+		slog.Error("migrate", "error", err)
+		os.Exit(1)
 	}
-	log.Println("migrations complete")
+	slog.Info("migrations complete")
 }
 
 func openDB(cfg *config.Config) (database.DB, error) {

@@ -2,6 +2,7 @@ import { useState, useEffect } from 'preact/hooks';
 import { getPR, getPRDiff, getMergePreview, getMergeGate, mergePR, listPRComments, createPRComment, listPRReviews, createPRReview, listPRChecks, getToken } from '../api/client';
 import { EntityDiff } from '../components/EntityDiff';
 import { MergePreview } from '../components/MergePreview';
+import { ConflictViewer } from '../components/ConflictViewer';
 
 interface Props {
   owner?: string;
@@ -110,7 +111,10 @@ export function PRDetailView({ owner, repo, number }: Props) {
         <div style={{ display: 'grid', gap: '16px' }}>
           <MergeGatePanel gate={mergeGate} checks={checks} />
           {mergePreview
-            ? <MergePreview preview={mergePreview} onMerge={pr.state === 'open' ? handleMerge : undefined} merging={merging} />
+            ? <>
+                <MergePreview preview={mergePreview} onMerge={pr.state === 'open' ? handleMerge : undefined} merging={merging} />
+                <ConflictViewer files={mergePreview.files || []} />
+              </>
             : <div style={{ color: '#8b949e' }}>Loading merge preview...</div>}
         </div>
       )}

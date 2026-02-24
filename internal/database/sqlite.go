@@ -381,6 +381,11 @@ func (s *SQLiteDB) scanUser(row *sql.Row) (*models.User, error) {
 	return u, nil
 }
 
+func (s *SQLiteDB) UpdateUserPassword(ctx context.Context, userID int64, passwordHash string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE users SET password_hash = ? WHERE id = ?`, passwordHash, userID)
+	return err
+}
+
 // --- SSH Keys ---
 
 func (s *SQLiteDB) CreateSSHKey(ctx context.Context, k *models.SSHKey) error {
