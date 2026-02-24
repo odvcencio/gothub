@@ -2701,6 +2701,66 @@ func TestSemverRecommendationEndpoint(t *testing.T) {
 	}
 }
 
+func TestDiffEndpointIncludesSemanticClassificationSummary(t *testing.T) {
+	server, db := setupTestServer(t)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	token := registerAndGetToken(t, ts.URL, "alice")
+	createRepo(t, ts.URL, token, "repo", false)
+	seedSemanticDiffFixture(t, db, "alice", "repo")
+
+	resp, err := http.Get(ts.URL + "/api/v1/repos/alice/repo/diff/main...feature")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("diff endpoint: expected 200, got %d", resp.StatusCode)
+	}
+
+	var diffResp semanticDiffTestResponse
+	if err := json.NewDecoder(resp.Body).Decode(&diffResp); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	assertSemanticDiffSummary(t, diffResp)
+	if diffResp.Semver == nil {
+		t.Fatalf("expected semver recommendation in diff response")
+	}
+	if diffResp.Semver.Bump != "major" {
+		t.Fatalf("expected major semver bump in diff response, got %+v", diffResp.Semver)
+	}
+}
+
+func TestPRDiffEndpointIncludesSemanticClassificationSummary(t *testing.T) {
+	server, db := setupTestServer(t)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	token := registerAndGetToken(t, ts.URL, "alice")
+	createRepo(t, ts.URL, token, "repo", false)
+	seedSemanticDiffFixture(t, db, "alice", "repo")
+
+	prNumber := createPRNumber(t, ts.URL, token, "alice", "repo", "feature", "main")
+
+	resp, err := http.Get(fmt.Sprintf("%s/api/v1/repos/alice/repo/pulls/%d/diff", ts.URL, prNumber))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("pr diff endpoint: expected 200, got %d", resp.StatusCode)
+	}
+
+	var diffResp semanticDiffTestResponse
+	if err := json.NewDecoder(resp.Body).Decode(&diffResp); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	assertSemanticDiffSummary(t, diffResp)
+}
+
 func TestMergeBlockedByBranchProtectionApprovalRequirement(t *testing.T) {
 	server, _ := setupTestServer(t)
 	ts := httptest.NewServer(server)
@@ -4295,6 +4355,146 @@ func decodeAPIError(t *testing.T, resp *http.Response) string {
 		t.Fatalf("decode error payload: %v", err)
 	}
 	return payload.Error
+}
+
+type semanticDiffTestResponse struct {
+	Summary struct {
+		TotalChanges     int `json:"total_changes"`
+		Additions        int `json:"additions"`
+		Removals         int `json:"removals"`
+		SignatureChanges int `json:"signature_changes"`
+		BodyOnlyChanges  int `json:"body_only_changes"`
+		OtherChanges     int `json:"other_changes"`
+	} `json:"summary"`
+	Semver *struct {
+		Bump string `json:"bump"`
+	} `json:"semver,omitempty"`
+	Files []struct {
+		Changes []struct {
+			Classification string `json:"classification"`
+		} `json:"changes"`
+	} `json:"files"`
+}
+
+func assertSemanticDiffSummary(t *testing.T, resp semanticDiffTestResponse) {
+	t.Helper()
+
+	classCounts := map[string]int{}
+	totalChanges := 0
+	for _, file := range resp.Files {
+		for _, change := range file.Changes {
+			classification := strings.TrimSpace(change.Classification)
+			if classification == "" {
+				t.Fatalf("expected classification on every change, got empty value")
+			}
+			classCounts[classification]++
+			totalChanges++
+		}
+	}
+	if totalChanges == 0 {
+		t.Fatalf("expected at least one semantic change")
+	}
+
+	if resp.Summary.TotalChanges != totalChanges {
+		t.Fatalf("summary total_changes mismatch: got %d want %d", resp.Summary.TotalChanges, totalChanges)
+	}
+	if resp.Summary.Additions != classCounts["addition"] {
+		t.Fatalf("summary additions mismatch: got %d want %d", resp.Summary.Additions, classCounts["addition"])
+	}
+	if resp.Summary.Removals != classCounts["removal"] {
+		t.Fatalf("summary removals mismatch: got %d want %d", resp.Summary.Removals, classCounts["removal"])
+	}
+	if resp.Summary.SignatureChanges != classCounts["signature_change"] {
+		t.Fatalf("summary signature_changes mismatch: got %d want %d", resp.Summary.SignatureChanges, classCounts["signature_change"])
+	}
+	if resp.Summary.BodyOnlyChanges != classCounts["body_only_change"] {
+		t.Fatalf("summary body_only_changes mismatch: got %d want %d", resp.Summary.BodyOnlyChanges, classCounts["body_only_change"])
+	}
+
+	if classCounts["signature_change"] == 0 {
+		t.Fatalf("expected at least one signature_change classification, got %+v", classCounts)
+	}
+	if classCounts["body_only_change"] == 0 {
+		t.Fatalf("expected at least one body_only_change classification, got %+v", classCounts)
+	}
+}
+
+func seedSemanticDiffFixture(t *testing.T, db database.DB, owner, repo string) {
+	t.Helper()
+
+	repoModel, err := db.GetRepository(context.Background(), owner, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := gotstore.Open(repoModel.StoragePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	baseContent := `package main
+
+func ProcessOrder(input string) int {
+	return 1
+}
+
+func applyDiscount(amount int) int {
+	return amount
+}
+
+func LegacyEndpoint() int {
+	return 1
+}
+`
+	featureContent := `package main
+
+func ProcessOrder(input string, retries int) int {
+	return retries
+}
+
+func applyDiscount(amount int) int {
+	return amount + 1
+}
+
+func NewFeature() int {
+	return 42
+}
+`
+
+	baseCommitHash := writeSemanticDiffCommit(t, store, "main.go", baseContent, nil, 1700005000, "base")
+	featureCommitHash := writeSemanticDiffCommit(t, store, "main.go", featureContent, []object.Hash{baseCommitHash}, 1700005100, "feature")
+
+	if err := store.Refs.Set("heads/main", baseCommitHash); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Refs.Set("heads/feature", featureCommitHash); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeSemanticDiffCommit(t *testing.T, store *gotstore.RepoStore, path, content string, parents []object.Hash, ts int64, message string) object.Hash {
+	t.Helper()
+
+	blobHash, err := store.Objects.WriteBlob(&object.Blob{Data: []byte(content)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	treeHash, err := store.Objects.WriteTree(&object.TreeObj{
+		Entries: []object.TreeEntry{{Name: path, BlobHash: blobHash}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitHash, err := store.Objects.WriteCommit(&object.CommitObj{
+		TreeHash:  treeHash,
+		Parents:   parents,
+		Author:    "alice",
+		Timestamp: ts,
+		Message:   message,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return commitHash
 }
 
 func registerAndGetToken(t *testing.T, baseURL, username string) string {

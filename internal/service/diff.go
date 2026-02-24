@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -38,10 +39,11 @@ type EntityListResponse struct {
 
 // EntityChangeInfo represents a single entity-level change for API responses.
 type EntityChangeInfo struct {
-	Type   string      `json:"type"` // "added", "removed", "modified"
-	Key    string      `json:"key"`
-	Before *EntityInfo `json:"before,omitempty"`
-	After  *EntityInfo `json:"after,omitempty"`
+	Type           string      `json:"type"` // "added", "removed", "modified"
+	Classification string      `json:"classification"`
+	Key            string      `json:"key"`
+	Before         *EntityInfo `json:"before,omitempty"`
+	After          *EntityInfo `json:"after,omitempty"`
 }
 
 // FileDiffResponse holds the entity-level diff for a file.
@@ -50,11 +52,30 @@ type FileDiffResponse struct {
 	Changes []EntityChangeInfo `json:"changes"`
 }
 
+// DiffSummaryCounts aggregates semantic diff classifications.
+type DiffSummaryCounts struct {
+	TotalChanges     int `json:"total_changes"`
+	Additions        int `json:"additions"`
+	Removals         int `json:"removals"`
+	SignatureChanges int `json:"signature_changes"`
+	BodyOnlyChanges  int `json:"body_only_changes"`
+	OtherChanges     int `json:"other_changes"`
+}
+
 // DiffResponse holds diffs across multiple files.
 type DiffResponse struct {
-	Base  string             `json:"base"`
-	Head  string             `json:"head"`
-	Files []FileDiffResponse `json:"files"`
+	Base    string                `json:"base"`
+	Head    string                `json:"head"`
+	Summary DiffSummaryCounts     `json:"summary"`
+	Files   []FileDiffResponse    `json:"files"`
+	Semver  *SemverRecommendation `json:"semver,omitempty"`
+}
+
+func (r DiffResponse) MarshalJSON() ([]byte, error) {
+	type diffResponseAlias DiffResponse
+	encoded := diffResponseAlias(r)
+	encoded.Summary = summarizeSemanticChanges(encoded.Files)
+	return json.Marshal(encoded)
 }
 
 // SemverRecommendation suggests the semantic-version bump between two refs.
@@ -220,11 +241,16 @@ func (s *DiffService) DiffRefs(ctx context.Context, owner, repo, baseRef, headRe
 		}
 	}
 
-	return &DiffResponse{
-		Base:  string(baseHash),
-		Head:  string(headHash),
-		Files: fileDiffs,
-	}, nil
+	resp := &DiffResponse{
+		Base:    string(baseHash),
+		Head:    string(headHash),
+		Summary: summarizeSemanticChanges(fileDiffs),
+		Files:   fileDiffs,
+	}
+	if semverRec, semverErr := s.RecommendSemver(ctx, owner, repo, baseRef, headRef); semverErr == nil {
+		resp.Semver = semverRec
+	}
+	return resp, nil
 }
 
 // RecommendSemver analyzes structural changes and suggests a semver bump.
@@ -562,12 +588,22 @@ var changeTypeNames = map[diff.ChangeType]string{
 	diff.Modified: "modified",
 }
 
+const (
+	semanticChangeAddition  = "addition"
+	semanticChangeRemoval   = "removal"
+	semanticChangeSignature = "signature_change"
+	semanticChangeBodyOnly  = "body_only_change"
+	semanticChangeOther     = "other_change"
+)
+
 func fileDiffToResponse(fd *diff.FileDiff) FileDiffResponse {
-	changes := make([]EntityChangeInfo, len(fd.Changes))
-	for i, c := range fd.Changes {
+	normalized := normalizeEntityChanges(fd.Changes)
+	changes := make([]EntityChangeInfo, len(normalized))
+	for i, c := range normalized {
 		change := EntityChangeInfo{
-			Type: changeTypeNames[c.Type],
-			Key:  c.Key,
+			Type:           changeTypeNames[c.Type],
+			Classification: classifySemanticChange(c),
+			Key:            c.Key,
 		}
 		if c.Before != nil {
 			info := entityToInfo(c.Before)
@@ -582,6 +618,138 @@ func fileDiffToResponse(fd *diff.FileDiff) FileDiffResponse {
 	return FileDiffResponse{
 		Path:    fd.Path,
 		Changes: changes,
+	}
+}
+
+func normalizeEntityChanges(changes []diff.EntityChange) []diff.EntityChange {
+	normalized := make([]diff.EntityChange, 0, len(changes))
+	consumed := make([]bool, len(changes))
+	for i, change := range changes {
+		if consumed[i] {
+			continue
+		}
+		if change.Type != diff.Removed {
+			normalized = append(normalized, change)
+			consumed[i] = true
+			continue
+		}
+
+		matchIndex := -1
+		for j, candidate := range changes {
+			if consumed[j] || j == i {
+				continue
+			}
+			if candidate.Type != diff.Added {
+				continue
+			}
+			if isSignatureReplacement(change.Before, candidate.After) {
+				matchIndex = j
+				break
+			}
+		}
+		if matchIndex == -1 {
+			normalized = append(normalized, change)
+			consumed[i] = true
+			continue
+		}
+
+		consumed[i] = true
+		consumed[matchIndex] = true
+		matched := changes[matchIndex]
+		key := matched.Key
+		if strings.TrimSpace(key) == "" {
+			key = change.Key
+		}
+		normalized = append(normalized, diff.EntityChange{
+			Type:   diff.Modified,
+			Key:    key,
+			Before: change.Before,
+			After:  matched.After,
+		})
+	}
+	return normalized
+}
+
+func isSignatureReplacement(before, after *entity.Entity) bool {
+	if before == nil || after == nil {
+		return false
+	}
+	if before.Kind != entity.KindDeclaration || after.Kind != entity.KindDeclaration {
+		return false
+	}
+	if before.Ordinal != after.Ordinal {
+		return false
+	}
+	if before.DeclKind != after.DeclKind || before.Receiver != after.Receiver || before.Name != after.Name {
+		return false
+	}
+	return hasSignatureChange(before, after)
+}
+
+func classifySemanticChange(c diff.EntityChange) string {
+	switch c.Type {
+	case diff.Added:
+		return semanticChangeAddition
+	case diff.Removed:
+		return semanticChangeRemoval
+	case diff.Modified:
+		if hasSignatureChange(c.Before, c.After) {
+			return semanticChangeSignature
+		}
+		if isBodyOnlyChange(c.Before, c.After) {
+			return semanticChangeBodyOnly
+		}
+		return semanticChangeOther
+	default:
+		return semanticChangeOther
+	}
+}
+
+func summarizeSemanticChanges(files []FileDiffResponse) DiffSummaryCounts {
+	summary := DiffSummaryCounts{}
+	for _, file := range files {
+		for _, change := range file.Changes {
+			classification := classifySemanticChangeInfo(change)
+			switch classification {
+			case semanticChangeAddition:
+				summary.Additions++
+			case semanticChangeRemoval:
+				summary.Removals++
+			case semanticChangeSignature:
+				summary.SignatureChanges++
+			case semanticChangeBodyOnly:
+				summary.BodyOnlyChanges++
+			default:
+				summary.OtherChanges++
+			}
+			summary.TotalChanges++
+		}
+	}
+	return summary
+}
+
+func classifySemanticChangeInfo(change EntityChangeInfo) string {
+	switch change.Type {
+	case "added":
+		return semanticChangeAddition
+	case "removed":
+		return semanticChangeRemoval
+	case "modified":
+		if hasEntityInfoSignatureChange(change.Before, change.After) {
+			return semanticChangeSignature
+		}
+		if isEntityInfoBodyOnlyChange(change.Before, change.After) {
+			return semanticChangeBodyOnly
+		}
+		if strings.TrimSpace(change.Classification) != "" {
+			return change.Classification
+		}
+		return semanticChangeOther
+	default:
+		if strings.TrimSpace(change.Classification) != "" {
+			return change.Classification
+		}
+		return semanticChangeOther
 	}
 }
 
@@ -671,12 +839,67 @@ func firstEntitySignatureLine(e *entity.Entity) string {
 	return ""
 }
 
-func isBreakingSignatureChange(before, after *entity.Entity) bool {
+func normalizeSignature(signature string) string {
+	signature = strings.TrimSpace(signature)
+	if signature == "" {
+		return ""
+	}
+	return strings.Join(strings.Fields(signature), " ")
+}
+
+func normalizedEntitySignature(e *entity.Entity) string {
+	if e == nil {
+		return ""
+	}
+	if sig := normalizeSignature(e.Signature); sig != "" {
+		return sig
+	}
+	return normalizeSignature(firstEntitySignatureLine(e))
+}
+
+func hasSignatureChange(before, after *entity.Entity) bool {
 	if before == nil || after == nil {
 		return false
 	}
 	if before.DeclKind != after.DeclKind || before.Receiver != after.Receiver || before.Name != after.Name {
 		return true
 	}
-	return firstEntitySignatureLine(before) != firstEntitySignatureLine(after)
+	return normalizedEntitySignature(before) != normalizedEntitySignature(after)
+}
+
+func isBodyOnlyChange(before, after *entity.Entity) bool {
+	if before == nil || after == nil {
+		return false
+	}
+	if hasSignatureChange(before, after) {
+		return false
+	}
+	if strings.TrimSpace(before.BodyHash) != strings.TrimSpace(after.BodyHash) {
+		return true
+	}
+	return string(before.Body) != string(after.Body)
+}
+
+func hasEntityInfoSignatureChange(before, after *EntityInfo) bool {
+	if before == nil || after == nil {
+		return false
+	}
+	if before.DeclKind != after.DeclKind || before.Receiver != after.Receiver || before.Name != after.Name {
+		return true
+	}
+	return normalizeSignature(before.Signature) != normalizeSignature(after.Signature)
+}
+
+func isEntityInfoBodyOnlyChange(before, after *EntityInfo) bool {
+	if before == nil || after == nil {
+		return false
+	}
+	if hasEntityInfoSignatureChange(before, after) {
+		return false
+	}
+	return strings.TrimSpace(before.BodyHash) != strings.TrimSpace(after.BodyHash)
+}
+
+func isBreakingSignatureChange(before, after *entity.Entity) bool {
+	return hasSignatureChange(before, after)
 }
