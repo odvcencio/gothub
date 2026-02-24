@@ -63,9 +63,13 @@ export function CodeView({ owner, repo, ref: gitRef, path }: Props) {
       setIsDir(false);
       getBlob(owner, repo, gitRef, path)
         .then((b) => {
+          const decoded = decodeBlobContent(b?.data);
           setBlob({
-            content: decodeBlobContent(b?.data),
+            content: decoded.content,
           });
+          if (decoded.error) {
+            appendNotice(decoded.error);
+          }
         })
         .catch(e => setError(e.message));
       listEntities(owner, repo, gitRef, path)
@@ -227,8 +231,8 @@ function buildBreadcrumbs(owner: string, repo: string, ref: string, path?: strin
   });
 }
 
-function decodeBlobContent(data: unknown): string {
-  if (typeof data !== 'string' || data === '') return '';
+function decodeBlobContent(data: unknown): { content: string; error?: string } {
+  if (typeof data !== 'string' || data === '') return { content: '' };
 
   try {
     const binary = atob(data);
@@ -236,9 +240,12 @@ function decodeBlobContent(data: unknown): string {
     for (let i = 0; i < binary.length; i++) {
       bytes[i] = binary.charCodeAt(i);
     }
-    return new TextDecoder().decode(bytes);
+    return { content: new TextDecoder().decode(bytes) };
   } catch {
-    return '';
+    return {
+      content: '',
+      error: 'Failed to decode file contents returned by the server.',
+    };
   }
 }
 

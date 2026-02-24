@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"errors"
 	"net/http"
-	"strconv"
 	"strings"
 
 	"github.com/odvcencio/gothub/internal/service"
@@ -77,18 +76,13 @@ func (s *Server) handleCallGraph(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	depth := 3
-	if d := r.URL.Query().Get("depth"); d != "" {
-		v, err := strconv.Atoi(d)
-		if err != nil || v <= 0 {
-			jsonError(w, "invalid depth query parameter", http.StatusBadRequest)
-			return
-		}
-		if v > 16 {
-			jsonError(w, "depth query parameter exceeds maximum of 16", http.StatusBadRequest)
-			return
-		}
-		depth = v
+	depth, ok := parseOptionalQueryPositiveInt(w, r, "depth", "depth", 3)
+	if !ok {
+		return
+	}
+	if depth > 16 {
+		jsonError(w, "depth query parameter exceeds maximum of 16", http.StatusBadRequest)
+		return
 	}
 
 	reverse := r.URL.Query().Get("reverse") == "true"

@@ -2,6 +2,8 @@
 
 AI-first code hosting with structural diffs, structural merge preview, entity lineage, and built-in code intelligence.
 
+Contributor workflow: see [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## Quick start (Docker)
 
 ```bash
@@ -40,7 +42,8 @@ go run ./cmd/gothub serve
 
 ### Ops/observability
 
-- `GOTHUB_TRUST_PROXY`: trust proxy headers for client IP (`true`/`false`)
+- `GOTHUB_TRUSTED_PROXIES`: comma-separated trusted proxy CIDRs/IPs for `X-Forwarded-For` (default loopback only)
+- `GOTHUB_TRUST_PROXY`: legacy trust-all proxy mode (`true`/`false`), only used when `GOTHUB_TRUSTED_PROXIES` is unset
 - `GOTHUB_CORS_ALLOW_ORIGINS`: comma-separated allowlist for CORS origins (default `*`)
 - `GOTHUB_ENABLE_ADMIN_HEALTH`: expose `/admin/health` (`true`/`false`)
 - `GOTHUB_ENABLE_PPROF`: expose `/debug/pprof/*` (`true`/`false`)

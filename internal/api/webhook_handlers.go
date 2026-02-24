@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -90,9 +89,8 @@ func (s *Server) handleGetWebhook(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	webhookID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil || webhookID <= 0 {
-		jsonError(w, "invalid webhook id", http.StatusBadRequest)
+	webhookID, ok := parsePathPositiveInt64(w, r, "id", "webhook id")
+	if !ok {
 		return
 	}
 
@@ -113,9 +111,8 @@ func (s *Server) handleDeleteWebhook(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	webhookID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil || webhookID <= 0 {
-		jsonError(w, "invalid webhook id", http.StatusBadRequest)
+	webhookID, ok := parsePathPositiveInt64(w, r, "id", "webhook id")
+	if !ok {
 		return
 	}
 
@@ -131,9 +128,8 @@ func (s *Server) handleListWebhookDeliveries(w http.ResponseWriter, r *http.Requ
 	if !ok {
 		return
 	}
-	webhookID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil || webhookID <= 0 {
-		jsonError(w, "invalid webhook id", http.StatusBadRequest)
+	webhookID, ok := parsePathPositiveInt64(w, r, "id", "webhook id")
+	if !ok {
 		return
 	}
 	if _, err := s.webhookSvc.GetWebhook(r.Context(), repo.ID, webhookID); err != nil {
@@ -159,14 +155,12 @@ func (s *Server) handleRedeliverWebhookDelivery(w http.ResponseWriter, r *http.R
 	if !ok {
 		return
 	}
-	webhookID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil || webhookID <= 0 {
-		jsonError(w, "invalid webhook id", http.StatusBadRequest)
+	webhookID, ok := parsePathPositiveInt64(w, r, "id", "webhook id")
+	if !ok {
 		return
 	}
-	deliveryID, err := strconv.ParseInt(r.PathValue("delivery_id"), 10, 64)
-	if err != nil || deliveryID <= 0 {
-		jsonError(w, "invalid delivery id", http.StatusBadRequest)
+	deliveryID, ok := parsePathPositiveInt64(w, r, "delivery_id", "delivery id")
+	if !ok {
 		return
 	}
 
@@ -187,9 +181,8 @@ func (s *Server) handlePingWebhook(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	webhookID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil || webhookID <= 0 {
-		jsonError(w, "invalid webhook id", http.StatusBadRequest)
+	webhookID, ok := parsePathPositiveInt64(w, r, "id", "webhook id")
+	if !ok {
 		return
 	}
 

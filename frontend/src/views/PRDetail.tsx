@@ -38,9 +38,12 @@ export function PRDetailView({ owner, repo, number }: Props) {
   const [pr, setPr] = useState<PullRequest | null>(null);
   const [tab, setTab] = useState<'conversation' | 'files' | 'merge'>('conversation');
   const [diff, setDiff] = useState<{ files: DiffFile[] } | null>(null);
+  const [diffError, setDiffError] = useState('');
   const [mergePreview, setMergePreview] = useState<MergePreviewResponse | null>(null);
+  const [mergePreviewError, setMergePreviewError] = useState('');
   const [mergeGate, setMergeGate] = useState<MergeGate | null>(null);
   const [semver, setSemver] = useState<SemverRecommendation | null>(null);
+  const [semverError, setSemverError] = useState('');
   const [checks, setChecks] = useState<CheckRun[]>([]);
   const [indexStatus, setIndexStatus] = useState<RepoIndexStatus | null>(null);
   const [indexStatusLoading, setIndexStatusLoading] = useState(false);
@@ -65,9 +68,12 @@ export function PRDetailView({ owner, repo, number }: Props) {
   useEffect(() => {
     setPr(null);
     setDiff(null);
+    setDiffError('');
     setMergePreview(null);
+    setMergePreviewError('');
     setMergeGate(null);
     setSemver(null);
+    setSemverError('');
     setChecks([]);
     setIndexStatus(null);
     setIndexStatusLoading(false);
@@ -88,18 +94,45 @@ export function PRDetailView({ owner, repo, number }: Props) {
 
   useEffect(() => {
     if (!owner || !repo || !prNum) return;
-    if ((tab === 'files' || tab === 'merge') && !diff) {
-      getPRDiff(owner, repo, prNum).then(setDiff).catch(e => appendNotice(e.message || 'failed to load diff'));
+    if ((tab === 'files' || tab === 'merge') && !diff && !diffError) {
+      getPRDiff(owner, repo, prNum)
+        .then((data) => {
+          setDiff(data);
+          setDiffError('');
+        })
+        .catch((e) => {
+          const message = e?.message || 'failed to load diff';
+          setDiffError(message);
+          appendNotice(message);
+        });
     }
-    if (tab === 'merge' && !mergePreview) {
-      getMergePreview(owner, repo, prNum).then(setMergePreview).catch(e => appendNotice(e.message || 'failed to load merge preview'));
+    if (tab === 'merge' && !mergePreview && !mergePreviewError) {
+      getMergePreview(owner, repo, prNum)
+        .then((preview) => {
+          setMergePreview(preview);
+          setMergePreviewError('');
+        })
+        .catch((e) => {
+          const message = e?.message || 'failed to load merge preview';
+          setMergePreviewError(message);
+          appendNotice(message);
+        });
     }
     if (tab === 'merge') {
       getMergeGate(owner, repo, prNum).then(setMergeGate).catch(e => appendNotice(e.message || 'failed to load merge gate'));
       listPRChecks(owner, repo, prNum).then(setChecks).catch(e => appendNotice(e.message || 'failed to load checks'));
-      if (pr && !semver) {
+      if (pr && !semver && !semverError) {
         const spec = `${pr.target_branch}...${pr.source_branch}`;
-        getSemver(owner, repo, spec).then(setSemver).catch(e => appendNotice(e.message || 'failed to load semver recommendation'));
+        getSemver(owner, repo, spec)
+          .then((recommendation) => {
+            setSemver(recommendation);
+            setSemverError('');
+          })
+          .catch((e) => {
+            const message = e?.message || 'failed to load semver recommendation';
+            setSemverError(message);
+            appendNotice(message);
+          });
       }
     }
   }, [tab, owner, repo, prNum, pr, reviews.length, semver]);
@@ -226,20 +259,34 @@ export function PRDetailView({ owner, repo, number }: Props) {
             <PRImpactSummary summary={impactSummary} />
             <EntityDiff files={diff.files || []} />
           </div>
+        ) : diffError ? (
+          <div style={{ color: '#f85149', border: '1px solid #f85149', borderRadius: '6px', padding: '12px 14px', background: '#1c1214' }}>
+            {diffError}
+          </div>
         ) : <div style={{ color: '#8b949e' }}>Loading diff...</div>
       )}
 
       {tab === 'merge' && (
         <div style={{ display: 'grid', gap: '16px' }}>
           <PRImpactSummary summary={impactSummary} />
-          <SemverPanel semver={semver} />
+          {semverError ? (
+            <div style={{ border: '1px solid #f85149', borderRadius: '6px', padding: '12px 16px', color: '#f85149', background: '#1c1214', fontSize: '13px' }}>
+              {semverError}
+            </div>
+          ) : (
+            <SemverPanel semver={semver} />
+          )}
           <MergeGatePanel gate={mergeGate} checks={checks} />
           {mergePreview
             ? <>
                 <MergePreview preview={mergePreview} onMerge={pr.state === 'open' ? handleMerge : undefined} merging={merging} />
                 <ConflictViewer files={mergePreview.files || []} />
               </>
-            : <div style={{ color: '#8b949e' }}>Loading merge preview...</div>}
+            : mergePreviewError ? (
+              <div style={{ color: '#f85149', border: '1px solid #f85149', borderRadius: '6px', padding: '12px 14px', background: '#1c1214' }}>
+                {mergePreviewError}
+              </div>
+            ) : <div style={{ color: '#8b949e' }}>Loading merge preview...</div>}
         </div>
       )}
     </div>

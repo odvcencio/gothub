@@ -18,6 +18,11 @@ import (
 	"github.com/odvcencio/gothub/internal/service"
 )
 
+var legacyTrustAllProxyCIDRs = []string{
+	"0.0.0.0/0",
+	"::/0",
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Fprintf(os.Stderr, "Usage: gothub <command>\n\nCommands:\n  serve    Start the server\n  migrate  Run database migrations\n")
@@ -90,6 +95,7 @@ func cmdServe(args []string) {
 		EnablePprof:        envBool("GOTHUB_ENABLE_PPROF"),
 		AdminAllowedCIDRs:  parseAdminCIDRs("GOTHUB_ADMIN_ALLOWED_CIDRS"),
 		CORSAllowedOrigins: parseCSVEnv("GOTHUB_CORS_ALLOW_ORIGINS"),
+		TrustedProxyCIDRs:  trustedProxyCIDRs(cfg),
 	}
 	server := api.NewServerWithOptions(db, authSvc, repoSvc, serverOpts)
 
@@ -173,6 +179,20 @@ func validateServeConfig(cfg *config.Config) error {
 
 func parseAdminCIDRs(name string) []string {
 	return parseCSVEnv(name)
+}
+
+func trustedProxyCIDRs(cfg *config.Config) []string {
+	if cfg == nil {
+		return nil
+	}
+	cidrs := append([]string(nil), cfg.Server.TrustedProxies...)
+	if len(cidrs) > 0 {
+		return cidrs
+	}
+	if envBool("GOTHUB_TRUST_PROXY") {
+		return append(cidrs, legacyTrustAllProxyCIDRs...)
+	}
+	return cidrs
 }
 
 func parseCSVEnv(name string) []string {

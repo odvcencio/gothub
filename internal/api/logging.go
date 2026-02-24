@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -26,7 +25,49 @@ const (
 	limiterCleanupInterval = time.Minute
 )
 
-var trustProxyHeaders = parseEnvBool("GOTHUB_TRUST_PROXY")
+var defaultForwardedForTrustedProxyCIDRs = []string{
+	"127.0.0.1/32",
+	"::1/128",
+}
+
+type clientIPResolver struct {
+	trustedProxyNetworks []*net.IPNet
+}
+
+func newClientIPResolver(trustedProxyCIDRs []string) clientIPResolver {
+	cidrs := make([]string, 0, len(defaultForwardedForTrustedProxyCIDRs)+len(trustedProxyCIDRs))
+	cidrs = append(cidrs, defaultForwardedForTrustedProxyCIDRs...)
+	cidrs = append(cidrs, trustedProxyCIDRs...)
+	return clientIPResolver{
+		trustedProxyNetworks: parseTrustedProxyCIDRs(cidrs),
+	}
+}
+
+func parseTrustedProxyCIDRs(cidrs []string) []*net.IPNet {
+	result := make([]*net.IPNet, 0, len(cidrs))
+	for _, raw := range cidrs {
+		value := strings.TrimSpace(raw)
+		if value == "" {
+			continue
+		}
+		if ip := net.ParseIP(value); ip != nil {
+			bits := 128
+			if v4 := ip.To4(); v4 != nil {
+				ip = v4
+				bits = 32
+			}
+			result = append(result, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
+			continue
+		}
+		_, block, err := net.ParseCIDR(value)
+		if err != nil {
+			slog.Warn("invalid trusted proxy CIDR entry; ignoring", "cidr", value, "error", err)
+			continue
+		}
+		result = append(result, block)
+	}
+	return result
+}
 
 type rateLimitBucket struct {
 	tokens     float64
@@ -117,7 +158,7 @@ func generateRequestID() string {
 	return hex.EncodeToString(b[:])
 }
 
-func requestLoggingMiddleware(next http.Handler) http.Handler {
+func requestLoggingMiddleware(ipResolver clientIPResolver, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		reqID := generateRequestID()
@@ -130,7 +171,7 @@ func requestLoggingMiddleware(next http.Handler) http.Handler {
 			"path", r.URL.RequestURI(),
 			"status", rec.status,
 			"duration", time.Since(start),
-			"ip", clientIPFromRequest(r),
+			"ip", ipResolver.clientIPFromRequest(r),
 		)
 	})
 }
@@ -175,7 +216,7 @@ func corsMiddleware(allowedOrigins []string, next http.Handler) http.Handler {
 	})
 }
 
-func requestRateLimitMiddleware(limiter *requestRateLimiter, next http.Handler) http.Handler {
+func requestRateLimitMiddleware(ipResolver clientIPResolver, limiter *requestRateLimiter, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if limiter == nil || r.Method == http.MethodOptions {
 			next.ServeHTTP(w, r)
@@ -194,7 +235,7 @@ func requestRateLimitMiddleware(limiter *requestRateLimiter, next http.Handler) 
 			next.ServeHTTP(w, r)
 			return
 		}
-		key := clientIPFromRequest(r)
+		key := ipResolver.clientIPFromRequest(r)
 		now := time.Now()
 		allowed := true
 		switch scope {
@@ -214,9 +255,9 @@ func requestRateLimitMiddleware(limiter *requestRateLimiter, next http.Handler) 
 	})
 }
 
-func clientIPFromRequest(r *http.Request) string {
-	if trustXForwardedFor(r) {
-		forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For"))
+func (r clientIPResolver) clientIPFromRequest(req *http.Request) string {
+	if r.trustXForwardedFor(req) {
+		forwarded := strings.TrimSpace(req.Header.Get("X-Forwarded-For"))
 		if idx := strings.Index(forwarded, ","); idx >= 0 {
 			forwarded = strings.TrimSpace(forwarded[:idx])
 		}
@@ -224,33 +265,28 @@ func clientIPFromRequest(r *http.Request) string {
 			return forwarded
 		}
 	}
-	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	host, _, err := net.SplitHostPort(strings.TrimSpace(req.RemoteAddr))
 	if err == nil && host != "" {
 		return host
 	}
-	return strings.TrimSpace(r.RemoteAddr)
+	return strings.TrimSpace(req.RemoteAddr)
 }
 
-func trustXForwardedFor(r *http.Request) bool {
-	if trustProxyHeaders {
-		return true
-	}
-	host := strings.TrimSpace(r.RemoteAddr)
+func (r clientIPResolver) trustXForwardedFor(req *http.Request) bool {
+	host := strings.TrimSpace(req.RemoteAddr)
 	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
 		host = parsedHost
 	}
 	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
-}
-
-func parseEnvBool(name string) bool {
-	v := strings.TrimSpace(strings.ToLower(os.Getenv(name)))
-	switch v {
-	case "1", "true", "yes", "on":
-		return true
-	default:
+	if ip == nil {
 		return false
 	}
+	for _, block := range r.trustedProxyNetworks {
+		if block.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 func requestBodyLimitMiddleware(next http.Handler) http.Handler {

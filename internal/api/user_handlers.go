@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strconv"
 
 	"github.com/odvcencio/gothub/internal/auth"
 	"github.com/odvcencio/gothub/internal/models"
@@ -53,7 +52,7 @@ func (s *Server) handleCreateSSHKey(w http.ResponseWriter, r *http.Request) {
 		UserID:      claims.UserID,
 		Name:        req.Name,
 		Fingerprint: fp,
-		PublicKey:    req.PublicKey,
+		PublicKey:   req.PublicKey,
 		KeyType:     pubKey.Type(),
 	}
 	if err := s.db.CreateSSHKey(r.Context(), key); err != nil {
@@ -65,9 +64,8 @@ func (s *Server) handleCreateSSHKey(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDeleteSSHKey(w http.ResponseWriter, r *http.Request) {
 	claims := auth.GetClaims(r.Context())
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil {
-		jsonError(w, "invalid key ID", http.StatusBadRequest)
+	id, ok := parsePathPositiveInt64(w, r, "id", "key ID")
+	if !ok {
 		return
 	}
 	if err := s.db.DeleteSSHKey(r.Context(), id, claims.UserID); err != nil {

@@ -3,7 +3,6 @@ package api
 import (
 	"errors"
 	"net/http"
-	"strconv"
 	"strings"
 
 	"github.com/odvcencio/gothub/internal/service"
@@ -74,12 +73,9 @@ func (s *Server) handleListCommits(w http.ResponseWriter, r *http.Request) {
 	ref := r.PathValue("ref")
 
 	page, perPage := parsePagination(r, 30, 200)
-	if l := strings.TrimSpace(r.URL.Query().Get("limit")); l != "" {
-		n, err := strconv.Atoi(l)
-		if err != nil || n <= 0 {
-			jsonError(w, "invalid limit query parameter", http.StatusBadRequest)
-			return
-		}
+	if n, ok := parseOptionalQueryPositiveInt(w, r, "limit", "limit", perPage); !ok {
+		return
+	} else {
 		perPage = n
 	}
 	offset := (page - 1) * perPage
@@ -143,12 +139,9 @@ func (s *Server) handleEntityHistory(w http.ResponseWriter, r *http.Request) {
 	bodyHash := strings.TrimSpace(r.URL.Query().Get("body_hash"))
 
 	page, perPage := parsePagination(r, 50, 200)
-	if l := strings.TrimSpace(r.URL.Query().Get("limit")); l != "" {
-		n, err := strconv.Atoi(l)
-		if err != nil || n <= 0 {
-			jsonError(w, "invalid limit query parameter", http.StatusBadRequest)
-			return
-		}
+	if n, ok := parseOptionalQueryPositiveInt(w, r, "limit", "limit", perPage); !ok {
+		return
+	} else {
 		perPage = n
 	}
 	offset := (page - 1) * perPage
@@ -179,17 +172,12 @@ func (s *Server) handleEntityLog(w http.ResponseWriter, r *http.Request) {
 	ref := r.PathValue("ref")
 	key := strings.TrimSpace(r.URL.Query().Get("key"))
 	path := strings.TrimSpace(r.URL.Query().Get("path"))
-	limit := 50
-	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
-		n, err := strconv.Atoi(raw)
-		if err != nil || n <= 0 {
-			jsonError(w, "invalid limit query parameter", http.StatusBadRequest)
-			return
-		}
-		if n > 500 {
-			n = 500
-		}
-		limit = n
+	limit, ok := parseOptionalQueryPositiveInt(w, r, "limit", "limit", 50)
+	if !ok {
+		return
+	}
+	if limit > 500 {
+		limit = 500
 	}
 	if key == "" {
 		jsonError(w, "key query is required", http.StatusBadRequest)
@@ -220,17 +208,12 @@ func (s *Server) handleEntityBlame(w http.ResponseWriter, r *http.Request) {
 	ref := r.PathValue("ref")
 	key := strings.TrimSpace(r.URL.Query().Get("key"))
 	path := strings.TrimSpace(r.URL.Query().Get("path"))
-	limit := 200
-	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
-		n, err := strconv.Atoi(raw)
-		if err != nil || n <= 0 {
-			jsonError(w, "invalid limit query parameter", http.StatusBadRequest)
-			return
-		}
-		if n > 2000 {
-			n = 2000
-		}
-		limit = n
+	limit, ok := parseOptionalQueryPositiveInt(w, r, "limit", "limit", 200)
+	if !ok {
+		return
+	}
+	if limit > 2000 {
+		limit = 2000
 	}
 	if key == "" {
 		jsonError(w, "key query is required", http.StatusBadRequest)

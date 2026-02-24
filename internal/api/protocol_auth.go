@@ -12,17 +12,17 @@ import (
 )
 
 func (s *Server) authorizeProtocolRepoAccess(r *http.Request, owner, repo string, write bool) (int, error) {
+	user, authenticated, status, authErr := s.authenticateProtocolUser(r)
+	if authErr != nil {
+		return status, authErr
+	}
+
 	repoModel, err := s.repoSvc.Get(r.Context(), owner, repo)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return http.StatusNotFound, fmt.Errorf("repository not found")
 		}
 		return http.StatusInternalServerError, fmt.Errorf("repository lookup failed")
-	}
-
-	user, authenticated, status, authErr := s.authenticateProtocolUser(r)
-	if authErr != nil {
-		return status, authErr
 	}
 
 	// Anonymous read is allowed for public repos.

@@ -40,6 +40,7 @@ type Server struct {
 	enableAdminHealth  bool
 	enablePprof        bool
 	corsAllowedOrigins []string
+	clientIPResolver   clientIPResolver
 	adminRouteAccess   adminRouteAccess
 	mux                *http.ServeMux
 	handler            http.Handler
@@ -52,6 +53,7 @@ type ServerOptions struct {
 	EnablePprof         bool
 	AdminAllowedCIDRs   []string
 	CORSAllowedOrigins  []string
+	TrustedProxyCIDRs   []string
 }
 
 func NewServer(db database.DB, authSvc *auth.Service, repoSvc *service.RepoService) *Server {
@@ -75,6 +77,7 @@ func NewServerWithOptions(db database.DB, authSvc *auth.Service, repoSvc *servic
 	if (opts.EnableAdminHealth || opts.EnablePprof) && len(adminCIDRs) == 0 {
 		adminCIDRs = defaultAdminRouteCIDRs
 	}
+	clientIPResolver := newClientIPResolver(opts.TrustedProxyCIDRs)
 	s := &Server{
 		db:                 db,
 		authSvc:            authSvc,
@@ -96,7 +99,8 @@ func NewServerWithOptions(db database.DB, authSvc *auth.Service, repoSvc *servic
 		enableAdminHealth:  opts.EnableAdminHealth,
 		enablePprof:        opts.EnablePprof,
 		corsAllowedOrigins: append([]string(nil), opts.CORSAllowedOrigins...),
-		adminRouteAccess:   newAdminRouteAccess(adminCIDRs),
+		clientIPResolver:   clientIPResolver,
+		adminRouteAccess:   newAdminRouteAccess(adminCIDRs, clientIPResolver.clientIPFromRequest),
 		mux:                http.NewServeMux(),
 	}
 	s.routes()
@@ -104,8 +108,10 @@ func NewServerWithOptions(db database.DB, authSvc *auth.Service, repoSvc *servic
 		requestMetricsMiddleware(
 			s.httpMetrics,
 			requestLoggingMiddleware(
+				s.clientIPResolver,
 				corsMiddleware(s.corsAllowedOrigins,
 					requestRateLimitMiddleware(
+						s.clientIPResolver,
 						s.rateLimiter,
 						requestBodyLimitMiddleware(auth.Middleware(s.authSvc)(s.mux)),
 					),
@@ -306,7 +312,9 @@ func (s *Server) routes() {
 		}
 		return validateProtectedRefUpdate(ctx, repoModel.ID, refName, oldHash, newHash)
 	})
-	gotProto.RegisterRoutes(s.mux)
+	gotProtoMux := http.NewServeMux()
+	gotProto.RegisterRoutes(gotProtoMux)
+	s.mux.Handle("/got/", s.wrapGotBatchGraphErrors(gotProtoMux))
 
 	// Git smart HTTP protocol
 	gitHandler := gitinterop.NewSmartHTTPHandler(

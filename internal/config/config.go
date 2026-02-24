@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -16,8 +17,9 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Host string `yaml:"host"`
-	Port int    `yaml:"port"`
+	Host           string   `yaml:"host"`
+	Port           int      `yaml:"port"`
+	TrustedProxies []string `yaml:"trusted_proxies"`
 }
 
 type DatabaseConfig struct {
@@ -86,6 +88,9 @@ func applyEnv(cfg *Config) {
 			cfg.Server.Port = p
 		}
 	}
+	if v := os.Getenv("GOTHUB_TRUSTED_PROXIES"); v != "" {
+		cfg.Server.TrustedProxies = parseCSV(v)
+	}
 	if v := os.Getenv("GOTHUB_DB_DRIVER"); v != "" {
 		cfg.Database.Driver = v
 	}
@@ -103,4 +108,21 @@ func applyEnv(cfg *Config) {
 			cfg.Auth.EnablePasswordAuth = enabled
 		}
 	}
+}
+
+func parseCSV(v string) []string {
+	raw := strings.TrimSpace(v)
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		value := strings.TrimSpace(part)
+		if value == "" {
+			continue
+		}
+		out = append(out, value)
+	}
+	return out
 }

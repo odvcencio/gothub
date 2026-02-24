@@ -7,6 +7,8 @@ import (
 	"strings"
 )
 
+var maxIntValue = int64(^uint(0) >> 1)
+
 func jsonResponse(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -25,12 +27,12 @@ func parsePathPositiveInt(w http.ResponseWriter, r *http.Request, key, label str
 		jsonError(w, label+" is required", http.StatusBadRequest)
 		return 0, false
 	}
-	value, err := strconv.Atoi(raw)
-	if err != nil || value <= 0 {
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || value <= 0 || value > maxIntValue {
 		jsonError(w, "invalid "+label, http.StatusBadRequest)
 		return 0, false
 	}
-	return value, true
+	return int(value), true
 }
 
 func parsePathPositiveInt64(w http.ResponseWriter, r *http.Request, key, label string) (int64, bool) {
@@ -45,4 +47,17 @@ func parsePathPositiveInt64(w http.ResponseWriter, r *http.Request, key, label s
 		return 0, false
 	}
 	return value, true
+}
+
+func parseOptionalQueryPositiveInt(w http.ResponseWriter, r *http.Request, key, label string, defaultValue int) (int, bool) {
+	raw := strings.TrimSpace(r.URL.Query().Get(key))
+	if raw == "" {
+		return defaultValue, true
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || value <= 0 || value > maxIntValue {
+		jsonError(w, "invalid "+label+" query parameter", http.StatusBadRequest)
+		return 0, false
+	}
+	return int(value), true
 }

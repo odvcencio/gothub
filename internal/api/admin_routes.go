@@ -15,11 +15,22 @@ var defaultAdminRouteCIDRs = []string{
 
 type adminRouteAccess struct {
 	allowList []*net.IPNet
+	clientIP  func(*http.Request) string
 }
 
-func newAdminRouteAccess(cidrs []string) adminRouteAccess {
+func newAdminRouteAccess(cidrs []string, clientIP func(*http.Request) string) adminRouteAccess {
+	if clientIP == nil {
+		clientIP = func(r *http.Request) string {
+			host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+			if err == nil && host != "" {
+				return host
+			}
+			return strings.TrimSpace(r.RemoteAddr)
+		}
+	}
 	return adminRouteAccess{
 		allowList: parseAdminRouteCIDRs(cidrs),
+		clientIP:  clientIP,
 	}
 }
 
@@ -68,7 +79,7 @@ func (a adminRouteAccess) allows(r *http.Request) bool {
 	if len(a.allowList) == 0 {
 		return false
 	}
-	ip := net.ParseIP(strings.TrimSpace(clientIPFromRequest(r)))
+	ip := net.ParseIP(strings.TrimSpace(a.clientIP(r)))
 	if ip == nil {
 		return false
 	}

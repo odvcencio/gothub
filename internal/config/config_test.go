@@ -26,6 +26,7 @@ func TestDefaultConfig(t *testing.T) {
 func TestLoadAppliesEnvOverrides(t *testing.T) {
 	t.Setenv("GOTHUB_HOST", "127.0.0.1")
 	t.Setenv("GOTHUB_PORT", "4000")
+	t.Setenv("GOTHUB_TRUSTED_PROXIES", "10.0.0.0/8, 192.168.1.10")
 	t.Setenv("GOTHUB_DB_DRIVER", "postgres")
 	t.Setenv("GOTHUB_DB_DSN", "postgres://example")
 	t.Setenv("GOTHUB_STORAGE_PATH", "/tmp/repos")
@@ -42,6 +43,15 @@ func TestLoadAppliesEnvOverrides(t *testing.T) {
 	}
 	if cfg.Server.Port != 4000 {
 		t.Fatalf("Server.Port = %d, want 4000", cfg.Server.Port)
+	}
+	if len(cfg.Server.TrustedProxies) != 2 {
+		t.Fatalf("Server.TrustedProxies length = %d, want 2", len(cfg.Server.TrustedProxies))
+	}
+	if cfg.Server.TrustedProxies[0] != "10.0.0.0/8" {
+		t.Fatalf("Server.TrustedProxies[0] = %q, want %q", cfg.Server.TrustedProxies[0], "10.0.0.0/8")
+	}
+	if cfg.Server.TrustedProxies[1] != "192.168.1.10" {
+		t.Fatalf("Server.TrustedProxies[1] = %q, want %q", cfg.Server.TrustedProxies[1], "192.168.1.10")
 	}
 	if cfg.Database.Driver != "postgres" {
 		t.Fatalf("Database.Driver = %q, want %q", cfg.Database.Driver, "postgres")
@@ -67,6 +77,9 @@ func TestLoadFromYAML(t *testing.T) {
 server:
   host: 127.0.0.1
   port: 5555
+  trusted_proxies:
+    - 10.0.0.0/8
+    - 192.168.1.10
 database:
   driver: sqlite
   dsn: test.db
@@ -88,6 +101,15 @@ auth:
 
 	if cfg.Server.Port != 5555 {
 		t.Fatalf("Server.Port = %d, want 5555", cfg.Server.Port)
+	}
+	if len(cfg.Server.TrustedProxies) != 2 {
+		t.Fatalf("Server.TrustedProxies length = %d, want 2", len(cfg.Server.TrustedProxies))
+	}
+	if cfg.Server.TrustedProxies[0] != "10.0.0.0/8" {
+		t.Fatalf("Server.TrustedProxies[0] = %q, want %q", cfg.Server.TrustedProxies[0], "10.0.0.0/8")
+	}
+	if cfg.Server.TrustedProxies[1] != "192.168.1.10" {
+		t.Fatalf("Server.TrustedProxies[1] = %q, want %q", cfg.Server.TrustedProxies[1], "192.168.1.10")
 	}
 	if cfg.Auth.TokenDuration != "12h" {
 		t.Fatalf("Auth.TokenDuration = %q, want %q", cfg.Auth.TokenDuration, "12h")

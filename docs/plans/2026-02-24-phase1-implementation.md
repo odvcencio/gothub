@@ -66,7 +66,7 @@ Task 47 (GotHub UI: structural blame panel)
 
 ## Execution Tracker (Live)
 
-Updated: 2026-02-24
+Updated: 2026-02-24 15:37 PST
 
 ### Completed
 
@@ -78,12 +78,15 @@ Updated: 2026-02-24
 | 4 | complete | got | `4b916f1` | `go test ./pkg/object -run TestWritePackIndex -v`, `go test ./...` |
 | 5 | complete | got | `eed3d13` | `go test ./pkg/object -run 'TestReadPackIndex|TestReadPackIndexFromReader' -v`, `go test ./...` |
 | 6 | complete | got | `5c4f60f` | `go test ./pkg/object -run 'TestOfsDelta|TestBuildInsertOnlyDelta|TestPackWriterWriteOfsDelta' -v`, `go test ./...` |
-| 40 | complete | gothub | `d298656` | `go test ./...`, `cd frontend && npm run build` |
-| 41 | complete | gothub | `d298656` | `go test ./...`, `cd frontend && npm run build` |
-| 42 | complete | gothub | `d298656` | `go test ./...`, `cd frontend && npm run build` |
+| 40 | complete | gothub | `2930c83` | `frontend/src/views/PRDetail.tsx` (`PRImpactSummary`, `summarizeDiff`) |
+| 41 | complete | gothub | `2930c83` | `frontend/src/views/PRDetail.tsx` (`SemverPanel`), `frontend/src/api/client.ts` (`getSemver`) |
+| 42 | complete | gothub | `2930c83` | `frontend/src/views/PRDetail.tsx` (`MergeGatePanel`), `internal/service/policy.go` (`entity_owner_approvals`) |
 | 43 | complete | got | `5178221` | `go test ./cmd/got ./pkg/repo` |
 | 44 | complete | got | `b655d12` | `go test ./cmd/got ./pkg/repo` |
-| 48 | complete | gothub | `1f2a7bb` | `go test ./...`, `cd frontend && npm run build` |
+| 47 | complete | gothub | `2614e72` | `frontend/src/views/Code.tsx`, `internal/api/browse_handlers.go`, `internal/api/router.go` |
+| 48 | complete | gothub | `a4a6969` | `frontend/src/views/CallGraph.tsx` |
+| 49 | complete | gothub | `5d2e39c` | `frontend/src/components/CodeViewer.tsx`, `frontend/src/api/client.ts` |
+| 50 | complete | gothub | `72cb54f` | `frontend/src/views/Home.tsx` (guided 4-step onboarding demo) |
 
 ### In Progress
 
@@ -94,7 +97,7 @@ Updated: 2026-02-24
 ### Remaining (Not Yet Implemented)
 
 - Tasks 8-34 are pending.
-- Tasks 45-47 and 49-50 are queued structural-differentiation work.
+- Tasks 45-46 are queued structural-differentiation work.
 - Tasks 35-39 are queued post-Phase-1 cloud multi-tenancy work.
 
 ---
@@ -2149,7 +2152,7 @@ git commit -m "add(bench): service and database benchmark suites"
 
 ### Task 40: PR Impact Summary Card
 
-**Status:** Complete (`d298656`)
+**Status:** Complete (`2930c83`)
 
 **Scope delivered:**
 - Added PR impact summary card in the PR detail view (`Files changed` and `Merge preview` tabs).
@@ -2157,7 +2160,7 @@ git commit -m "add(bench): service and database benchmark suites"
 
 ### Task 41: SemVer Recommendation Card in PR Merge View
 
-**Status:** Complete (`d298656`)
+**Status:** Complete (`2930c83`)
 
 **Scope delivered:**
 - Wired PR merge view to semver endpoint (`/api/v1/repos/{owner}/{repo}/semver/{base...head}`).
@@ -2165,7 +2168,7 @@ git commit -m "add(bench): service and database benchmark suites"
 
 ### Task 42: Entity Owner Approval Checklist in Merge Gate UI
 
-**Status:** Complete (`d298656`)
+**Status:** Complete (`2930c83`)
 
 **Scope delivered:**
 - Extended merge-gate payload with structured entity owner approval data (`entity_owner_approvals`).
@@ -2250,24 +2253,30 @@ These items come from the latest capability audit and are being executed as post
 
 ### Task 47: Structural Blame Panel in GotHub Code View
 
-**Status:** Queued
+**Status:** Complete (`2614e72`)
 
-**Goal:** expose entity-last-touch metadata in the web code browser, anchored to selected entity.
+**Scope delivered:**
+- Added structural blame panel in code view with per-entity selection and attribution details.
+- Added `GET /api/v1/repos/{owner}/{repo}/entity-blame/{ref}` route and handler integration.
 
 ### Task 48: Visual Call Graph in GotHub
 
-**Status:** Complete (`1f2a7bb`)
+**Status:** Complete (`a4a6969`)
 
 **Goal:** replace callgraph table-only presentation with interactive graph rendering and click-through navigation.
 
 ### Task 49: Inline Code Intelligence in Blob Viewer
 
-**Status:** Queued
+**Status:** Complete (`5d2e39c`)
 
-**Goal:** add hover/click definition and reference navigation in code view using existing symbol/reference endpoints.
+**Scope delivered:**
+- Added inline intelligence panel in blob view with hover-to-preview and click-to-pin interactions.
+- Wired definitions, references, and entity history lookups for the selected symbol token.
 
 ### Task 50: Onboarding Demo Repository
 
-**Status:** Queued
+**Status:** Complete (`72cb54f`)
 
-**Goal:** add first-run "Try Gothub" seeded repo/flow that demonstrates structural merge, impact diff, semver, and merge gate behavior.
+**Scope delivered:**
+- Added first-run "Try Demo" onboarding card in dashboard with a guided 4-step walkthrough.
+- Demo path covers PR impact, SemVer recommendation, call graph navigation, and structural blame entry points.

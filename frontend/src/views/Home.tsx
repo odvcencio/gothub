@@ -263,7 +263,10 @@ function Dashboard() {
 
   useEffect(() => {
     listUserRepos()
-      .then(setRepos)
+      .then((items) => {
+        setRepos(items);
+        setError('');
+      })
       .catch((e: any) => setError(e.message || 'failed to load repositories'));
   }, []);
 
@@ -305,7 +308,10 @@ function Dashboard() {
       setShowCreate(false);
       setName(''); setDesc('');
       listUserRepos()
-        .then(setRepos)
+        .then((items) => {
+          setRepos(items);
+          setError('');
+        })
         .catch((err: any) => setError(err?.message || 'repository created but failed to refresh repository list'));
     } catch (err: any) {
       setError(err.message);
@@ -332,6 +338,11 @@ function Dashboard() {
           </button>
         </div>
       </div>
+      {error && (
+        <div style={{ color: '#f85149', marginBottom: '12px', padding: '10px 12px', background: '#1c1214', border: '1px solid #f85149', borderRadius: '6px', fontSize: '13px' }}>
+          {error}
+        </div>
+      )}
 
       {showOnboarding && (
         <div style={{ border: '1px solid #1f6feb', borderRadius: '8px', padding: '16px', marginBottom: '20px', background: '#111b2e' }}>
@@ -434,7 +445,6 @@ function Dashboard() {
 
       {showCreate && (
         <div style={{ border: '1px solid #30363d', borderRadius: '6px', padding: '16px', marginBottom: '20px' }}>
-          {error && <div style={{ color: '#f85149', marginBottom: '12px' }}>{error}</div>}
           <form onSubmit={handleCreate} style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
             <input value={name} onInput={(e: any) => setName(e.target.value)} placeholder="Repository name" style={inputStyle} />
             <input value={desc} onInput={(e: any) => setDesc(e.target.value)} placeholder="Description (optional)" style={inputStyle} />

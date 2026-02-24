@@ -910,6 +910,36 @@ func TestProtocolAuthForPrivateRepo(t *testing.T) {
 	resp.Body.Close()
 }
 
+func TestProtocolAuthInvalidBasicCredentialsReturn401Not404(t *testing.T) {
+	server, _ := setupTestServer(t)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	registerAndGetToken(t, ts.URL, "alice")
+
+	req, _ := http.NewRequest("GET", ts.URL+"/git/alice/missing-repo/info/refs?service=git-upload-pack", nil)
+	req.SetBasicAuth("alice", "wrong-password")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("git info/refs with invalid credentials: expected 401, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	req, _ = http.NewRequest("GET", ts.URL+"/got/alice/missing-repo/refs", nil)
+	req.SetBasicAuth("alice", "wrong-password")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("got refs with invalid credentials: expected 401, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
 func TestProtocolAuthForbiddenForPrivateRepoNonMember(t *testing.T) {
 	server, _ := setupTestServer(t)
 	ts := httptest.NewServer(server)

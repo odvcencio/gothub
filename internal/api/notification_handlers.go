@@ -2,7 +2,6 @@ package api
 
 import (
 	"net/http"
-	"strconv"
 	"strings"
 
 	"github.com/odvcencio/gothub/internal/auth"
@@ -49,9 +48,8 @@ func (s *Server) handleMarkNotificationRead(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil || id <= 0 {
-		jsonError(w, "invalid notification id", http.StatusBadRequest)
+	id, ok := parsePathPositiveInt64(w, r, "id", "notification id")
+	if !ok {
 		return
 	}
 	if err := s.db.MarkNotificationRead(r.Context(), id, claims.UserID); err != nil {

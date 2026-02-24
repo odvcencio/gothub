@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'preact/hooks';
 import { listPRs, getToken } from '../api/client';
+import { PaginationControls } from '../components/PaginationControls';
 
 interface Props {
   owner?: string;
@@ -16,7 +17,7 @@ export function PRListView({ owner, repo }: Props) {
 
   useEffect(() => {
     setPage(1);
-  }, [owner, repo, filter]);
+  }, [owner, repo]);
 
   useEffect(() => {
     if (!owner || !repo) return;
@@ -24,6 +25,7 @@ export function PRListView({ owner, repo }: Props) {
       .then(data => {
         setPrs(data);
         setHasMore(data.length === perPage);
+        setError('');
       })
       .catch(e => setError(e.message));
   }, [owner, repo, filter, page]);
@@ -35,7 +37,12 @@ export function PRListView({ owner, repo }: Props) {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
         <div style={{ display: 'flex', gap: '8px' }}>
           {(['open', 'closed', 'merged'] as const).map(s => (
-            <button key={s} onClick={() => setFilter(s)}
+            <button
+              key={s}
+              onClick={() => {
+                setFilter(s);
+                setPage(1);
+              }}
               style={{
                 background: filter === s ? '#30363d' : 'transparent',
                 color: filter === s ? '#f0f6fc' : '#8b949e',
@@ -62,41 +69,26 @@ export function PRListView({ owner, repo }: Props) {
           No {filter} pull requests
         </div>
       ) : (
-        <div>
-          <div style={{ border: '1px solid #30363d', borderRadius: '6px' }}>
-            {prs.map(pr => (
-              <a key={pr.id} href={`/${owner}/${repo}/pulls/${pr.number}`}
-                style={{ display: 'block', padding: '12px 16px', borderBottom: '1px solid #21262d' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <span style={{ color: stateColor(pr.state), fontSize: '14px' }}>
-                    {stateIcon(pr.state)}
-                  </span>
-                  <span style={{ color: '#f0f6fc', fontSize: '14px', fontWeight: 'bold' }}>{pr.title}</span>
-                </div>
-                <div style={{ color: '#8b949e', fontSize: '12px', marginTop: '4px' }}>
-                  #{pr.number} opened by {pr.author_name || 'unknown'} &middot; {pr.source_branch} → {pr.target_branch}
-                </div>
-              </a>
-            ))}
-          </div>
-          <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '12px' }}>
-            <button
-              onClick={() => setPage(p => Math.max(1, p - 1))}
-              disabled={page === 1}
-              style={pagerButtonStyle(page === 1)}
-            >
-              Previous
-            </button>
-            <span style={{ color: '#8b949e', fontSize: '13px' }}>Page {page}</span>
-            <button
-              onClick={() => setPage(p => p + 1)}
-              disabled={!hasMore}
-              style={pagerButtonStyle(!hasMore)}
-            >
-              Next
-            </button>
-          </div>
+        <div style={{ border: '1px solid #30363d', borderRadius: '6px' }}>
+          {prs.map(pr => (
+            <a key={pr.id} href={`/${owner}/${repo}/pulls/${pr.number}`}
+              style={{ display: 'block', padding: '12px 16px', borderBottom: '1px solid #21262d' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span style={{ color: stateColor(pr.state), fontSize: '14px' }}>
+                  {stateIcon(pr.state)}
+                </span>
+                <span style={{ color: '#f0f6fc', fontSize: '14px', fontWeight: 'bold' }}>{pr.title}</span>
+              </div>
+              <div style={{ color: '#8b949e', fontSize: '12px', marginTop: '4px' }}>
+                #{pr.number} opened by {pr.author_name || 'unknown'} &middot; {pr.source_branch} → {pr.target_branch}
+              </div>
+            </a>
+          ))}
         </div>
+      )}
+
+      {(prs.length > 0 || page > 1) && (
+        <PaginationControls page={page} hasNext={hasMore} onPageChange={setPage} />
       )}
     </div>
   );
@@ -118,16 +110,4 @@ function stateIcon(state: string): string {
     case 'closed': return '\u25CF';
     default: return '\u25CB';
   }
-}
-
-function pagerButtonStyle(disabled: boolean) {
-  return {
-    background: disabled ? '#161b22' : '#21262d',
-    color: disabled ? '#6e7681' : '#c9d1d9',
-    border: '1px solid #30363d',
-    padding: '6px 12px',
-    borderRadius: '6px',
-    cursor: disabled ? 'not-allowed' : 'pointer',
-    fontSize: '13px',
-  };
 }

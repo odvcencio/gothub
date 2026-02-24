@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'preact/hooks';
 import { createIssue, getToken, listIssues } from '../api/client';
+import { PaginationControls } from '../components/PaginationControls';
 
 interface Props {
   owner?: string;
@@ -9,27 +10,38 @@ interface Props {
 export function IssueListView({ owner, repo }: Props) {
   const [issues, setIssues] = useState<any[]>([]);
   const [state, setState] = useState<'open' | 'closed' | 'all'>('open');
+  const [page, setPage] = useState(1);
+  const [hasMore, setHasMore] = useState(false);
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
   const [title, setTitle] = useState('');
   const [body, setBody] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
+  const perPage = 20;
 
   const loggedIn = !!getToken();
 
-  const loadIssues = () => {
+  const loadIssues = (targetPage: number) => {
     if (!owner || !repo) return;
     setLoading(true);
-    listIssues(owner, repo, state)
-      .then(setIssues)
+    listIssues(owner, repo, state, targetPage, perPage)
+      .then((data) => {
+        setIssues(data);
+        setHasMore(data.length === perPage);
+        setError('');
+      })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
   };
 
   useEffect(() => {
-    loadIssues();
-  }, [owner, repo, state]);
+    setPage(1);
+  }, [owner, repo]);
+
+  useEffect(() => {
+    loadIssues(page);
+  }, [owner, repo, state, page]);
 
   const onCreateIssue = async (e: Event) => {
     e.preventDefault();
@@ -42,9 +54,15 @@ export function IssueListView({ owner, repo }: Props) {
       setBody('');
       setShowCreate(false);
       if (state === 'open' || state === 'all') {
-        setIssues([issue, ...issues]);
+        if (page === 1) {
+          const nextIssues = [issue, ...issues];
+          setIssues(nextIssues.slice(0, perPage));
+          setHasMore(hasMore || nextIssues.length > perPage);
+        } else {
+          setPage(1);
+        }
       } else {
-        loadIssues();
+        loadIssues(page);
       }
     } catch (err: any) {
       setError(err.message || 'failed to create issue');
@@ -71,7 +89,10 @@ export function IssueListView({ owner, repo }: Props) {
         {(['open', 'closed', 'all'] as const).map((s) => (
           <button
             key={s}
-            onClick={() => setState(s)}
+            onClick={() => {
+              setState(s);
+              setPage(1);
+            }}
             style={{
               background: state === s ? '#1f6feb' : '#161b22',
               color: '#c9d1d9',
@@ -136,6 +157,10 @@ export function IssueListView({ owner, repo }: Props) {
             </a>
           ))}
         </div>
+      )}
+
+      {!loading && (issues.length > 0 || page > 1) && (
+        <PaginationControls page={page} hasNext={hasMore} onPageChange={setPage} />
       )}
     </div>
   );
