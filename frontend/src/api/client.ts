@@ -42,39 +42,287 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   return resp.json();
 }
 
+export interface APIUser {
+  id: number;
+  username: string;
+  email?: string;
+  [key: string]: unknown;
+}
+
+export interface AuthResponse {
+  token: string;
+  user: APIUser;
+}
+
+export interface Notification {
+  id: number;
+  read_at?: string;
+  created_at?: string;
+  [key: string]: unknown;
+}
+
+export interface Repository {
+  id: number;
+  name: string;
+  description?: string;
+  is_private: boolean;
+  default_branch?: string;
+  owner_name?: string;
+  parent_repo_id?: number;
+  parent_owner?: string;
+  parent_name?: string;
+  [key: string]: unknown;
+}
+
+export interface RepoStars {
+  count: number;
+  starred: boolean;
+}
+
+export interface TreeEntry {
+  name: string;
+  is_dir: boolean;
+  blob_hash?: string;
+  subtree_hash?: string;
+  [key: string]: unknown;
+}
+
+export interface BlobResponse {
+  data?: string;
+  [key: string]: unknown;
+}
+
+export interface CommitSummary {
+  hash: string;
+  author?: string;
+  message?: string;
+  timestamp?: number | string;
+  [key: string]: unknown;
+}
+
+export interface EntityDescriptor {
+  key: string;
+  kind?: string;
+  decl_kind?: string;
+  name?: string;
+  [key: string]: unknown;
+}
+
+export interface DiffFileChange {
+  type: string;
+  key: string;
+  before?: { name?: string; decl_kind?: string };
+  after?: { name?: string; decl_kind?: string };
+}
+
+export interface DiffFile {
+  path: string;
+  changes: DiffFileChange[];
+}
+
+export interface PullRequest {
+  id: number;
+  number: number;
+  title: string;
+  body?: string;
+  state: string;
+  source_branch: string;
+  target_branch: string;
+  [key: string]: unknown;
+}
+
+export interface MergeGate {
+  allowed: boolean;
+  reasons?: string[];
+}
+
+export interface CheckRun {
+  id?: number;
+  name: string;
+  status: string;
+  conclusion?: string;
+  [key: string]: unknown;
+}
+
+export interface PRComment {
+  id: number;
+  body: string;
+  author_name?: string;
+  created_at?: string;
+  [key: string]: unknown;
+}
+
+export interface PRReview {
+  id: number;
+  state: string;
+  body?: string;
+  author_name?: string;
+  created_at?: string;
+  [key: string]: unknown;
+}
+
+export interface MergePreviewStats {
+  total_entities: number;
+  unchanged: number;
+  ours_modified: number;
+  theirs_modified: number;
+  both_modified: number;
+  added: number;
+  deleted: number;
+  conflicts: number;
+}
+
+export interface MergePreviewFile {
+  path: string;
+  status: string;
+  conflict_count: number;
+  entities?: EntityDescriptor[];
+}
+
+export interface MergePreviewResponse {
+  has_conflicts: boolean;
+  conflict_count: number;
+  stats: MergePreviewStats;
+  files: MergePreviewFile[];
+}
+
+export interface BranchProtectionRule {
+  required_reviews?: number;
+  required_checks?: string[];
+  require_entity_owner_approval?: boolean;
+  [key: string]: unknown;
+}
+
+export interface Webhook {
+  id: number;
+  url: string;
+  events?: string[];
+  active?: boolean;
+  [key: string]: unknown;
+}
+
+export interface WebhookDelivery {
+  id: number;
+  status?: string;
+  response_code?: number;
+  created_at?: string;
+  [key: string]: unknown;
+}
+
+export interface SSHKey {
+  id: number;
+  name: string;
+  public_key: string;
+  [key: string]: unknown;
+}
+
+export interface Collaborator {
+  user_id?: number;
+  username: string;
+  role: string;
+  [key: string]: unknown;
+}
+
+export interface Organization {
+  id?: number;
+  name: string;
+  display_name?: string;
+  [key: string]: unknown;
+}
+
+export interface SymbolResult {
+  id?: string;
+  name: string;
+  kind: string;
+  file: string;
+  [key: string]: unknown;
+}
+
+export interface ReferenceResult {
+  name: string;
+  file: string;
+  line?: number;
+  [key: string]: unknown;
+}
+
+export interface CallGraphEdge {
+  caller_name: string;
+  caller_file: string;
+  callee_name: string;
+  callee_file: string;
+  [key: string]: unknown;
+}
+
+export interface CallGraphResponse {
+  definitions: SymbolResult[];
+  edges: CallGraphEdge[];
+}
+
+export interface EntityHistoryHit {
+  stable_id: string;
+  name: string;
+  path: string;
+  commit_hash: string;
+  [key: string]: unknown;
+}
+
+export interface SemverRecommendation {
+  level: string;
+  reason?: string;
+  [key: string]: unknown;
+}
+
+export interface Issue {
+  id: number;
+  number: number;
+  title: string;
+  body?: string;
+  state: 'open' | 'closed';
+  author_name?: string;
+  [key: string]: unknown;
+}
+
+export interface IssueComment {
+  id: number;
+  body: string;
+  author_name?: string;
+  created_at?: string;
+  [key: string]: unknown;
+}
+
 // Auth
 export const register = (username: string, email: string, password: string) =>
-  request<{ token: string; user: any }>('POST', '/auth/register', { username, email, password });
+  request<AuthResponse>('POST', '/auth/register', { username, email, password });
 export const login = (username: string, password: string) =>
-  request<{ token: string; user: any }>('POST', '/auth/login', { username, password });
+  request<AuthResponse>('POST', '/auth/login', { username, password });
 export const requestMagicLink = (email: string) =>
   request<{ sent: boolean; token?: string; expires_at?: string }>('POST', '/auth/magic/request', { email });
 export const verifyMagicLink = (token: string) =>
-  request<{ token: string; user: any }>('POST', '/auth/magic/verify', { token });
+  request<AuthResponse>('POST', '/auth/magic/verify', { token });
 export const beginSSHLogin = (username: string, fingerprint?: string) =>
   request<{ challenge_id: string; challenge: string; fingerprint: string; expires_at: string }>('POST', '/auth/ssh/challenge', { username, fingerprint });
 export const finishSSHLogin = (challengeId: string, signature: string, signatureFormat: string) =>
-  request<{ token: string; user: any }>('POST', '/auth/ssh/verify', { challenge_id: challengeId, signature, signature_format: signatureFormat });
+  request<AuthResponse>('POST', '/auth/ssh/verify', { challenge_id: challengeId, signature, signature_format: signatureFormat });
 export const beginWebAuthnRegistration = () =>
-  request<{ session_id: string; options: any }>('POST', '/auth/webauthn/register/begin');
-export const finishWebAuthnRegistration = (sessionId: string, credential: any) =>
+  request<{ session_id: string; options: Record<string, unknown> }>('POST', '/auth/webauthn/register/begin');
+export const finishWebAuthnRegistration = (sessionId: string, credential: Record<string, unknown>) =>
   request<{ credential_id: string }>('POST', '/auth/webauthn/register/finish', { session_id: sessionId, credential });
 export const beginWebAuthnLogin = (username: string) =>
-  request<{ session_id: string; options: any }>('POST', '/auth/webauthn/login/begin', { username });
-export const finishWebAuthnLogin = (sessionId: string, credential: any) =>
-  request<{ token: string; user: any }>('POST', '/auth/webauthn/login/finish', { session_id: sessionId, credential });
+  request<{ session_id: string; options: Record<string, unknown> }>('POST', '/auth/webauthn/login/begin', { username });
+export const finishWebAuthnLogin = (sessionId: string, credential: Record<string, unknown>) =>
+  request<AuthResponse>('POST', '/auth/webauthn/login/finish', { session_id: sessionId, credential });
 export const refreshToken = () =>
-  request<{ token: string; user: any }>('POST', '/auth/refresh');
+  request<AuthResponse>('POST', '/auth/refresh');
 export const changePassword = (currentPassword: string, newPassword: string) =>
-  request<{ token: string; user: any }>('POST', '/auth/change-password', { current_password: currentPassword, new_password: newPassword });
-export const getUser = () => request<any>('GET', '/user');
+  request<AuthResponse>('POST', '/auth/change-password', { current_password: currentPassword, new_password: newPassword });
+export const getUser = () => request<APIUser>('GET', '/user');
 export const listNotifications = (unread?: boolean, page?: number, perPage?: number) => {
   const query = new URLSearchParams();
   if (unread) query.set('unread', 'true');
   if (page && page > 0) query.set('page', String(page));
   if (perPage && perPage > 0) query.set('per_page', String(perPage));
   const suffix = query.toString();
-  return request<any[]>('GET', `/notifications${suffix ? '?' + suffix : ''}`);
+  return request<Notification[]>('GET', `/notifications${suffix ? '?' + suffix : ''}`);
 };
 export const getUnreadNotificationsCount = () => request<{ count: number }>('GET', '/notifications/unread-count');
 export const markNotificationRead = (id: number) => request<void>('POST', `/notifications/${id}/read`);
@@ -82,125 +330,125 @@ export const markAllNotificationsRead = () => request<void>('POST', '/notificati
 
 // Repos
 export const createRepo = (name: string, description: string, isPrivate: boolean) =>
-  request<any>('POST', '/repos', { name, description, private: isPrivate });
+  request<Repository>('POST', '/repos', { name, description, private: isPrivate });
 export const forkRepo = (owner: string, repo: string, name?: string) =>
-  request<any>('POST', `/repos/${owner}/${repo}/forks`, name ? { name } : undefined);
+  request<Repository>('POST', `/repos/${owner}/${repo}/forks`, name ? { name } : undefined);
 export const listRepoForks = (owner: string, repo: string, page?: number, perPage?: number) => {
   const query = new URLSearchParams();
   if (page && page > 0) query.set('page', String(page));
   if (perPage && perPage > 0) query.set('per_page', String(perPage));
   const suffix = query.toString();
-  return request<any[]>('GET', `/repos/${owner}/${repo}/forks${suffix ? '?' + suffix : ''}`);
+  return request<Repository[]>('GET', `/repos/${owner}/${repo}/forks${suffix ? '?' + suffix : ''}`);
 };
 export const getRepo = (owner: string, repo: string) =>
-  request<any>('GET', `/repos/${owner}/${repo}`);
-export const listUserRepos = () => request<any[]>('GET', '/user/repos');
-export const listUserStarredRepos = () => request<any[]>('GET', '/user/starred');
+  request<Repository>('GET', `/repos/${owner}/${repo}`);
+export const listUserRepos = () => request<Repository[]>('GET', '/user/repos');
+export const listUserStarredRepos = () => request<Repository[]>('GET', '/user/starred');
 export const getRepoStars = (owner: string, repo: string) =>
-  request<{ count: number; starred: boolean }>('GET', `/repos/${owner}/${repo}/stars`);
+  request<RepoStars>('GET', `/repos/${owner}/${repo}/stars`);
 export const starRepo = (owner: string, repo: string) =>
-  request<{ count: number; starred: boolean }>('PUT', `/repos/${owner}/${repo}/star`);
+  request<RepoStars>('PUT', `/repos/${owner}/${repo}/star`);
 export const unstarRepo = (owner: string, repo: string) =>
-  request<{ count: number; starred: boolean }>('DELETE', `/repos/${owner}/${repo}/star`);
+  request<RepoStars>('DELETE', `/repos/${owner}/${repo}/star`);
 export const listRepoStargazers = (owner: string, repo: string, page?: number, perPage?: number) => {
   const query = new URLSearchParams();
   if (page && page > 0) query.set('page', String(page));
   if (perPage && perPage > 0) query.set('per_page', String(perPage));
   const suffix = query.toString();
-  return request<any[]>('GET', `/repos/${owner}/${repo}/stargazers${suffix ? '?' + suffix : ''}`);
+  return request<APIUser[]>('GET', `/repos/${owner}/${repo}/stargazers${suffix ? '?' + suffix : ''}`);
 };
 
 // Browsing
 export const listTree = (owner: string, repo: string, ref: string, path?: string) =>
-  request<any[]>('GET', `/repos/${owner}/${repo}/tree/${ref}${path ? '/' + path : ''}`);
+  request<TreeEntry[]>('GET', `/repos/${owner}/${repo}/tree/${ref}${path ? '/' + path : ''}`);
 export const listBranches = (owner: string, repo: string) =>
   request<string[]>('GET', `/repos/${owner}/${repo}/branches`);
 export const getBlob = (owner: string, repo: string, ref: string, path: string) =>
-  request<any>('GET', `/repos/${owner}/${repo}/blob/${ref}/${path}`);
+  request<BlobResponse>('GET', `/repos/${owner}/${repo}/blob/${ref}/${path}`);
 export const listCommits = (owner: string, repo: string, ref: string) =>
-  request<any[]>('GET', `/repos/${owner}/${repo}/commits/${ref}`);
+  request<CommitSummary[]>('GET', `/repos/${owner}/${repo}/commits/${ref}`);
 export const getCommit = (owner: string, repo: string, hash: string) =>
-  request<any>('GET', `/repos/${owner}/${repo}/commit/${hash}`);
+  request<CommitSummary>('GET', `/repos/${owner}/${repo}/commit/${hash}`);
 
 // Entities & Diff
 export const listEntities = (owner: string, repo: string, ref: string, path: string) =>
-  request<any>('GET', `/repos/${owner}/${repo}/entities/${ref}/${path}`);
+  request<EntityDescriptor[]>('GET', `/repos/${owner}/${repo}/entities/${ref}/${path}`);
 export const getDiff = (owner: string, repo: string, spec: string) =>
-  request<any>('GET', `/repos/${owner}/${repo}/diff/${spec}`);
+  request<{ files: DiffFile[] }>('GET', `/repos/${owner}/${repo}/diff/${spec}`);
 
 // Pull Requests
-export const createPR = (owner: string, repo: string, data: any) =>
-  request<any>('POST', `/repos/${owner}/${repo}/pulls`, data);
+export const createPR = (owner: string, repo: string, data: Record<string, unknown>) =>
+  request<PullRequest>('POST', `/repos/${owner}/${repo}/pulls`, data);
 export const listPRs = (owner: string, repo: string, state?: string, page?: number, perPage?: number) => {
   const query = new URLSearchParams();
   if (state) query.set('state', state);
   if (page && page > 0) query.set('page', String(page));
   if (perPage && perPage > 0) query.set('per_page', String(perPage));
   const suffix = query.toString();
-  return request<any[]>('GET', `/repos/${owner}/${repo}/pulls${suffix ? '?' + suffix : ''}`);
+  return request<PullRequest[]>('GET', `/repos/${owner}/${repo}/pulls${suffix ? '?' + suffix : ''}`);
 };
 export const getPR = (owner: string, repo: string, number: number) =>
-  request<any>('GET', `/repos/${owner}/${repo}/pulls/${number}`);
+  request<PullRequest>('GET', `/repos/${owner}/${repo}/pulls/${number}`);
 export const updatePR = (owner: string, repo: string, number: number, data: { title?: string; body?: string }) =>
-  request<any>('PATCH', `/repos/${owner}/${repo}/pulls/${number}`, data);
+  request<PullRequest>('PATCH', `/repos/${owner}/${repo}/pulls/${number}`, data);
 export const getPRDiff = (owner: string, repo: string, number: number) =>
-  request<any>('GET', `/repos/${owner}/${repo}/pulls/${number}/diff`);
+  request<{ files: DiffFile[] }>('GET', `/repos/${owner}/${repo}/pulls/${number}/diff`);
 export const getMergePreview = (owner: string, repo: string, number: number) =>
-  request<any>('GET', `/repos/${owner}/${repo}/pulls/${number}/merge-preview`);
+  request<MergePreviewResponse>('GET', `/repos/${owner}/${repo}/pulls/${number}/merge-preview`);
 export const getMergeGate = (owner: string, repo: string, number: number) =>
-  request<{ allowed: boolean; reasons?: string[] }>('GET', `/repos/${owner}/${repo}/pulls/${number}/merge-gate`);
+  request<MergeGate>('GET', `/repos/${owner}/${repo}/pulls/${number}/merge-gate`);
 export const mergePR = (owner: string, repo: string, number: number) =>
-  request<any>('POST', `/repos/${owner}/${repo}/pulls/${number}/merge`);
+  request<{ merge_commit: string; status: string }>('POST', `/repos/${owner}/${repo}/pulls/${number}/merge`);
 export const listPRComments = (owner: string, repo: string, number: number) =>
-  request<any[]>('GET', `/repos/${owner}/${repo}/pulls/${number}/comments`);
-export const createPRComment = (owner: string, repo: string, number: number, data: any) =>
-  request<any>('POST', `/repos/${owner}/${repo}/pulls/${number}/comments`, data);
+  request<PRComment[]>('GET', `/repos/${owner}/${repo}/pulls/${number}/comments`);
+export const createPRComment = (owner: string, repo: string, number: number, data: Record<string, unknown>) =>
+  request<PRComment>('POST', `/repos/${owner}/${repo}/pulls/${number}/comments`, data);
 export const deletePRComment = (owner: string, repo: string, number: number, commentId: number) =>
   request<void>('DELETE', `/repos/${owner}/${repo}/pulls/${number}/comments/${commentId}`);
 export const listPRReviews = (owner: string, repo: string, number: number) =>
-  request<any[]>('GET', `/repos/${owner}/${repo}/pulls/${number}/reviews`);
-export const createPRReview = (owner: string, repo: string, number: number, data: any) =>
-  request<any>('POST', `/repos/${owner}/${repo}/pulls/${number}/reviews`, data);
+  request<PRReview[]>('GET', `/repos/${owner}/${repo}/pulls/${number}/reviews`);
+export const createPRReview = (owner: string, repo: string, number: number, data: Record<string, unknown>) =>
+  request<PRReview>('POST', `/repos/${owner}/${repo}/pulls/${number}/reviews`, data);
 export const listPRChecks = (owner: string, repo: string, number: number) =>
-  request<any[]>('GET', `/repos/${owner}/${repo}/pulls/${number}/checks`);
-export const upsertPRCheck = (owner: string, repo: string, number: number, data: any) =>
-  request<any>('POST', `/repos/${owner}/${repo}/pulls/${number}/checks`, data);
+  request<CheckRun[]>('GET', `/repos/${owner}/${repo}/pulls/${number}/checks`);
+export const upsertPRCheck = (owner: string, repo: string, number: number, data: Record<string, unknown>) =>
+  request<CheckRun>('POST', `/repos/${owner}/${repo}/pulls/${number}/checks`, data);
 
 // Branch protection
 export const getBranchProtection = (owner: string, repo: string, branch: string) =>
-  request<any>('GET', `/repos/${owner}/${repo}/branch-protection/${branch}`);
-export const setBranchProtection = (owner: string, repo: string, branch: string, data: any) =>
-  request<any>('PUT', `/repos/${owner}/${repo}/branch-protection/${branch}`, data);
+  request<BranchProtectionRule>('GET', `/repos/${owner}/${repo}/branch-protection/${branch}`);
+export const setBranchProtection = (owner: string, repo: string, branch: string, data: Record<string, unknown>) =>
+  request<BranchProtectionRule>('PUT', `/repos/${owner}/${repo}/branch-protection/${branch}`, data);
 export const deleteBranchProtection = (owner: string, repo: string, branch: string) =>
   request<void>('DELETE', `/repos/${owner}/${repo}/branch-protection/${branch}`);
 
 // Webhooks
-export const createWebhook = (owner: string, repo: string, data: any) =>
-  request<any>('POST', `/repos/${owner}/${repo}/webhooks`, data);
+export const createWebhook = (owner: string, repo: string, data: Record<string, unknown>) =>
+  request<Webhook>('POST', `/repos/${owner}/${repo}/webhooks`, data);
 export const listWebhooks = (owner: string, repo: string) =>
-  request<any[]>('GET', `/repos/${owner}/${repo}/webhooks`);
+  request<Webhook[]>('GET', `/repos/${owner}/${repo}/webhooks`);
 export const getWebhook = (owner: string, repo: string, id: number) =>
-  request<any>('GET', `/repos/${owner}/${repo}/webhooks/${id}`);
+  request<Webhook>('GET', `/repos/${owner}/${repo}/webhooks/${id}`);
 export const deleteWebhook = (owner: string, repo: string, id: number) =>
   request<void>('DELETE', `/repos/${owner}/${repo}/webhooks/${id}`);
 export const listWebhookDeliveries = (owner: string, repo: string, id: number) =>
-  request<any[]>('GET', `/repos/${owner}/${repo}/webhooks/${id}/deliveries`);
+  request<WebhookDelivery[]>('GET', `/repos/${owner}/${repo}/webhooks/${id}/deliveries`);
 export const pingWebhook = (owner: string, repo: string, id: number) =>
-  request<any>('POST', `/repos/${owner}/${repo}/webhooks/${id}/ping`);
+  request<WebhookDelivery>('POST', `/repos/${owner}/${repo}/webhooks/${id}/ping`);
 export const redeliverWebhookDelivery = (owner: string, repo: string, id: number, deliveryID: number) =>
-  request<any>('POST', `/repos/${owner}/${repo}/webhooks/${id}/deliveries/${deliveryID}/redeliver`);
+  request<WebhookDelivery>('POST', `/repos/${owner}/${repo}/webhooks/${id}/deliveries/${deliveryID}/redeliver`);
 
 // SSH Keys
-export const listSSHKeys = () => request<any[]>('GET', '/user/ssh-keys');
+export const listSSHKeys = () => request<SSHKey[]>('GET', '/user/ssh-keys');
 export const createSSHKey = (name: string, publicKey: string) =>
-  request<any>('POST', '/user/ssh-keys', { name, public_key: publicKey });
+  request<SSHKey>('POST', '/user/ssh-keys', { name, public_key: publicKey });
 export const deleteSSHKey = (id: number) => request<void>('DELETE', `/user/ssh-keys/${id}`);
 
 // Collaborators
 export const listCollaborators = (owner: string, repo: string) =>
-  request<any[]>('GET', `/repos/${owner}/${repo}/collaborators`);
+  request<Collaborator[]>('GET', `/repos/${owner}/${repo}/collaborators`);
 export const addCollaborator = (owner: string, repo: string, username: string, role: string) =>
-  request<any>('POST', `/repos/${owner}/${repo}/collaborators`, { username, role });
+  request<Collaborator>('POST', `/repos/${owner}/${repo}/collaborators`, { username, role });
 export const removeCollaborator = (owner: string, repo: string, username: string) =>
   request<void>('DELETE', `/repos/${owner}/${repo}/collaborators/${username}`);
 
@@ -210,31 +458,31 @@ export const deleteRepo = (owner: string, repo: string) =>
 
 // Organizations
 export const createOrg = (name: string, displayName: string) =>
-  request<any>('POST', '/orgs', { name, display_name: displayName });
-export const getOrg = (org: string) => request<any>('GET', `/orgs/${org}`);
+  request<Organization>('POST', '/orgs', { name, display_name: displayName });
+export const getOrg = (org: string) => request<Organization>('GET', `/orgs/${org}`);
 export const deleteOrg = (org: string) => request<void>('DELETE', `/orgs/${org}`);
-export const listOrgMembers = (org: string) => request<any[]>('GET', `/orgs/${org}/members`);
+export const listOrgMembers = (org: string) => request<Collaborator[]>('GET', `/orgs/${org}/members`);
 export const addOrgMember = (org: string, username: string, role: string) =>
   request<void>('POST', `/orgs/${org}/members`, { username, role });
 export const removeOrgMember = (org: string, username: string) =>
   request<void>('DELETE', `/orgs/${org}/members/${username}`);
-export const listOrgRepos = (org: string) => request<any[]>('GET', `/orgs/${org}/repos`);
-export const listUserOrgs = () => request<any[]>('GET', '/user/orgs');
+export const listOrgRepos = (org: string) => request<Repository[]>('GET', `/orgs/${org}/repos`);
+export const listUserOrgs = () => request<Organization[]>('GET', '/user/orgs');
 
 // Code intelligence
 export const searchSymbols = (owner: string, repo: string, ref: string, query?: string) => {
   const params = new URLSearchParams();
   if (query) params.set('q', query);
   const suffix = params.toString();
-  return request<any[]>('GET', `/repos/${owner}/${repo}/symbols/${ref}${suffix ? '?' + suffix : ''}`);
+  return request<SymbolResult[]>('GET', `/repos/${owner}/${repo}/symbols/${ref}${suffix ? '?' + suffix : ''}`);
 };
 export const findReferences = (owner: string, repo: string, ref: string, name: string) =>
-  request<any[]>('GET', `/repos/${owner}/${repo}/references/${ref}?name=${encodeURIComponent(name)}`);
+  request<ReferenceResult[]>('GET', `/repos/${owner}/${repo}/references/${ref}?name=${encodeURIComponent(name)}`);
 export const getCallGraph = (owner: string, repo: string, ref: string, symbol: string, depth?: number, reverse?: boolean) => {
   const params = new URLSearchParams({ symbol });
   if (depth) params.set('depth', String(depth));
   if (reverse) params.set('reverse', 'true');
-  return request<any>('GET', `/repos/${owner}/${repo}/callgraph/${ref}?${params.toString()}`);
+  return request<CallGraphResponse>('GET', `/repos/${owner}/${repo}/callgraph/${ref}?${params.toString()}`);
 };
 
 // Entity history
@@ -243,31 +491,31 @@ export const getEntityHistory = (owner: string, repo: string, ref: string, opts:
   if (opts.stableId) params.set('stable_id', opts.stableId);
   if (opts.name) params.set('name', opts.name);
   if (opts.bodyHash) params.set('body_hash', opts.bodyHash);
-  return request<any[]>('GET', `/repos/${owner}/${repo}/entity-history/${ref}?${params.toString()}`);
+  return request<EntityHistoryHit[]>('GET', `/repos/${owner}/${repo}/entity-history/${ref}?${params.toString()}`);
 };
 
 // Semver
 export const getSemver = (owner: string, repo: string, spec: string) =>
-  request<any>('GET', `/repos/${owner}/${repo}/semver/${spec}`);
+  request<SemverRecommendation>('GET', `/repos/${owner}/${repo}/semver/${spec}`);
 
 // Issues
-export const createIssue = (owner: string, repo: string, data: any) =>
-  request<any>('POST', `/repos/${owner}/${repo}/issues`, data);
+export const createIssue = (owner: string, repo: string, data: Record<string, unknown>) =>
+  request<Issue>('POST', `/repos/${owner}/${repo}/issues`, data);
 export const listIssues = (owner: string, repo: string, state?: string, page?: number, perPage?: number) => {
   const query = new URLSearchParams();
   if (state) query.set('state', state);
   if (page && page > 0) query.set('page', String(page));
   if (perPage && perPage > 0) query.set('per_page', String(perPage));
   const suffix = query.toString();
-  return request<any[]>('GET', `/repos/${owner}/${repo}/issues${suffix ? '?' + suffix : ''}`);
+  return request<Issue[]>('GET', `/repos/${owner}/${repo}/issues${suffix ? '?' + suffix : ''}`);
 };
 export const getIssue = (owner: string, repo: string, number: number) =>
-  request<any>('GET', `/repos/${owner}/${repo}/issues/${number}`);
-export const updateIssue = (owner: string, repo: string, number: number, data: any) =>
-  request<any>('PATCH', `/repos/${owner}/${repo}/issues/${number}`, data);
-export const createIssueComment = (owner: string, repo: string, number: number, data: any) =>
-  request<any>('POST', `/repos/${owner}/${repo}/issues/${number}/comments`, data);
+  request<Issue>('GET', `/repos/${owner}/${repo}/issues/${number}`);
+export const updateIssue = (owner: string, repo: string, number: number, data: Record<string, unknown>) =>
+  request<Issue>('PATCH', `/repos/${owner}/${repo}/issues/${number}`, data);
+export const createIssueComment = (owner: string, repo: string, number: number, data: Record<string, unknown>) =>
+  request<IssueComment>('POST', `/repos/${owner}/${repo}/issues/${number}/comments`, data);
 export const listIssueComments = (owner: string, repo: string, number: number) =>
-  request<any[]>('GET', `/repos/${owner}/${repo}/issues/${number}/comments`);
+  request<IssueComment[]>('GET', `/repos/${owner}/${repo}/issues/${number}/comments`);
 export const deleteIssueComment = (owner: string, repo: string, number: number, commentId: number) =>
   request<void>('DELETE', `/repos/${owner}/${repo}/issues/${number}/comments/${commentId}`);
