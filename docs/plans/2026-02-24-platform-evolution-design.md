@@ -2,13 +2,13 @@
 
 **Date:** 2026-02-24
 **Status:** Approved
-**Scope:** Got (structural VCS engine) + GoThub (hosting platform)
+**Scope:** Got (structural VCS engine) + GotHub (hosting platform)
 
 ---
 
 ## Vision
 
-Transform Got + GoThub from a working prototype into the fastest, most intelligent code awareness platform — capable of serving solo developers, teams, and enterprises. Every phase delivers a complete, shippable product.
+Transform Got + GotHub from a working prototype into the fastest, most intelligent code awareness platform — capable of serving solo developers, teams, and enterprises. Every phase delivers a complete, shippable product.
 
 ## Current State
 
@@ -38,7 +38,7 @@ Four phases. Each delivers a complete vertical slice. No phase depends on "we'll
 
 ## Phase 1 — Fast & Smart Core
 
-**Goal:** Got becomes objectively faster than Git for common operations. GoThub stops choking on pushes. The foundation is production-grade.
+**Goal:** Got becomes objectively faster than Git for common operations. GotHub stops choking on pushes. The foundation is production-grade.
 
 ### 1.1 Git-Compatible Pack File Engine (Got)
 
@@ -79,7 +79,7 @@ New commands:
 - 10-100x faster sequential reads
 - 1M+ objects feasible
 
-### 1.2 Async Indexing Pipeline (GoThub)
+### 1.2 Async Indexing Pipeline (GotHub)
 
 **Problem:** Entity extraction and lineage indexing block the push response.
 
@@ -108,7 +108,7 @@ Index status API:
 - Indexing throughput: 10-50x (incremental)
 - Concurrent pushes unblocked
 
-### 1.3 Full Code Intelligence Engine (GoThub)
+### 1.3 Full Code Intelligence Engine (GotHub)
 
 **Problem:** Every code intel request rebuilds the full index from scratch.
 
@@ -155,7 +155,7 @@ Index status API:
 - Cache miss → database read (fast) not full re-parse (slow)
 - Warm on startup from most recent commits of active repos
 
-### 1.4 Merge Performance (Got + GoThub)
+### 1.4 Merge Performance (Got + GotHub)
 
 **Problem:** Naive O(n) BFS for merge base. No caching. Full tree re-flatten on every preview.
 
@@ -214,7 +214,7 @@ Index status API:
 - `BenchmarkThreeWayMerge` — merge files of 100, 1K, 10K lines
 - `BenchmarkBloomFilter` — lookup throughput at various FPR
 
-**Benchmark Suites (GoThub):**
+**Benchmark Suites (GotHub):**
 - `BenchmarkPushReceive` — end-to-end push, N objects
 - `BenchmarkCodeIntelQuery` — symbol search at various repo sizes
 - `BenchmarkMergePreview` — PR preview cold + warm
