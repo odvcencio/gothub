@@ -12,6 +12,7 @@ import {
 } from '../api/client';
 import { FileTree } from '../components/FileTree';
 import { CodeViewer } from '../components/CodeViewer';
+import { MarkdownViewer } from '../components/MarkdownViewer';
 import { IndexStatusCard } from '../components/IndexStatusCard';
 
 interface Props {
@@ -132,6 +133,7 @@ export function CodeView({ owner, repo, ref: gitRef, path }: Props) {
 
   const breadcrumbs = buildBreadcrumbs(owner, repo, gitRef, path);
   const showIndexStatus = indexStatusLoading || !!indexStatusError || !!indexStatus;
+  const isMarkdown = isMarkdownPath(path || '');
 
   return (
     <div>
@@ -174,14 +176,25 @@ export function CodeView({ owner, repo, ref: gitRef, path }: Props) {
         blob ? (
           <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', gap: '16px' }}>
             <div style={{ flex: '1 1 640px', minWidth: 0 }}>
-              <CodeViewer
-                filename={path || ''}
-                source={blob.content || ''}
-                owner={owner}
-                repo={repo}
-                gitRef={gitRef}
-                path={path || ''}
-              />
+              {isMarkdown ? (
+                <MarkdownViewer
+                  filename={path || ''}
+                  source={blob.content || ''}
+                  owner={owner}
+                  repo={repo}
+                  gitRef={gitRef}
+                  path={path || ''}
+                />
+              ) : (
+                <CodeViewer
+                  filename={path || ''}
+                  source={blob.content || ''}
+                  owner={owner}
+                  repo={repo}
+                  gitRef={gitRef}
+                  path={path || ''}
+                />
+              )}
             </div>
             <EntityBlamePanel
               entities={entities}
@@ -227,6 +240,11 @@ function decodeBlobContent(data: unknown): string {
   } catch {
     return '';
   }
+}
+
+function isMarkdownPath(filePath: string): boolean {
+  const lower = filePath.toLowerCase();
+  return lower.endsWith('.md') || lower.endsWith('.markdown');
 }
 
 function EntityBlamePanel({
