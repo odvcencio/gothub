@@ -44,6 +44,15 @@ export function PRDetailView({ owner, repo, number }: Props) {
   const [merging, setMerging] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const appendNotice = (message: string) => {
+    const next = message.trim();
+    if (!next) return;
+    setNotice((current) => {
+      if (!current) return next;
+      if (current.includes(next)) return current;
+      return `${current} • ${next}`;
+    });
+  };
 
   const prNum = Number(number);
 
@@ -64,24 +73,24 @@ export function PRDetailView({ owner, repo, number }: Props) {
   useEffect(() => {
     if (!owner || !repo || !prNum) return;
     getPR(owner, repo, prNum).then(setPr).catch(e => setError(e.message));
-    listPRComments(owner, repo, prNum).then(setComments).catch(e => setNotice(e.message || 'failed to load comments'));
-    listPRReviews(owner, repo, prNum).then(setReviews).catch(e => setNotice(e.message || 'failed to load reviews'));
+    listPRComments(owner, repo, prNum).then(setComments).catch(e => appendNotice(e.message || 'failed to load comments'));
+    listPRReviews(owner, repo, prNum).then(setReviews).catch(e => appendNotice(e.message || 'failed to load reviews'));
   }, [owner, repo, prNum]);
 
   useEffect(() => {
     if (!owner || !repo || !prNum) return;
     if ((tab === 'files' || tab === 'merge') && !diff) {
-      getPRDiff(owner, repo, prNum).then(setDiff).catch(e => setNotice(e.message || 'failed to load diff'));
+      getPRDiff(owner, repo, prNum).then(setDiff).catch(e => appendNotice(e.message || 'failed to load diff'));
     }
     if (tab === 'merge' && !mergePreview) {
-      getMergePreview(owner, repo, prNum).then(setMergePreview).catch(e => setNotice(e.message || 'failed to load merge preview'));
+      getMergePreview(owner, repo, prNum).then(setMergePreview).catch(e => appendNotice(e.message || 'failed to load merge preview'));
     }
     if (tab === 'merge') {
-      getMergeGate(owner, repo, prNum).then(setMergeGate).catch(e => setNotice(e.message || 'failed to load merge gate'));
-      listPRChecks(owner, repo, prNum).then(setChecks).catch(e => setNotice(e.message || 'failed to load checks'));
+      getMergeGate(owner, repo, prNum).then(setMergeGate).catch(e => appendNotice(e.message || 'failed to load merge gate'));
+      listPRChecks(owner, repo, prNum).then(setChecks).catch(e => appendNotice(e.message || 'failed to load checks'));
       if (pr && !semver) {
         const spec = `${pr.target_branch}...${pr.source_branch}`;
-        getSemver(owner, repo, spec).then(setSemver).catch(e => setNotice(e.message || 'failed to load semver recommendation'));
+        getSemver(owner, repo, spec).then(setSemver).catch(e => appendNotice(e.message || 'failed to load semver recommendation'));
       }
     }
   }, [tab, owner, repo, prNum, pr, reviews.length, semver]);
@@ -96,8 +105,8 @@ export function PRDetailView({ owner, repo, number }: Props) {
     setMerging(true);
     try {
       await mergePR(owner, repo, prNum);
-      getPR(owner, repo, prNum).then(setPr).catch(e => setNotice(e.message || 'failed to refresh pull request'));
-      getMergeGate(owner, repo, prNum).then(setMergeGate).catch(e => setNotice(e.message || 'failed to refresh merge gate'));
+      getPR(owner, repo, prNum).then(setPr).catch(e => appendNotice(e.message || 'failed to refresh pull request'));
+      getMergeGate(owner, repo, prNum).then(setMergeGate).catch(e => appendNotice(e.message || 'failed to refresh merge gate'));
     } catch (e: any) {
       setError(e.message);
     }
@@ -160,7 +169,7 @@ export function PRDetailView({ owner, repo, number }: Props) {
             prNum={prNum}
             onCommentAdded={(c: any) => setComments([...comments, c])}
             onReviewAdded={(r: any) => setReviews([...reviews, r])}
-            onError={(message: string) => setNotice(message)}
+            onError={(message: string) => appendNotice(message)}
           />
         ) : (
           <div style={{ color: '#f85149' }}>Missing repository context</div>

@@ -1,6 +1,7 @@
 const BASE = '/api/v1';
 
 let token: string | null = localStorage.getItem('gothub_token');
+let redirectingToLogin = false;
 
 export function setToken(t: string | null) {
   token = t;
@@ -11,7 +12,21 @@ export function setToken(t: string | null) {
 export function getToken() { return token; }
 
 function isAuthRequest(path: string): boolean {
-  return path.startsWith('/auth/login') || path.startsWith('/auth/register');
+  return path.startsWith('/auth/');
+}
+
+function buildLoginRedirectPath(): string {
+  if (typeof window === 'undefined') return '/login';
+
+  const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+  const returnTo = window.location.pathname.startsWith('/login') ? '/' : current || '/';
+  const params = new URLSearchParams({ session: 'expired' });
+
+  if (returnTo && returnTo !== '/login') {
+    params.set('returnTo', returnTo);
+  }
+
+  return `/login?${params.toString()}`;
 }
 
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -24,13 +39,14 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     body: body ? JSON.stringify(body) : undefined,
   });
 
-  if (resp.status === 401 && token && !isAuthRequest(path)) {
-    // Expired/invalid token: clear auth state and send user back to sign-in.
+  if (resp.status === 401 && !isAuthRequest(path)) {
+    // Unauthorized: clear auth state and send user back to sign-in.
     setToken(null);
-    if (window.location.pathname !== '/') {
-      window.location.assign('/?session=expired');
-      throw new Error('authentication required');
+    if (typeof window !== 'undefined' && !redirectingToLogin && !window.location.pathname.startsWith('/login')) {
+      redirectingToLogin = true;
+      window.location.assign(buildLoginRedirectPath());
     }
+    throw new Error('authentication required');
   }
 
   if (!resp.ok) {

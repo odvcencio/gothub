@@ -27,10 +27,21 @@ export function CodeView({ owner, repo, ref: gitRef, path }: Props) {
   const [blame, setBlame] = useState<EntityBlameInfo | null>(null);
   const [blameLoading, setBlameLoading] = useState(false);
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const appendNotice = (message: string) => {
+    const next = message.trim();
+    if (!next) return;
+    setNotice((current) => {
+      if (!current) return next;
+      if (current.includes(next)) return current;
+      return `${current} • ${next}`;
+    });
+  };
 
   useEffect(() => {
     if (!owner || !repo || !gitRef) return;
     setError('');
+    setNotice('');
     setEntries(null);
     setBlob(null);
     setEntities(null);
@@ -56,9 +67,10 @@ export function CodeView({ owner, repo, ref: gitRef, path }: Props) {
           setEntities(list);
           setSelectedEntity(list.length > 0 ? list[0] : null);
         })
-        .catch(() => {
+        .catch((e: any) => {
           setEntities([]);
           setSelectedEntity(null);
+          appendNotice(e?.message || 'failed to load structural entities');
         });
     } else {
       setIsDir(true);
@@ -75,7 +87,10 @@ export function CodeView({ owner, repo, ref: gitRef, path }: Props) {
     setBlame(null);
     getEntityBlame(owner, repo, gitRef, selectedEntity.key, path, 500)
       .then(setBlame)
-      .catch(() => setBlame(null))
+      .catch((e: any) => {
+        setBlame(null);
+        appendNotice(e?.message || 'failed to load structural blame');
+      })
       .finally(() => setBlameLoading(false));
   }, [owner, repo, gitRef, path, selectedEntity?.key]);
 
@@ -89,6 +104,11 @@ export function CodeView({ owner, repo, ref: gitRef, path }: Props) {
 
   return (
     <div>
+      {notice && (
+        <div style={{ color: '#d29922', marginBottom: '16px', padding: '10px 12px', background: '#2b230f', border: '1px solid #d29922', borderRadius: '6px', fontSize: '13px' }}>
+          {notice}
+        </div>
+      )}
       <div style={{ marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
         <a href={`/${owner}/${repo}`} style={{ color: '#58a6ff', fontWeight: 'bold' }}>{repo}</a>
         {breadcrumbs.map((bc, i) => (

@@ -1,9 +1,15 @@
+import { Home } from './Home';
+
 interface Props {
   path?: string;
   default?: boolean;
 }
 
 export function NotFoundView({ path }: Props) {
+  if (path === '/login') {
+    return <Home />;
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '60vh', textAlign: 'center' }}>
       <h1 style={{ fontSize: '72px', color: '#f0f6fc', margin: '0 0 8px 0', fontWeight: 'bold' }}>404</h1>

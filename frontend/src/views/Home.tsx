@@ -41,6 +41,7 @@ function AuthForm() {
     passkeyEnabled: true,
   });
   const [info, setInfo] = useState('');
+  const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const sessionExpired = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('session') === 'expired';
@@ -61,20 +62,20 @@ function AuthForm() {
           passkeyEnabled: !!caps.passkey_enabled,
         })
       )
-      .catch(() =>
+      .catch((e: any) => {
         setAuthCapabilities({
           passwordAuthEnabled: false,
           magicLinkEnabled: true,
           passkeyEnabled: true,
-        })
-      );
+        });
+        setNotice(e?.message || 'Some sign-in methods could not be verified. Showing fallback options.');
+      });
   }, []);
 
   const completeAuth = (tokenValue: string) => {
     setToken(tokenValue);
     if (typeof window !== 'undefined') {
-      window.history.replaceState(null, '', '/');
-      window.location.reload();
+      window.location.assign(resolvePostAuthRedirect());
     }
   };
 
@@ -82,6 +83,7 @@ function AuthForm() {
     e.preventDefault();
     setError('');
     setInfo('');
+    setNotice('');
     setSubmitting(true);
     try {
       const res = mode === 'login'
@@ -99,6 +101,7 @@ function AuthForm() {
     e.preventDefault();
     setError('');
     setInfo('');
+    setNotice('');
     setSubmitting(true);
     try {
       const res = await requestMagicLink(email);
@@ -118,6 +121,7 @@ function AuthForm() {
     e.preventDefault();
     setError('');
     setInfo('');
+    setNotice('');
     setSubmitting(true);
     try {
       const res = await verifyMagicLink(magicToken);
@@ -133,6 +137,7 @@ function AuthForm() {
     e.preventDefault();
     setError('');
     setInfo('');
+    setNotice('');
     setSubmitting(true);
     try {
       const begin = await beginWebAuthnLogin(username);
@@ -156,6 +161,7 @@ function AuthForm() {
           Session expired. Sign in again.
         </div>
       )}
+      {notice && <div style={{ color: '#d29922', marginBottom: '16px', padding: '12px', background: '#2b230f', border: '1px solid #d29922', borderRadius: '6px' }}>{notice}</div>}
       {info && <div style={{ color: '#3fb950', marginBottom: '16px', padding: '12px', background: '#132a1d', border: '1px solid #3fb950', borderRadius: '6px' }}>{info}</div>}
       {error && <div style={{ color: '#f85149', marginBottom: '16px', padding: '12px', background: '#1c1214', border: '1px solid #f85149', borderRadius: '6px' }}>{error}</div>}
       {mode === 'login' ? (
@@ -287,7 +293,9 @@ function Dashboard() {
       await createRepo(name, desc, priv);
       setShowCreate(false);
       setName(''); setDesc('');
-      listUserRepos().then(setRepos);
+      listUserRepos()
+        .then(setRepos)
+        .catch((err: any) => setError(err?.message || 'repository created but failed to refresh repository list'));
     } catch (err: any) {
       setError(err.message);
     }
@@ -441,6 +449,18 @@ function Dashboard() {
       )}
     </div>
   );
+}
+
+function resolvePostAuthRedirect(): string {
+  if (typeof window === 'undefined') return '/';
+
+  const params = new URLSearchParams(window.location.search);
+  const returnTo = params.get('returnTo') || '/';
+
+  if (!returnTo.startsWith('/') || returnTo.startsWith('//') || returnTo.startsWith('/login')) {
+    return '/';
+  }
+  return returnTo;
 }
 
 type DemoContext = {
