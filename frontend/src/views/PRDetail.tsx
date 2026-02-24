@@ -6,6 +6,7 @@ import {
   getMergePreview,
   getPR,
   getPRDiff,
+  getRepoIndexStatus,
   getSemver,
   getToken,
   listPRChecks,
@@ -19,11 +20,13 @@ import {
   type PRComment,
   type PRReview,
   type PullRequest,
+  type RepoIndexStatus,
   type SemverRecommendation,
 } from '../api/client';
 import { EntityDiff } from '../components/EntityDiff';
 import { MergePreview } from '../components/MergePreview';
 import { ConflictViewer } from '../components/ConflictViewer';
+import { IndexStatusCard } from '../components/IndexStatusCard';
 
 interface Props {
   owner?: string;
@@ -39,6 +42,9 @@ export function PRDetailView({ owner, repo, number }: Props) {
   const [mergeGate, setMergeGate] = useState<MergeGate | null>(null);
   const [semver, setSemver] = useState<SemverRecommendation | null>(null);
   const [checks, setChecks] = useState<CheckRun[]>([]);
+  const [indexStatus, setIndexStatus] = useState<RepoIndexStatus | null>(null);
+  const [indexStatusLoading, setIndexStatusLoading] = useState(false);
+  const [indexStatusError, setIndexStatusError] = useState('');
   const [comments, setComments] = useState<PRComment[]>([]);
   const [reviews, setReviews] = useState<PRReview[]>([]);
   const [merging, setMerging] = useState(false);
@@ -63,6 +69,9 @@ export function PRDetailView({ owner, repo, number }: Props) {
     setMergeGate(null);
     setSemver(null);
     setChecks([]);
+    setIndexStatus(null);
+    setIndexStatusLoading(false);
+    setIndexStatusError('');
     setComments([]);
     setReviews([]);
     setMerging(false);
@@ -95,7 +104,32 @@ export function PRDetailView({ owner, repo, number }: Props) {
     }
   }, [tab, owner, repo, prNum, pr, reviews.length, semver]);
 
+  useEffect(() => {
+    if (!owner || !repo || !pr?.source_branch) return;
+
+    let cancelled = false;
+    setIndexStatus(null);
+    setIndexStatusError('');
+    setIndexStatusLoading(true);
+
+    getRepoIndexStatus(owner, repo, pr.source_branch)
+      .then((status) => {
+        if (!cancelled) setIndexStatus(status);
+      })
+      .catch((e: any) => {
+        if (!cancelled) setIndexStatusError(e?.message || 'failed to load indexing status');
+      })
+      .finally(() => {
+        if (!cancelled) setIndexStatusLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [owner, repo, pr?.source_branch]);
+
   const impactSummary = useMemo(() => summarizeDiff(diff?.files || []), [diff]);
+  const showIndexStatus = indexStatusLoading || !!indexStatusError || !!indexStatus;
 
   const handleMerge = async () => {
     if (!owner || !repo || !prNum) {
@@ -133,6 +167,16 @@ export function PRDetailView({ owner, repo, number }: Props) {
             wants to merge <code style={{ background: '#161b22', padding: '2px 6px', borderRadius: '4px' }}>{pr.source_branch}</code> into <code style={{ background: '#161b22', padding: '2px 6px', borderRadius: '4px' }}>{pr.target_branch}</code>
           </span>
         </div>
+        {showIndexStatus && (
+          <div style={{ marginTop: '12px', maxWidth: '420px' }}>
+            <IndexStatusCard
+              status={indexStatus}
+              loading={indexStatusLoading}
+              error={indexStatusError}
+              refName={pr.source_branch}
+            />
+          </div>
+        )}
       </div>
 
       <div style={{ display: 'flex', gap: '4px', marginBottom: '20px', borderBottom: '1px solid #30363d', paddingBottom: '0' }}>

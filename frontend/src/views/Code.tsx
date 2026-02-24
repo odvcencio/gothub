@@ -2,14 +2,17 @@ import { useState, useEffect } from 'preact/hooks';
 import {
   getBlob,
   getEntityBlame,
+  getRepoIndexStatus,
   listEntities,
   listTree,
   type EntityBlameInfo,
   type FileEntity,
+  type RepoIndexStatus,
   type TreeEntry,
 } from '../api/client';
 import { FileTree } from '../components/FileTree';
 import { CodeViewer } from '../components/CodeViewer';
+import { IndexStatusCard } from '../components/IndexStatusCard';
 
 interface Props {
   owner?: string;
@@ -26,6 +29,9 @@ export function CodeView({ owner, repo, ref: gitRef, path }: Props) {
   const [selectedEntity, setSelectedEntity] = useState<FileEntity | null>(null);
   const [blame, setBlame] = useState<EntityBlameInfo | null>(null);
   const [blameLoading, setBlameLoading] = useState(false);
+  const [indexStatus, setIndexStatus] = useState<RepoIndexStatus | null>(null);
+  const [indexStatusLoading, setIndexStatusLoading] = useState(false);
+  const [indexStatusError, setIndexStatusError] = useState('');
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const appendNotice = (message: string) => {
@@ -94,6 +100,30 @@ export function CodeView({ owner, repo, ref: gitRef, path }: Props) {
       .finally(() => setBlameLoading(false));
   }, [owner, repo, gitRef, path, selectedEntity?.key]);
 
+  useEffect(() => {
+    if (!owner || !repo || !gitRef) return;
+
+    let cancelled = false;
+    setIndexStatus(null);
+    setIndexStatusError('');
+    setIndexStatusLoading(true);
+
+    getRepoIndexStatus(owner, repo, gitRef)
+      .then((status) => {
+        if (!cancelled) setIndexStatus(status);
+      })
+      .catch((e: any) => {
+        if (!cancelled) setIndexStatusError(e?.message || 'failed to load indexing status');
+      })
+      .finally(() => {
+        if (!cancelled) setIndexStatusLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [owner, repo, gitRef]);
+
   if (!owner || !repo || !gitRef) {
     return <div style={{ color: '#f85149', padding: '20px' }}>Missing repository context</div>;
   }
@@ -101,6 +131,7 @@ export function CodeView({ owner, repo, ref: gitRef, path }: Props) {
   if (error) return <div style={{ color: '#f85149', padding: '20px' }}>{error}</div>;
 
   const breadcrumbs = buildBreadcrumbs(owner, repo, gitRef, path);
+  const showIndexStatus = indexStatusLoading || !!indexStatusError || !!indexStatus;
 
   return (
     <div>
@@ -122,6 +153,16 @@ export function CodeView({ owner, repo, ref: gitRef, path }: Props) {
           </span>
         ))}
       </div>
+      {showIndexStatus && (
+        <div style={{ marginBottom: '16px', maxWidth: '420px' }}>
+          <IndexStatusCard
+            status={indexStatus}
+            loading={indexStatusLoading}
+            error={indexStatusError}
+            refName={gitRef}
+          />
+        </div>
+      )}
 
       {isDir ? (
         entries ? (

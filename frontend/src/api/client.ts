@@ -123,6 +123,16 @@ export interface CommitSummary {
   [key: string]: unknown;
 }
 
+export interface RepoIndexStatus {
+  ref: string;
+  commit_hash: string;
+  indexed: boolean;
+  queue_status: 'queued' | 'in_progress' | 'failed' | 'completed' | 'not_found' | string;
+  attempts: number;
+  last_error?: string;
+  updated_at: string;
+}
+
 export interface EntityDescriptor {
   key: string;
   kind?: string;
@@ -463,6 +473,8 @@ export const listCommits = (owner: string, repo: string, ref: string) =>
   request<CommitSummary[]>('GET', `/repos/${owner}/${repo}/commits/${ref}`);
 export const getCommit = (owner: string, repo: string, hash: string) =>
   request<CommitSummary>('GET', `/repos/${owner}/${repo}/commit/${hash}`);
+export const getRepoIndexStatus = (owner: string, repo: string, ref: string) =>
+  request<RepoIndexStatus>('GET', `/repos/${owner}/${repo}/index/status?ref=${encodeURIComponent(ref)}`);
 
 // Entities & Diff
 export const listEntities = (owner: string, repo: string, ref: string, path: string) =>
