@@ -10,13 +10,14 @@ RUN npm run build
 FROM golang:1.24-alpine AS builder
 RUN apk add --no-cache make
 WORKDIR /app
+ARG WASM_GO_TAGS=grammar_set_core
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 # Copy built frontend
 COPY --from=frontend /app/frontend/dist ./frontend/dist
 # Build WASM
-RUN GOOS=js GOARCH=wasm go build -o frontend/dist/gothub.wasm ./wasm/
+RUN GOOS=js GOARCH=wasm go build -tags "$WASM_GO_TAGS" -ldflags="-s -w" -trimpath -o frontend/dist/gothub.wasm ./wasm/
 RUN cp "$(go env GOROOT)/lib/wasm/wasm_exec.js" frontend/dist/wasm_exec.js
 # Copy dist into embed location
 RUN rm -rf internal/web/dist && cp -r frontend/dist internal/web/dist

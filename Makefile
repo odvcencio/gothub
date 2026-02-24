@@ -2,9 +2,11 @@
 
 all: build
 
+WASM_GO_TAGS ?= grammar_set_core
+
 # Build WASM module
 wasm:
-	GOOS=js GOARCH=wasm go build -o frontend/dist/gothub.wasm ./wasm/
+	GOOS=js GOARCH=wasm go build -tags "$(WASM_GO_TAGS)" -ldflags="-s -w" -trimpath -o frontend/dist/gothub.wasm ./wasm/
 	cp "$$(go env GOROOT)/lib/wasm/wasm_exec.js" frontend/dist/wasm_exec.js
 
 # Build frontend
