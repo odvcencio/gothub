@@ -1,9 +1,11 @@
 package api
 
 import (
+	"database/sql"
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/odvcencio/gothub/internal/service"
 )
@@ -95,6 +97,37 @@ func (s *Server) handleCallGraph(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+	jsonResponse(w, http.StatusOK, result)
+}
+
+func (s *Server) handleImpactAnalysis(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.authorizeRepoRequest(w, r, false); !ok {
+		return
+	}
+	owner := r.PathValue("owner")
+	repo := r.PathValue("repo")
+	ref := r.PathValue("ref")
+	symbol := strings.TrimSpace(r.URL.Query().Get("symbol"))
+
+	if symbol == "" {
+		jsonError(w, "symbol query parameter is required", http.StatusBadRequest)
+		return
+	}
+
+	result, err := s.codeIntelSvc.GetImpactAnalysis(r.Context(), owner, repo, ref, symbol)
+	if err != nil {
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			jsonError(w, "repository not found", http.StatusNotFound)
+			return
+		case strings.Contains(strings.ToLower(err.Error()), "ref not found"):
+			jsonError(w, "ref not found", http.StatusNotFound)
+			return
+		default:
+			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 	jsonResponse(w, http.StatusOK, result)
 }

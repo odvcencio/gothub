@@ -575,6 +575,354 @@ type CallEdge struct {
 	Count      int    `json:"count"`
 }
 
+// ImpactSummary provides compact counts for impact analysis.
+type ImpactSummary struct {
+	MatchedDefinitions int `json:"matched_definitions"`
+	DirectCallers      int `json:"direct_callers"`
+	TotalIncomingCalls int `json:"total_incoming_calls"`
+}
+
+// ImpactDirectCaller is a direct caller of one or more matched definitions.
+type ImpactDirectCaller struct {
+	Definition xref.Definition `json:"definition"`
+	CallCount  int             `json:"call_count"`
+}
+
+// ImpactAnalysisResult describes direct impact for a symbol.
+type ImpactAnalysisResult struct {
+	MatchedDefinitions []xref.Definition    `json:"matched_definitions"`
+	DirectCallers      []ImpactDirectCaller `json:"direct_callers"`
+	Summary            ImpactSummary        `json:"summary"`
+}
+
+// GetImpactAnalysis returns matched callable definitions and their direct callers.
+// It prefers persisted xref rows when present and falls back to in-memory graph build.
+func (s *CodeIntelService) GetImpactAnalysis(ctx context.Context, owner, repo, ref, symbol string) (*ImpactAnalysisResult, error) {
+	symbol = strings.TrimSpace(symbol)
+	if symbol == "" {
+		return newImpactAnalysisResult(nil, nil), nil
+	}
+
+	commitHash, err := s.browseSvc.ResolveRef(ctx, owner, repo, ref)
+	if err != nil {
+		return nil, fmt.Errorf("resolve ref: %w", err)
+	}
+	repoModel, err := s.repoSvc.Get(ctx, owner, repo)
+	if err != nil {
+		return nil, err
+	}
+
+	defs, callers, ok, err := s.loadImpactFromPersistedXRef(ctx, repoModel.ID, string(commitHash), symbol)
+	if err == nil && ok {
+		return newImpactAnalysisResult(defs, callers), nil
+	}
+
+	defs, callers, err = s.loadImpactFromInMemoryXRef(ctx, owner, repo, ref, repoModel.ID, string(commitHash), symbol)
+	if err != nil {
+		return nil, err
+	}
+	return newImpactAnalysisResult(defs, callers), nil
+}
+
+func (s *CodeIntelService) loadImpactFromPersistedXRef(ctx context.Context, repoID int64, commitHash, symbol string) ([]xref.Definition, []ImpactDirectCaller, bool, error) {
+	hasGraph, err := s.db.HasXRefGraphForCommit(ctx, repoID, commitHash)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	if !hasGraph {
+		return nil, nil, false, nil
+	}
+
+	defs, err := s.findImpactDefinitionsFromPersistedXRef(ctx, repoID, commitHash, symbol)
+	if err != nil {
+		return nil, nil, true, err
+	}
+	callers, err := s.collectDirectCallersFromPersistedXRef(ctx, repoID, commitHash, defs)
+	if err != nil {
+		return nil, nil, true, err
+	}
+	return defs, callers, true, nil
+}
+
+func (s *CodeIntelService) findImpactDefinitionsFromPersistedXRef(ctx context.Context, repoID int64, commitHash, symbol string) ([]xref.Definition, error) {
+	seen := make(map[string]xref.Definition)
+
+	defByID, err := s.db.GetXRefDefinition(ctx, repoID, commitHash, symbol)
+	if err == nil {
+		if defByID.Callable {
+			seen[defByID.EntityID] = xRefDefinitionFromModel(*defByID)
+		}
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+
+	defsByName, err := s.db.FindXRefDefinitionsByName(ctx, repoID, commitHash, symbol)
+	if err != nil {
+		return nil, err
+	}
+	for _, d := range defsByName {
+		if !d.Callable {
+			continue
+		}
+		seen[d.EntityID] = xRefDefinitionFromModel(d)
+	}
+
+	defs := make([]xref.Definition, 0, len(seen))
+	for _, d := range seen {
+		defs = append(defs, d)
+	}
+	sortImpactDefinitions(defs)
+	return defs, nil
+}
+
+func (s *CodeIntelService) collectDirectCallersFromPersistedXRef(ctx context.Context, repoID int64, commitHash string, defs []xref.Definition) ([]ImpactDirectCaller, error) {
+	if len(defs) == 0 {
+		return nil, nil
+	}
+
+	defCache := make(map[string]xref.Definition, len(defs))
+	for _, d := range defs {
+		defCache[d.ID] = d
+	}
+
+	callersByID := make(map[string]ImpactDirectCaller)
+	for _, d := range defs {
+		edges, err := s.db.ListXRefEdgesTo(ctx, repoID, commitHash, d.ID, "call")
+		if err != nil {
+			return nil, err
+		}
+		for _, edge := range edges {
+			callerID := strings.TrimSpace(edge.SourceEntityID)
+			if callerID == "" {
+				continue
+			}
+			callerDef, ok := defCache[callerID]
+			if !ok {
+				dbDef, err := s.db.GetXRefDefinition(ctx, repoID, commitHash, callerID)
+				if err != nil {
+					if errors.Is(err, sql.ErrNoRows) {
+						continue
+					}
+					return nil, err
+				}
+				callerDef = xRefDefinitionFromModel(*dbDef)
+				defCache[callerID] = callerDef
+			}
+			caller := callersByID[callerID]
+			caller.Definition = callerDef
+			if edge.Count > 0 {
+				caller.CallCount += edge.Count
+			} else {
+				caller.CallCount++
+			}
+			callersByID[callerID] = caller
+		}
+	}
+
+	callers := make([]ImpactDirectCaller, 0, len(callersByID))
+	for _, caller := range callersByID {
+		callers = append(callers, caller)
+	}
+	sortImpactCallers(callers)
+	return callers, nil
+}
+
+func (s *CodeIntelService) loadImpactFromInMemoryXRef(ctx context.Context, owner, repo, ref string, repoID int64, commitHash, symbol string) ([]xref.Definition, []ImpactDirectCaller, error) {
+	idx, err := s.BuildIndex(ctx, owner, repo, ref)
+	if err != nil {
+		return nil, nil, err
+	}
+	graph, err := xref.Build(idx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("build call graph: %w", err)
+	}
+
+	defs := findImpactDefinitionsFromGraph(graph, symbol)
+	callers := collectDirectCallersFromGraph(graph, defs)
+	_ = s.persistXRefGraph(ctx, repoID, commitHash, graph)
+	return defs, callers, nil
+}
+
+func findImpactDefinitionsFromGraph(graph xref.Graph, symbol string) []xref.Definition {
+	symbol = strings.TrimSpace(symbol)
+	if symbol == "" {
+		return nil
+	}
+
+	seen := make(map[string]xref.Definition)
+	for _, d := range graph.Definitions {
+		if !d.Callable {
+			continue
+		}
+		if d.ID == symbol {
+			seen[d.ID] = d
+		}
+	}
+	defsByName, err := graph.FindDefinitions(symbol, false)
+	if err == nil {
+		for _, d := range defsByName {
+			seen[d.ID] = d
+		}
+	}
+
+	defs := make([]xref.Definition, 0, len(seen))
+	for _, d := range seen {
+		defs = append(defs, d)
+	}
+	sortImpactDefinitions(defs)
+	return defs
+}
+
+func collectDirectCallersFromGraph(graph xref.Graph, defs []xref.Definition) []ImpactDirectCaller {
+	if len(defs) == 0 {
+		return nil
+	}
+
+	callersByID := make(map[string]ImpactDirectCaller)
+	for _, d := range defs {
+		edges := graph.IncomingEdges(d.ID)
+		for _, edge := range edges {
+			callerID := strings.TrimSpace(edge.Caller.ID)
+			if callerID == "" {
+				continue
+			}
+			caller := callersByID[callerID]
+			caller.Definition = edge.Caller
+			if edge.Count > 0 {
+				caller.CallCount += edge.Count
+			} else {
+				caller.CallCount++
+			}
+			callersByID[callerID] = caller
+		}
+	}
+
+	callers := make([]ImpactDirectCaller, 0, len(callersByID))
+	for _, caller := range callersByID {
+		callers = append(callers, caller)
+	}
+	sortImpactCallers(callers)
+	return callers
+}
+
+func (s *CodeIntelService) persistXRefGraph(ctx context.Context, repoID int64, commitHash string, graph xref.Graph) error {
+	defs := make([]models.XRefDefinition, 0, len(graph.Definitions))
+	for _, d := range graph.Definitions {
+		defs = append(defs, models.XRefDefinition{
+			RepoID:      repoID,
+			CommitHash:  commitHash,
+			EntityID:    d.ID,
+			File:        d.File,
+			PackageName: d.Package,
+			Kind:        d.Kind,
+			Name:        d.Name,
+			Signature:   d.Signature,
+			Receiver:    d.Receiver,
+			StartLine:   d.StartLine,
+			EndLine:     d.EndLine,
+			Callable:    d.Callable,
+		})
+	}
+
+	edges := make([]models.XRefEdge, 0, len(graph.Edges))
+	for _, edge := range graph.Edges {
+		sourceFile := edge.Caller.File
+		sourceLine := 0
+		if len(edge.Samples) > 0 {
+			if strings.TrimSpace(edge.Samples[0].File) != "" {
+				sourceFile = edge.Samples[0].File
+			}
+			sourceLine = edge.Samples[0].StartLine
+		}
+		count := edge.Count
+		if count <= 0 {
+			count = 1
+		}
+		edges = append(edges, models.XRefEdge{
+			RepoID:         repoID,
+			CommitHash:     commitHash,
+			SourceEntityID: edge.Caller.ID,
+			TargetEntityID: edge.Callee.ID,
+			Kind:           "call",
+			SourceFile:     sourceFile,
+			SourceLine:     sourceLine,
+			Resolution:     edge.Resolution,
+			Count:          count,
+		})
+	}
+	return s.db.SetCommitXRefGraph(ctx, repoID, commitHash, defs, edges)
+}
+
+func newImpactAnalysisResult(defs []xref.Definition, callers []ImpactDirectCaller) *ImpactAnalysisResult {
+	if defs == nil {
+		defs = []xref.Definition{}
+	}
+	if callers == nil {
+		callers = []ImpactDirectCaller{}
+	}
+	totalIncomingCalls := 0
+	for _, caller := range callers {
+		totalIncomingCalls += caller.CallCount
+	}
+	return &ImpactAnalysisResult{
+		MatchedDefinitions: defs,
+		DirectCallers:      callers,
+		Summary: ImpactSummary{
+			MatchedDefinitions: len(defs),
+			DirectCallers:      len(callers),
+			TotalIncomingCalls: totalIncomingCalls,
+		},
+	}
+}
+
+func sortImpactDefinitions(defs []xref.Definition) {
+	sort.Slice(defs, func(i, j int) bool {
+		if defs[i].File != defs[j].File {
+			return defs[i].File < defs[j].File
+		}
+		if defs[i].StartLine != defs[j].StartLine {
+			return defs[i].StartLine < defs[j].StartLine
+		}
+		if defs[i].Name != defs[j].Name {
+			return defs[i].Name < defs[j].Name
+		}
+		return defs[i].ID < defs[j].ID
+	})
+}
+
+func sortImpactCallers(callers []ImpactDirectCaller) {
+	sort.Slice(callers, func(i, j int) bool {
+		if callers[i].CallCount != callers[j].CallCount {
+			return callers[i].CallCount > callers[j].CallCount
+		}
+		if callers[i].Definition.File != callers[j].Definition.File {
+			return callers[i].Definition.File < callers[j].Definition.File
+		}
+		if callers[i].Definition.StartLine != callers[j].Definition.StartLine {
+			return callers[i].Definition.StartLine < callers[j].Definition.StartLine
+		}
+		if callers[i].Definition.Name != callers[j].Definition.Name {
+			return callers[i].Definition.Name < callers[j].Definition.Name
+		}
+		return callers[i].Definition.ID < callers[j].Definition.ID
+	})
+}
+
+func xRefDefinitionFromModel(d models.XRefDefinition) xref.Definition {
+	return xref.Definition{
+		ID:        d.EntityID,
+		File:      d.File,
+		Package:   d.PackageName,
+		Kind:      d.Kind,
+		Name:      d.Name,
+		Signature: d.Signature,
+		Receiver:  d.Receiver,
+		StartLine: d.StartLine,
+		EndLine:   d.EndLine,
+		Callable:  d.Callable,
+	}
+}
+
 // GetCallGraph builds and traverses the call graph.
 func (s *CodeIntelService) GetCallGraph(ctx context.Context, owner, repo, ref, symbol string, depth int, reverse bool) (*CallGraphResult, error) {
 	idx, err := s.BuildIndex(ctx, owner, repo, ref)

@@ -2315,6 +2315,177 @@ func TestCallGraphEndpointRejectsInvalidDepth(t *testing.T) {
 	}
 }
 
+func TestImpactAnalysisEndpoint(t *testing.T) {
+	server, db := setupTestServer(t)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	token := registerAndGetToken(t, ts.URL, "owner")
+	createRepo(t, ts.URL, token, "repo", false)
+
+	ctx := context.Background()
+	repo, err := db.GetRepository(ctx, "owner", "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := gotstore.Open(repo.StoragePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	blobHash, err := store.Objects.WriteBlob(&object.Blob{Data: []byte(
+		"package main\n\n" +
+			"func ProcessOrder() int { return 1 }\n\n" +
+			"func Handle() int { return ProcessOrder() }\n",
+	)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	treeHash, err := store.Objects.WriteTree(&object.TreeObj{
+		Entries: []object.TreeEntry{{Name: "main.go", BlobHash: blobHash}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitHash, err := store.Objects.WriteCommit(&object.CommitObj{
+		TreeHash:  treeHash,
+		Author:    "Owner <owner@example.com>",
+		Timestamp: 1700000000,
+		Message:   "seed impact fixture",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Refs.Set("heads/main", commitHash); err != nil {
+		t.Fatal(err)
+	}
+
+	hasGraph, err := db.HasXRefGraphForCommit(ctx, repo.ID, string(commitHash))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasGraph {
+		t.Fatal("expected no persisted xref graph before impact analysis")
+	}
+
+	resp, err := http.Get(ts.URL + "/api/v1/repos/owner/repo/impact/main?symbol=ProcessOrder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("impact endpoint: expected 200, got %d", resp.StatusCode)
+	}
+	var payload struct {
+		MatchedDefinitions []struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"matched_definitions"`
+		DirectCallers []struct {
+			Definition struct {
+				ID   string `json:"id"`
+				Name string `json:"name"`
+			} `json:"definition"`
+			CallCount int `json:"call_count"`
+		} `json:"direct_callers"`
+		Summary struct {
+			MatchedDefinitions int `json:"matched_definitions"`
+			DirectCallers      int `json:"direct_callers"`
+			TotalIncomingCalls int `json:"total_incoming_calls"`
+		} `json:"summary"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if len(payload.MatchedDefinitions) == 0 {
+		t.Fatal("expected at least one matched definition")
+	}
+	foundProcessOrder := false
+	for _, d := range payload.MatchedDefinitions {
+		if d.Name == "ProcessOrder" {
+			foundProcessOrder = true
+			break
+		}
+	}
+	if !foundProcessOrder {
+		t.Fatalf("expected ProcessOrder in matched definitions, got %+v", payload.MatchedDefinitions)
+	}
+
+	if len(payload.DirectCallers) == 0 {
+		t.Fatal("expected at least one direct caller")
+	}
+	foundHandle := false
+	for _, caller := range payload.DirectCallers {
+		if caller.Definition.Name == "Handle" {
+			foundHandle = true
+		}
+		if caller.CallCount <= 0 {
+			t.Fatalf("expected positive call count, got %+v", caller)
+		}
+	}
+	if !foundHandle {
+		t.Fatalf("expected Handle in direct callers, got %+v", payload.DirectCallers)
+	}
+
+	if payload.Summary.MatchedDefinitions != len(payload.MatchedDefinitions) {
+		t.Fatalf("summary matched_definitions mismatch: %+v", payload.Summary)
+	}
+	if payload.Summary.DirectCallers != len(payload.DirectCallers) {
+		t.Fatalf("summary direct_callers mismatch: %+v", payload.Summary)
+	}
+	if payload.Summary.TotalIncomingCalls < 1 {
+		t.Fatalf("expected total incoming calls >= 1, got %+v", payload.Summary)
+	}
+
+	hasGraph, err = db.HasXRefGraphForCommit(ctx, repo.ID, string(commitHash))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasGraph {
+		t.Fatal("expected impact analysis fallback to persist xref graph")
+	}
+}
+
+func TestImpactAnalysisEndpointRequiresSymbol(t *testing.T) {
+	server, _ := setupTestServer(t)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	token := registerAndGetToken(t, ts.URL, "owner")
+	createRepo(t, ts.URL, token, "repo", false)
+
+	resp, err := http.Get(ts.URL + "/api/v1/repos/owner/repo/impact/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("impact endpoint missing symbol: expected 400, got %d", resp.StatusCode)
+	}
+	if got := decodeAPIError(t, resp); got != "symbol query parameter is required" {
+		t.Fatalf("unexpected missing symbol error: %q", got)
+	}
+}
+
+func TestImpactAnalysisEndpointUnknownRefReturnsNotFound(t *testing.T) {
+	server, _ := setupTestServer(t)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	token := registerAndGetToken(t, ts.URL, "owner")
+	createRepo(t, ts.URL, token, "repo", false)
+
+	resp, err := http.Get(ts.URL + "/api/v1/repos/owner/repo/impact/main?symbol=ProcessOrder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("impact endpoint unknown ref: expected 404, got %d", resp.StatusCode)
+	}
+}
+
 func TestSemverRecommendationEndpoint(t *testing.T) {
 	server, db := setupTestServer(t)
 	ts := httptest.NewServer(server)

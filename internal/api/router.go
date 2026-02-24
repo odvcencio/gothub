@@ -235,6 +235,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/symbols/{ref}", s.handleSearchSymbols)
 	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/references/{ref}", s.handleFindReferences)
 	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/callgraph/{ref}", s.handleCallGraph)
+	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/impact/{ref}", s.handleImpactAnalysis)
 
 	// Organizations
 	s.mux.HandleFunc("POST /api/v1/orgs", s.requireAuth(s.handleCreateOrg))
