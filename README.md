@@ -41,6 +41,7 @@ go run ./cmd/gothub serve
 ### Ops/observability
 
 - `GOTHUB_TRUST_PROXY`: trust proxy headers for client IP (`true`/`false`)
+- `GOTHUB_CORS_ALLOW_ORIGINS`: comma-separated allowlist for CORS origins (default `*`)
 - `GOTHUB_ENABLE_ADMIN_HEALTH`: expose `/admin/health` (`true`/`false`)
 - `GOTHUB_ENABLE_PPROF`: expose `/debug/pprof/*` (`true`/`false`)
 - `GOTHUB_ADMIN_ALLOWED_CIDRS`: comma-separated CIDRs allowed for admin routes

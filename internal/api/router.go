@@ -20,28 +20,29 @@ import (
 )
 
 type Server struct {
-	db                database.DB
-	authSvc           *auth.Service
-	repoSvc           *service.RepoService
-	browseSvc         *service.BrowseService
-	diffSvc           *service.DiffService
-	prSvc             *service.PRService
-	issueSvc          *service.IssueService
-	webhookSvc        *service.WebhookService
-	notifySvc         *service.NotificationService
-	codeIntelSvc      *service.CodeIntelService
-	lineageSvc        *service.EntityLineageService
-	indexQueue        *jobs.Queue
-	asyncIndex        bool
-	rateLimiter       *requestRateLimiter
-	httpMetrics       *httpMetrics
-	passkey           *webauthn.WebAuthn
-	passwordAuth      bool
-	enableAdminHealth bool
-	enablePprof       bool
-	adminRouteAccess  adminRouteAccess
-	mux               *http.ServeMux
-	handler           http.Handler
+	db                 database.DB
+	authSvc            *auth.Service
+	repoSvc            *service.RepoService
+	browseSvc          *service.BrowseService
+	diffSvc            *service.DiffService
+	prSvc              *service.PRService
+	issueSvc           *service.IssueService
+	webhookSvc         *service.WebhookService
+	notifySvc          *service.NotificationService
+	codeIntelSvc       *service.CodeIntelService
+	lineageSvc         *service.EntityLineageService
+	indexQueue         *jobs.Queue
+	asyncIndex         bool
+	rateLimiter        *requestRateLimiter
+	httpMetrics        *httpMetrics
+	passkey            *webauthn.WebAuthn
+	passwordAuth       bool
+	enableAdminHealth  bool
+	enablePprof        bool
+	corsAllowedOrigins []string
+	adminRouteAccess   adminRouteAccess
+	mux                *http.ServeMux
+	handler            http.Handler
 }
 
 type ServerOptions struct {
@@ -50,6 +51,7 @@ type ServerOptions struct {
 	EnableAdminHealth   bool
 	EnablePprof         bool
 	AdminAllowedCIDRs   []string
+	CORSAllowedOrigins  []string
 }
 
 func NewServer(db database.DB, authSvc *auth.Service, repoSvc *service.RepoService) *Server {
@@ -74,34 +76,35 @@ func NewServerWithOptions(db database.DB, authSvc *auth.Service, repoSvc *servic
 		adminCIDRs = defaultAdminRouteCIDRs
 	}
 	s := &Server{
-		db:                db,
-		authSvc:           authSvc,
-		repoSvc:           repoSvc,
-		browseSvc:         browseSvc,
-		diffSvc:           diffSvc,
-		prSvc:             prSvc,
-		issueSvc:          issueSvc,
-		webhookSvc:        webhookSvc,
-		notifySvc:         notifySvc,
-		codeIntelSvc:      codeIntelSvc,
-		lineageSvc:        lineageSvc,
-		indexQueue:        indexQueue,
-		asyncIndex:        opts.EnableAsyncIndexing,
-		rateLimiter:       newRequestRateLimiter(),
-		httpMetrics:       httpMetrics,
-		passkey:           initWebAuthn(),
-		passwordAuth:      opts.EnablePasswordAuth,
-		enableAdminHealth: opts.EnableAdminHealth,
-		enablePprof:       opts.EnablePprof,
-		adminRouteAccess:  newAdminRouteAccess(adminCIDRs),
-		mux:               http.NewServeMux(),
+		db:                 db,
+		authSvc:            authSvc,
+		repoSvc:            repoSvc,
+		browseSvc:          browseSvc,
+		diffSvc:            diffSvc,
+		prSvc:              prSvc,
+		issueSvc:           issueSvc,
+		webhookSvc:         webhookSvc,
+		notifySvc:          notifySvc,
+		codeIntelSvc:       codeIntelSvc,
+		lineageSvc:         lineageSvc,
+		indexQueue:         indexQueue,
+		asyncIndex:         opts.EnableAsyncIndexing,
+		rateLimiter:        newRequestRateLimiter(),
+		httpMetrics:        httpMetrics,
+		passkey:            initWebAuthn(),
+		passwordAuth:       opts.EnablePasswordAuth,
+		enableAdminHealth:  opts.EnableAdminHealth,
+		enablePprof:        opts.EnablePprof,
+		corsAllowedOrigins: append([]string(nil), opts.CORSAllowedOrigins...),
+		adminRouteAccess:   newAdminRouteAccess(adminCIDRs),
+		mux:                http.NewServeMux(),
 	}
 	s.routes()
 	s.handler = requestTracingMiddleware(
 		requestMetricsMiddleware(
 			s.httpMetrics,
 			requestLoggingMiddleware(
-				corsMiddleware(
+				corsMiddleware(s.corsAllowedOrigins,
 					requestRateLimitMiddleware(
 						s.rateLimiter,
 						requestBodyLimitMiddleware(auth.Middleware(s.authSvc)(s.mux)),

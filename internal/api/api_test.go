@@ -30,6 +30,12 @@ import (
 )
 
 func setupTestServer(t *testing.T) (*api.Server, database.DB) {
+	return setupTestServerWithOptions(t, api.ServerOptions{
+		EnablePasswordAuth: true,
+	})
+}
+
+func setupTestServerWithOptions(t *testing.T, opts api.ServerOptions) (*api.Server, database.DB) {
 	t.Helper()
 	tmpDir := t.TempDir()
 	dbPath := tmpDir + "/test.db"
@@ -46,34 +52,15 @@ func setupTestServer(t *testing.T) (*api.Server, database.DB) {
 
 	authSvc := auth.NewService("test-secret", 24*time.Hour)
 	repoSvc := service.NewRepoService(db, storagePath)
-	server := api.NewServerWithOptions(db, authSvc, repoSvc, api.ServerOptions{
-		EnablePasswordAuth: true,
-	})
+	server := api.NewServerWithOptions(db, authSvc, repoSvc, opts)
 	return server, db
 }
 
 func setupTestServerAsyncIndexing(t *testing.T) (*api.Server, database.DB) {
-	t.Helper()
-	tmpDir := t.TempDir()
-	dbPath := tmpDir + "/test.db"
-	storagePath := tmpDir + "/repos"
-
-	db, err := database.OpenSQLite(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Migrate(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
-
-	authSvc := auth.NewService("test-secret", 24*time.Hour)
-	repoSvc := service.NewRepoService(db, storagePath)
-	server := api.NewServerWithOptions(db, authSvc, repoSvc, api.ServerOptions{
+	return setupTestServerWithOptions(t, api.ServerOptions{
 		EnablePasswordAuth:  true,
 		EnableAsyncIndexing: true,
 	})
-	return server, db
 }
 
 func TestRegisterAndLogin(t *testing.T) {
@@ -786,6 +773,45 @@ func TestCORSPreflightReturnsHeaders(t *testing.T) {
 	}
 	if got := resp.Header.Get("Access-Control-Allow-Methods"); !strings.Contains(got, "POST") {
 		t.Fatalf("cors preflight: expected POST in allow-methods, got %q", got)
+	}
+	resp.Body.Close()
+}
+
+func TestCORSPreflightRespectsConfiguredAllowlist(t *testing.T) {
+	server, _ := setupTestServerWithOptions(t, api.ServerOptions{
+		EnablePasswordAuth: true,
+		CORSAllowedOrigins: []string{"https://allowed.test"},
+	})
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	req, _ := http.NewRequest(http.MethodOptions, ts.URL+"/api/v1/repos", nil)
+	req.Header.Set("Origin", "https://allowed.test")
+	req.Header.Set("Access-Control-Request-Method", "POST")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("cors preflight allowed: expected 204, got %d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "https://allowed.test" {
+		t.Fatalf("cors preflight allowed: expected reflected origin, got %q", got)
+	}
+	resp.Body.Close()
+
+	req, _ = http.NewRequest(http.MethodOptions, ts.URL+"/api/v1/repos", nil)
+	req.Header.Set("Origin", "https://blocked.test")
+	req.Header.Set("Access-Control-Request-Method", "POST")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("cors preflight blocked: expected 204, got %d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "" {
+		t.Fatalf("cors preflight blocked: expected empty allow-origin, got %q", got)
 	}
 	resp.Body.Close()
 }

@@ -89,6 +89,7 @@ func cmdServe(args []string) {
 		EnableAdminHealth:  envBool("GOTHUB_ENABLE_ADMIN_HEALTH"),
 		EnablePprof:        envBool("GOTHUB_ENABLE_PPROF"),
 		AdminAllowedCIDRs:  parseAdminCIDRs("GOTHUB_ADMIN_ALLOWED_CIDRS"),
+		CORSAllowedOrigins: parseCSVEnv("GOTHUB_CORS_ALLOW_ORIGINS"),
 	}
 	server := api.NewServerWithOptions(db, authSvc, repoSvc, serverOpts)
 
@@ -171,6 +172,10 @@ func validateServeConfig(cfg *config.Config) error {
 }
 
 func parseAdminCIDRs(name string) []string {
+	return parseCSVEnv(name)
+}
+
+func parseCSVEnv(name string) []string {
 	raw := strings.TrimSpace(os.Getenv(name))
 	if raw == "" {
 		return nil
@@ -178,11 +183,11 @@ func parseAdminCIDRs(name string) []string {
 	parts := strings.Split(raw, ",")
 	out := make([]string, 0, len(parts))
 	for _, part := range parts {
-		cidr := strings.TrimSpace(part)
-		if cidr == "" {
+		item := strings.TrimSpace(part)
+		if item == "" {
 			continue
 		}
-		out = append(out, cidr)
+		out = append(out, item)
 	}
 	return out
 }
