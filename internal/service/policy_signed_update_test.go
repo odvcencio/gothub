@@ -151,3 +151,70 @@ func TestEvaluateBranchUpdateGateRequiresSignedCommits(t *testing.T) {
 		t.Fatalf("expected unsigned-commit reason, got %+v", blockedReasons)
 	}
 }
+
+func TestEvaluateBranchUpdateGateBlocksDirectPushWhenPRChecksRequired(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	db, err := database.OpenSQLite(filepath.Join(tmpDir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	user := &models.User{Username: "alice", Email: "alice@example.com", PasswordHash: "x"}
+	if err := db.CreateUser(ctx, user); err != nil {
+		t.Fatal(err)
+	}
+	repoSvc := NewRepoService(db, filepath.Join(tmpDir, "repos"))
+	repo, err := repoSvc.Create(ctx, user.ID, "repo", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := repoSvc.OpenStore(ctx, "alice", "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	blobHash, err := store.Objects.WriteBlob(&object.Blob{Data: []byte("package main\n\nfunc ProcessOrder() int { return 1 }\n")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	treeHash, err := store.Objects.WriteTree(&object.TreeObj{Entries: []object.TreeEntry{{Name: "main.go", BlobHash: blobHash}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitHash, err := store.Objects.WriteCommit(&object.CommitObj{
+		TreeHash:  treeHash,
+		Author:    "alice",
+		Timestamp: 1700005300,
+		Message:   "direct push",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	prSvc := NewPRService(db, repoSvc, NewBrowseService(repoSvc))
+	if err := prSvc.UpsertBranchProtectionRule(ctx, &models.BranchProtectionRule{
+		RepoID:           repo.ID,
+		Branch:           "main",
+		Enabled:          true,
+		RequireApprovals: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	reasons, err := prSvc.EvaluateBranchUpdateGate(ctx, repo.ID, "main", "", commitHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reasons) == 0 {
+		t.Fatal("expected direct push to protected branch to be blocked")
+	}
+	if !strings.Contains(strings.Join(reasons, " "), "direct pushes are blocked") {
+		t.Fatalf("expected direct-push block reason, got %+v", reasons)
+	}
+}

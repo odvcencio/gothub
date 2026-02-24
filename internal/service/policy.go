@@ -85,6 +85,9 @@ func (s *PRService) EvaluateBranchUpdateGate(ctx context.Context, repoID int64, 
 	}
 
 	var reasons []string
+	if rule.RequireApprovals || rule.RequireStatusChecks || rule.RequireEntityOwnerApproval || rule.RequireLintPass || rule.RequireNoNewDeadCode {
+		reasons = append(reasons, "direct pushes are blocked on this protected branch; open a pull request")
+	}
 	if rule.RequireSignedCommits {
 		signedReasons, err := s.evaluateSignedCommitRange(ctx, store, newHead, oldHead)
 		if err != nil {
