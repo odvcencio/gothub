@@ -14,10 +14,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/odvcencio/got/pkg/object"
 	"github.com/odvcencio/gothub/internal/api"
 	"github.com/odvcencio/gothub/internal/auth"
 	"github.com/odvcencio/gothub/internal/database"
 	"github.com/odvcencio/gothub/internal/gitinterop"
+	"github.com/odvcencio/gothub/internal/gotstore"
+	"github.com/odvcencio/gothub/internal/models"
 	"github.com/odvcencio/gothub/internal/service"
 )
 
@@ -867,6 +870,77 @@ func TestReceivePackReportsActualRefStatus(t *testing.T) {
 	}
 	if strings.Contains(bodyStr, "ok refs/heads/main\n") {
 		t.Fatalf("unexpected hardcoded main ref status in response: %q", bodyStr)
+	}
+}
+
+func TestReceivePackRejectsStaleOldHash(t *testing.T) {
+	server, db := setupTestServer(t)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	token := registerAndGetToken(t, ts.URL, "owner")
+	createRepo(t, ts.URL, token, "repo", false)
+
+	repo, err := db.GetRepository(context.Background(), "owner", "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := gotstore.Open(repo.StoragePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	treeHash, err := store.Objects.WriteTree(&object.TreeObj{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitHash, err := store.Objects.WriteCommit(&object.CommitObj{
+		TreeHash:  treeHash,
+		Author:    "Owner <owner@example.com>",
+		Timestamp: 1700000000,
+		Message:   "seed",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Refs.Set("heads/main", commitHash); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetHashMapping(context.Background(), &models.HashMapping{
+		RepoID:     repo.ID,
+		GotHash:    string(commitHash),
+		GitHash:    strings.Repeat("a", 40),
+		ObjectType: "commit",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	updateLine := fmt.Sprintf("%s %s refs/heads/main\x00report-status\n", strings.Repeat("0", 40), strings.Repeat("0", 40))
+	payload := append(pktLineForTest(updateLine), pktFlushForTest()...)
+
+	req, _ := http.NewRequest("POST", ts.URL+"/git/owner/repo/git-receive-pack", bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/x-git-receive-pack-request")
+	req.SetBasicAuth("owner", "secret123")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("git receive-pack: expected 200, got %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bodyStr := string(body)
+
+	if !strings.Contains(bodyStr, "unpack ok\n") {
+		t.Fatalf("expected unpack ok in receive-pack result, got body %q", bodyStr)
+	}
+	expected := "ng refs/heads/main stale old hash"
+	if !strings.Contains(bodyStr, expected) {
+		t.Fatalf("expected stale old hash status %q, got body %q", expected, bodyStr)
 	}
 }
 
