@@ -7,7 +7,8 @@ services:
       GOTHUB_DB_DRIVER: postgres
       GOTHUB_DB_DSN: postgres://gothub:gothub@postgres:5432/gothub?sslmode=disable
       GOTHUB_STORAGE_PATH: /data/repos
-      GOTHUB_JWT_SECRET: ${GOTHUB_JWT_SECRET:-change-me-in-production}
+      GOTHUB_JWT_SECRET: ${GOTHUB_JWT_SECRET:-dev-jwt-secret-change-this}
+      GOTHUB_ENABLE_PASSWORD_AUTH: ${GOTHUB_ENABLE_PASSWORD_AUTH:-true}
     volumes:
       - repo-data:/data/repos
     depends_on:

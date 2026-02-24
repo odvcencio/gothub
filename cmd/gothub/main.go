@@ -159,10 +159,10 @@ func openDB(cfg *config.Config) (database.DB, error) {
 
 func validateServeConfig(cfg *config.Config) error {
 	if cfg.Auth.JWTSecret == "" || cfg.Auth.JWTSecret == "change-me-in-production" {
-		return fmt.Errorf("GOTHUB_JWT_SECRET must be set to a non-default value")
+		return fmt.Errorf("GOTHUB_JWT_SECRET must be set to a non-default value (example: GOTHUB_JWT_SECRET=dev-jwt-secret-change-this)")
 	}
 	if len(cfg.Auth.JWTSecret) < 16 {
-		return fmt.Errorf("GOTHUB_JWT_SECRET must be at least 16 characters")
+		return fmt.Errorf("GOTHUB_JWT_SECRET must be at least 16 characters (current length: %d)", len(cfg.Auth.JWTSecret))
 	}
 	if cfg.Storage.Path == "" {
 		return fmt.Errorf("storage.path must be configured")
