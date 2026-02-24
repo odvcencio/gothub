@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/odvcencio/got/pkg/diff"
 	"github.com/odvcencio/got/pkg/entity"
@@ -29,8 +30,8 @@ type EntityListResponse struct {
 
 // EntityChangeInfo represents a single entity-level change for API responses.
 type EntityChangeInfo struct {
-	Type   string `json:"type"` // "added", "removed", "modified"
-	Key    string `json:"key"`
+	Type   string      `json:"type"` // "added", "removed", "modified"
+	Key    string      `json:"key"`
 	Before *EntityInfo `json:"before,omitempty"`
 	After  *EntityInfo `json:"after,omitempty"`
 }
@@ -46,6 +47,22 @@ type DiffResponse struct {
 	Base  string             `json:"base"`
 	Head  string             `json:"head"`
 	Files []FileDiffResponse `json:"files"`
+}
+
+// EntityHistoryHit is one entity occurrence in commit history.
+type EntityHistoryHit struct {
+	CommitHash string `json:"commit_hash"`
+	Author     string `json:"author"`
+	Timestamp  int64  `json:"timestamp"`
+	Message    string `json:"message"`
+
+	Path       string `json:"path"`
+	EntityHash string `json:"entity_hash"`
+	Kind       string `json:"kind"`
+	Name       string `json:"name"`
+	DeclKind   string `json:"decl_kind"`
+	Receiver   string `json:"receiver,omitempty"`
+	BodyHash   string `json:"body_hash"`
 }
 
 type DiffService struct {
@@ -167,6 +184,64 @@ func (s *DiffService) DiffRefs(ctx context.Context, owner, repo, baseRef, headRe
 	}, nil
 }
 
+// EntityHistory returns commits (newest-first graph walk) where matching entities occur.
+// At least one of name or bodyHash must be provided.
+func (s *DiffService) EntityHistory(ctx context.Context, owner, repo, ref, name, bodyHash string, limit int) ([]EntityHistoryHit, error) {
+	name = strings.TrimSpace(name)
+	bodyHash = strings.TrimSpace(bodyHash)
+	if name == "" && bodyHash == "" {
+		return nil, fmt.Errorf("name or body_hash query is required")
+	}
+
+	store, err := s.repoSvc.OpenStore(ctx, owner, repo)
+	if err != nil {
+		return nil, err
+	}
+	head, err := s.browseSvc.ResolveRef(ctx, owner, repo, ref)
+	if err != nil {
+		return nil, fmt.Errorf("resolve ref: %w", err)
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+
+	hits := make([]EntityHistoryHit, 0, limit)
+	queue := []object.Hash{head}
+	seen := map[object.Hash]bool{}
+
+	for len(queue) > 0 && len(hits) < limit {
+		h := queue[0]
+		queue = queue[1:]
+		if seen[h] {
+			continue
+		}
+		seen[h] = true
+
+		commit, err := store.Objects.ReadCommit(h)
+		if err == nil {
+			var commitHits []EntityHistoryHit
+			_ = collectEntityHistoryHits(store.Objects, commit.TreeHash, "", name, bodyHash, &commitHits)
+			for i := range commitHits {
+				commitHits[i].CommitHash = string(h)
+				commitHits[i].Author = commit.Author
+				commitHits[i].Timestamp = commit.Timestamp
+				commitHits[i].Message = commit.Message
+				hits = append(hits, commitHits[i])
+				if len(hits) >= limit {
+					break
+				}
+			}
+			for _, p := range commit.Parents {
+				if !seen[p] {
+					queue = append(queue, p)
+				}
+			}
+		}
+	}
+
+	return hits, nil
+}
+
 // --- helpers ---
 
 func readBlobData(store *object.Store, h object.Hash) ([]byte, error) {
@@ -235,4 +310,76 @@ func fileDiffToResponse(fd *diff.FileDiff) FileDiffResponse {
 		Path:    fd.Path,
 		Changes: changes,
 	}
+}
+
+func collectEntityHistoryHits(store *object.Store, treeHash object.Hash, prefix, name, bodyHash string, out *[]EntityHistoryHit) error {
+	tree, err := store.ReadTree(treeHash)
+	if err != nil {
+		return err
+	}
+	for _, e := range tree.Entries {
+		fullPath := e.Name
+		if prefix != "" {
+			fullPath = prefix + "/" + e.Name
+		}
+		if e.IsDir {
+			if err := collectEntityHistoryHits(store, e.SubtreeHash, fullPath, name, bodyHash, out); err != nil {
+				return err
+			}
+			continue
+		}
+		if e.EntityListHash == "" {
+			blob, err := store.ReadBlob(e.BlobHash)
+			if err != nil {
+				continue
+			}
+			el, err := entity.Extract(fullPath, blob.Data)
+			if err != nil {
+				continue
+			}
+			for _, ent := range el.Entities {
+				if name != "" && ent.Name != name {
+					continue
+				}
+				if bodyHash != "" && !strings.EqualFold(ent.BodyHash, bodyHash) {
+					continue
+				}
+				*out = append(*out, EntityHistoryHit{
+					Path:     fullPath,
+					Kind:     kindNames[ent.Kind],
+					Name:     ent.Name,
+					DeclKind: ent.DeclKind,
+					Receiver: ent.Receiver,
+					BodyHash: ent.BodyHash,
+				})
+			}
+			continue
+		}
+		el, err := store.ReadEntityList(e.EntityListHash)
+		if err != nil {
+			continue
+		}
+		for _, ref := range el.EntityRefs {
+			ent, err := store.ReadEntity(ref)
+			if err != nil {
+				continue
+			}
+			if name != "" && ent.Name != name {
+				continue
+			}
+			if bodyHash != "" && !strings.EqualFold(string(ent.BodyHash), bodyHash) {
+				continue
+			}
+			*out = append(*out, EntityHistoryHit{
+				Path:       fullPath,
+				EntityHash: string(ref),
+				Kind:       ent.Kind,
+				Name:       ent.Name,
+				DeclKind:   ent.DeclKind,
+				Receiver:   ent.Receiver,
+				BodyHash:   string(ent.BodyHash),
+			})
+		}
+	}
+	return nil
 }

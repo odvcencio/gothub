@@ -1107,6 +1107,98 @@ func TestCodeIntelPersistsCommitIndex(t *testing.T) {
 	}
 }
 
+func TestEntityHistoryEndpointReturnsMatchesAcrossCommitHistory(t *testing.T) {
+	server, _ := setupTestServer(t)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	token := registerAndGetToken(t, ts.URL, "owner")
+	createRepo(t, ts.URL, token, "repo", false)
+
+	blobData := []byte("package main\n\nfunc ProcessOrder() int { return 1 }\n")
+	blobHash := gitinterop.GitHashBytes(gitinterop.GitTypeBlob, blobData)
+
+	var treeBuf bytes.Buffer
+	fmt.Fprintf(&treeBuf, "100644 main.go\x00")
+	blobRaw, err := hex.DecodeString(string(blobHash))
+	if err != nil {
+		t.Fatal(err)
+	}
+	treeBuf.Write(blobRaw)
+	treeData := treeBuf.Bytes()
+	treeHash := gitinterop.GitHashBytes(gitinterop.GitTypeTree, treeData)
+
+	commit1Data := []byte(fmt.Sprintf(
+		"tree %s\nauthor Owner <owner@example.com> 1700000000 +0000\ncommitter Owner <owner@example.com> 1700000000 +0000\n\ninitial\n",
+		treeHash,
+	))
+	commit1Hash := gitinterop.GitHashBytes(gitinterop.GitTypeCommit, commit1Data)
+
+	commit2Data := []byte(fmt.Sprintf(
+		"tree %s\nparent %s\nauthor Owner <owner@example.com> 1700000100 +0000\ncommitter Owner <owner@example.com> 1700000100 +0000\n\nsecond\n",
+		treeHash, commit1Hash,
+	))
+	commit2Hash := gitinterop.GitHashBytes(gitinterop.GitTypeCommit, commit2Data)
+
+	packData, err := gitinterop.BuildPackfile([]gitinterop.PackfileObject{
+		{Type: gitinterop.OBJ_BLOB, Data: blobData},
+		{Type: gitinterop.OBJ_TREE, Data: treeData},
+		{Type: gitinterop.OBJ_COMMIT, Data: commit1Data},
+		{Type: gitinterop.OBJ_COMMIT, Data: commit2Data},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	updateLine := fmt.Sprintf("%s %s refs/heads/main\x00report-status\n", strings.Repeat("0", 40), commit2Hash)
+	payload := append(pktLineForTest(updateLine), pktFlushForTest()...)
+	payload = append(payload, packData...)
+
+	req, _ := http.NewRequest("POST", ts.URL+"/git/owner/repo/git-receive-pack", bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/x-git-receive-pack-request")
+	req.SetBasicAuth("owner", "secret123")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("git receive-pack: expected 200, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	resp, err = http.Get(ts.URL + "/api/v1/repos/owner/repo/entity-history/main?name=ProcessOrder&limit=10")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("entity history: expected 200, got %d", resp.StatusCode)
+	}
+	var hits []struct {
+		CommitHash string `json:"commit_hash"`
+		Path       string `json:"path"`
+		Name       string `json:"name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&hits); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if len(hits) < 2 {
+		t.Fatalf("expected at least 2 entity history hits, got %+v", hits)
+	}
+	for i, hit := range hits {
+		if strings.TrimSpace(hit.CommitHash) == "" {
+			t.Fatalf("hit %d missing commit hash: %+v", i, hit)
+		}
+		if hit.Path != "main.go" {
+			t.Fatalf("hit %d unexpected path: %+v", i, hit)
+		}
+		if hit.Name != "ProcessOrder" {
+			t.Fatalf("hit %d unexpected entity name: %+v", i, hit)
+		}
+	}
+}
+
 func TestMergeBlockedByBranchProtectionApprovalRequirement(t *testing.T) {
 	server, _ := setupTestServer(t)
 	ts := httptest.NewServer(server)

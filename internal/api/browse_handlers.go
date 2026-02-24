@@ -122,6 +122,38 @@ func (s *Server) handleListEntities(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, entities)
 }
 
+// GET /api/v1/repos/{owner}/{repo}/entity-history/{ref}?name=...&body_hash=...
+func (s *Server) handleEntityHistory(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.authorizeRepoRequest(w, r, false); !ok {
+		return
+	}
+	owner := r.PathValue("owner")
+	repo := r.PathValue("repo")
+	ref := r.PathValue("ref")
+	name := strings.TrimSpace(r.URL.Query().Get("name"))
+	bodyHash := strings.TrimSpace(r.URL.Query().Get("body_hash"))
+
+	page, perPage := parsePagination(r, 50, 200)
+	if l := strings.TrimSpace(r.URL.Query().Get("limit")); l != "" {
+		if n, err := strconv.Atoi(l); err == nil && n > 0 {
+			perPage = n
+		}
+	}
+	limit := page * perPage
+	hits, err := s.diffSvc.EntityHistory(r.Context(), owner, repo, ref, name, bodyHash, limit)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if strings.Contains(err.Error(), "required") {
+			status = http.StatusBadRequest
+		} else if strings.Contains(err.Error(), "resolve ref") {
+			status = http.StatusNotFound
+		}
+		jsonError(w, err.Error(), status)
+		return
+	}
+	jsonResponse(w, http.StatusOK, paginateSlice(hits, page, perPage))
+}
+
 // GET /api/v1/repos/{owner}/{repo}/diff/{spec}
 // spec is "base...head" where base and head are refs or commit hashes
 func (s *Server) handleDiff(w http.ResponseWriter, r *http.Request) {

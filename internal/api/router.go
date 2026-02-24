@@ -105,6 +105,7 @@ func (s *Server) routes() {
 
 	// Entities & diff
 	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/entities/{ref}/{path...}", s.handleListEntities)
+	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/entity-history/{ref}", s.handleEntityHistory)
 	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/diff/{spec}", s.handleDiff)
 
 	// Pull requests
