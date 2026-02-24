@@ -12,6 +12,8 @@ github.com/ncruces/go-strftime v0.1.9 h1:bY0MQC28UADQmHmaF5dgpLmImcShSi2kHU9XLdh
 github.com/ncruces/go-strftime v0.1.9/go.mod h1:Fwc5htZGVVkseilnfgOVb9mKy6w1naJmn9CehxcKcls=
 github.com/odvcencio/got v0.1.0 h1:PG5I2/MzKInnss1zRLf2f3BrQsZaAhluiPE7du8xvTw=
 github.com/odvcencio/got v0.1.0/go.mod h1:YcuH49IaAYfBmjLAfE8abZQ+XgGFuYzLx0tJ27ameF4=
+github.com/odvcencio/gotreesitter v0.2.0 h1:guzCTl/Ntiuw590ZBVNw2Cbnz0vM1GgGy9Z19uITESg=
+github.com/odvcencio/gotreesitter v0.2.0/go.mod h1:CEjhRXmfP38AHqxwWxNcLaMsLQ3YoGMrwNGle1huZdU=
 github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec h1:W09IVJc94icq4NjY3clb7Lk8O1qJ8BdBEF8z0ibU0rE=
 github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec/go.mod h1:qqbHyh8v60DhA7CoWK5oRCqLrMHRGoxYCSS9EjAz6Eo=
 golang.org/x/crypto v0.39.0 h1:SHs+kF4LP+f+p14esP5jAoDpHU8Gu/v9lFRK6IT5imM=

@@ -1,0 +1,669 @@
+package gitinterop
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+
+	"github.com/odvcencio/got/pkg/entity"
+	"github.com/odvcencio/got/pkg/object"
+	"github.com/odvcencio/gothub/internal/database"
+	"github.com/odvcencio/gothub/internal/gotstore"
+	"github.com/odvcencio/gothub/internal/models"
+)
+
+// SmartHTTPHandler implements the git smart HTTP protocol.
+type SmartHTTPHandler struct {
+	getStore func(owner, repo string) (*gotstore.RepoStore, error)
+	db       database.DB
+	getRepo  func(ctx context.Context, owner, repo string) (int64, error) // returns repo ID
+}
+
+type refUpdate struct {
+	oldHash, newHash GitHash
+	refName          string
+}
+
+func NewSmartHTTPHandler(
+	getStore func(owner, repo string) (*gotstore.RepoStore, error),
+	db database.DB,
+	getRepo func(ctx context.Context, owner, repo string) (int64, error),
+) *SmartHTTPHandler {
+	return &SmartHTTPHandler{getStore: getStore, db: db, getRepo: getRepo}
+}
+
+// RegisterRoutes sets up git smart HTTP protocol routes.
+func (h *SmartHTTPHandler) RegisterRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("GET /git/{owner}/{repo}/info/refs", h.handleInfoRefs)
+	mux.HandleFunc("POST /git/{owner}/{repo}/git-upload-pack", h.handleUploadPack)
+	mux.HandleFunc("POST /git/{owner}/{repo}/git-receive-pack", h.handleReceivePack)
+}
+
+// GET /git/{owner}/{repo}/info/refs?service=git-upload-pack|git-receive-pack
+func (h *SmartHTTPHandler) handleInfoRefs(w http.ResponseWriter, r *http.Request) {
+	owner := r.PathValue("owner")
+	repo := strings.TrimSuffix(r.PathValue("repo"), ".git")
+	svc := r.URL.Query().Get("service")
+
+	if svc != "git-upload-pack" && svc != "git-receive-pack" {
+		http.Error(w, "unsupported service", http.StatusBadRequest)
+		return
+	}
+
+	store, err := h.getStore(owner, repo)
+	if err != nil {
+		http.Error(w, "repository not found", http.StatusNotFound)
+		return
+	}
+
+	refs, err := store.Refs.ListAll()
+	if err != nil {
+		// Empty repo — return empty ref list
+		refs = map[string]object.Hash{}
+	}
+
+	// Convert Got hashes to git hashes
+	repoID, err := h.getRepo(r.Context(), owner, repo)
+	if err != nil {
+		http.Error(w, "repository not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", fmt.Sprintf("application/x-%s-advertisement", svc))
+	w.Header().Set("Cache-Control", "no-cache")
+
+	// Service announcement
+	w.Write(pktLine(fmt.Sprintf("# service=%s\n", svc)))
+	w.Write(pktFlush())
+
+	// Send refs
+	first := true
+	for name, gotHash := range refs {
+		gitHash, err := h.db.GetGitHash(r.Context(), repoID, string(gotHash))
+		if err != nil {
+			// If no mapping exists, the hash might not have been pushed via git
+			continue
+		}
+		refName := name
+		if first {
+			// First ref includes capabilities
+			w.Write(pktLine(fmt.Sprintf("%s %s\x00report-status delete-refs ofs-delta side-band-64k\n", gitHash, refName)))
+			first = false
+		} else {
+			w.Write(pktLine(fmt.Sprintf("%s %s\n", gitHash, refName)))
+		}
+	}
+
+	if first {
+		// No refs — send zero-id with capabilities
+		w.Write(pktLine(fmt.Sprintf("%s capabilities^{}\x00report-status delete-refs ofs-delta side-band-64k\n", strings.Repeat("0", 40))))
+	}
+
+	w.Write(pktFlush())
+}
+
+// POST /git/{owner}/{repo}/git-receive-pack
+func (h *SmartHTTPHandler) handleReceivePack(w http.ResponseWriter, r *http.Request) {
+	owner := r.PathValue("owner")
+	repo := strings.TrimSuffix(r.PathValue("repo"), ".git")
+
+	store, err := h.getStore(owner, repo)
+	if err != nil {
+		http.Error(w, "repository not found", http.StatusNotFound)
+		return
+	}
+
+	repoID, err := h.getRepo(r.Context(), owner, repo)
+	if err != nil {
+		http.Error(w, "repository not found", http.StatusNotFound)
+		return
+	}
+
+	br := bufio.NewReader(r.Body)
+
+	// Read ref update commands
+	var updates []refUpdate
+
+	for {
+		line, err := readPktLine(br)
+		if err != nil {
+			http.Error(w, "protocol error", http.StatusBadRequest)
+			return
+		}
+		if line == nil {
+			break // flush
+		}
+		s := strings.TrimRight(string(line), "\n")
+		// Remove capabilities from first line
+		if idx := strings.IndexByte(s, 0); idx >= 0 {
+			s = s[:idx]
+		}
+		parts := strings.SplitN(s, " ", 3)
+		if len(parts) != 3 {
+			continue
+		}
+		updates = append(updates, refUpdate{
+			oldHash: GitHash(parts[0]),
+			newHash: GitHash(parts[1]),
+			refName: parts[2],
+		})
+	}
+
+	// Read packfile (rest of body)
+	packData, err := io.ReadAll(br)
+	if err != nil {
+		http.Error(w, "read packfile error", http.StatusBadRequest)
+		return
+	}
+
+	if len(packData) > 0 {
+		// Parse packfile and convert objects to Got format
+		objects, err := ParsePackfile(bytes.NewReader(packData))
+		if err != nil {
+			h.sendReceivePackResult(w, fmt.Sprintf("unpack error: %v", err))
+			return
+		}
+
+		// Convert each git object to a Got object and store it
+		for _, obj := range objects {
+			gitHash := GitHash(gitHashRaw(obj.Type, obj.Data))
+
+			switch obj.Type {
+			case OBJ_BLOB:
+				gotHash, err := store.Objects.WriteBlob(&object.Blob{Data: obj.Data})
+				if err != nil {
+					continue
+				}
+				h.db.SetHashMapping(r.Context(), &models.HashMapping{
+					RepoID: repoID, GotHash: string(gotHash), GitHash: string(gitHash), ObjectType: "blob",
+				})
+				// Extract entities for the blob
+				// We don't know the filename yet (need tree context), so skip for now
+
+			case OBJ_TREE:
+				gotTree, err := parseGitTree(obj.Data, r.Context(), h.db, repoID)
+				if err != nil {
+					continue
+				}
+				gotHash, err := store.Objects.WriteTree(gotTree)
+				if err != nil {
+					continue
+				}
+				h.db.SetHashMapping(r.Context(), &models.HashMapping{
+					RepoID: repoID, GotHash: string(gotHash), GitHash: string(gitHash), ObjectType: "tree",
+				})
+
+			case OBJ_COMMIT:
+				gotCommit, err := parseGitCommit(obj.Data, r.Context(), h.db, repoID)
+				if err != nil {
+					continue
+				}
+				gotHash, err := store.Objects.WriteCommit(gotCommit)
+				if err != nil {
+					continue
+				}
+				h.db.SetHashMapping(r.Context(), &models.HashMapping{
+					RepoID: repoID, GotHash: string(gotHash), GitHash: string(gitHash), ObjectType: "commit",
+				})
+			}
+		}
+
+		// Run entity extraction on blobs with known filenames
+		h.extractEntitiesForCommits(r.Context(), store, repoID, updates)
+	}
+
+	// Update refs
+	for _, u := range updates {
+		if string(u.newHash) == strings.Repeat("0", 40) {
+			store.Refs.Delete(u.refName)
+			continue
+		}
+		gotHash, err := h.db.GetGotHash(r.Context(), repoID, string(u.newHash))
+		if err != nil {
+			continue
+		}
+		store.Refs.Set(u.refName, object.Hash(gotHash))
+	}
+
+	h.sendReceivePackResult(w, "")
+}
+
+// POST /git/{owner}/{repo}/git-upload-pack
+func (h *SmartHTTPHandler) handleUploadPack(w http.ResponseWriter, r *http.Request) {
+	owner := r.PathValue("owner")
+	repo := strings.TrimSuffix(r.PathValue("repo"), ".git")
+
+	store, err := h.getStore(owner, repo)
+	if err != nil {
+		http.Error(w, "repository not found", http.StatusNotFound)
+		return
+	}
+
+	repoID, err := h.getRepo(r.Context(), owner, repo)
+	if err != nil {
+		http.Error(w, "repository not found", http.StatusNotFound)
+		return
+	}
+
+	br := bufio.NewReader(r.Body)
+
+	// Read want/have negotiation
+	var wants []GitHash
+	var haves []GitHash
+
+	for {
+		line, err := readPktLine(br)
+		if err != nil {
+			http.Error(w, "protocol error", http.StatusBadRequest)
+			return
+		}
+		if line == nil {
+			break
+		}
+		s := strings.TrimRight(string(line), "\n")
+		// Strip capabilities from first want line
+		if idx := strings.IndexByte(s, 0); idx >= 0 {
+			s = s[:idx]
+		}
+		if strings.HasPrefix(s, "want ") {
+			wants = append(wants, GitHash(strings.Fields(s)[1]))
+		} else if strings.HasPrefix(s, "have ") {
+			haves = append(haves, GitHash(strings.Fields(s)[1]))
+		} else if s == "done" {
+			break
+		}
+	}
+
+	// Read remaining "done" if not already consumed
+	for {
+		line, err := readPktLine(br)
+		if err != nil || line == nil {
+			break
+		}
+		if strings.TrimSpace(string(line)) == "done" {
+			break
+		}
+	}
+
+	// Collect objects to send
+	haveSet := make(map[object.Hash]bool)
+	for _, gh := range haves {
+		if gotHash, err := h.db.GetGotHash(r.Context(), repoID, string(gh)); err == nil {
+			haveSet[object.Hash(gotHash)] = true
+		}
+	}
+
+	var packObjects []PackfileObject
+
+	for _, wantGitHash := range wants {
+		gotHash, err := h.db.GetGotHash(r.Context(), repoID, string(wantGitHash))
+		if err != nil {
+			continue
+		}
+
+		// Walk object graph from this commit, collecting objects the client doesn't have
+		missing, err := walkGotObjects(store.Objects, object.Hash(gotHash), func(h object.Hash) bool {
+			return haveSet[h]
+		})
+		if err != nil {
+			continue
+		}
+
+		for _, m := range missing {
+			objType, data, err := store.Objects.Read(m)
+			if err != nil {
+				continue
+			}
+			gitType := gotTypeToPackType(objType)
+			gitData, err := convertGotToGitData(objType, data, store.Objects, r.Context(), h.db, repoID)
+			if err != nil {
+				continue
+			}
+			packObjects = append(packObjects, PackfileObject{Type: gitType, Data: gitData})
+		}
+	}
+
+	// Build and send packfile
+	w.Header().Set("Content-Type", "application/x-git-upload-pack-result")
+
+	w.Write(pktLine("NAK\n"))
+
+	if len(packObjects) > 0 {
+		packData, err := BuildPackfile(packObjects)
+		if err != nil {
+			return
+		}
+		w.Write(packData)
+	}
+
+	w.Write(pktFlush())
+}
+
+func (h *SmartHTTPHandler) sendReceivePackResult(w http.ResponseWriter, errMsg string) {
+	w.Header().Set("Content-Type", "application/x-git-receive-pack-result")
+	if errMsg != "" {
+		w.Write(pktLine(fmt.Sprintf("unpack %s\n", errMsg)))
+	} else {
+		w.Write(pktLine("unpack ok\n"))
+	}
+	w.Write(pktLine("ok refs/heads/main\n"))
+	w.Write(pktFlush())
+}
+
+// extractEntitiesForCommits runs entity extraction on blobs referenced by new commits.
+func (h *SmartHTTPHandler) extractEntitiesForCommits(ctx context.Context, store *gotstore.RepoStore, repoID int64, updates []refUpdate) {
+	for _, u := range updates {
+		if string(u.newHash) == strings.Repeat("0", 40) {
+			continue
+		}
+		gotHash, err := h.db.GetGotHash(ctx, repoID, string(u.newHash))
+		if err != nil {
+			continue
+		}
+		commit, err := store.Objects.ReadCommit(object.Hash(gotHash))
+		if err != nil {
+			continue
+		}
+		h.extractEntitiesForTree(ctx, store, commit.TreeHash, "")
+	}
+}
+
+func (h *SmartHTTPHandler) extractEntitiesForTree(ctx context.Context, store *gotstore.RepoStore, treeHash object.Hash, prefix string) {
+	tree, err := store.Objects.ReadTree(treeHash)
+	if err != nil {
+		return
+	}
+	for _, e := range tree.Entries {
+		fullPath := e.Name
+		if prefix != "" {
+			fullPath = prefix + "/" + e.Name
+		}
+		if e.IsDir {
+			h.extractEntitiesForTree(ctx, store, e.SubtreeHash, fullPath)
+		} else if e.EntityListHash == "" {
+			// No entity list yet — extract entities
+			blob, err := store.Objects.ReadBlob(e.BlobHash)
+			if err != nil {
+				continue
+			}
+			el, err := entity.Extract(fullPath, blob.Data)
+			if err != nil || len(el.Entities) == 0 {
+				continue
+			}
+			// Write entity objects and entity list
+			var entityRefs []object.Hash
+			for _, ent := range el.Entities {
+				entObj := &object.EntityObj{
+					Kind:     entityKindToString(ent.Kind),
+					Name:     ent.Name,
+					DeclKind: ent.DeclKind,
+					Receiver: ent.Receiver,
+					Body:     ent.Body,
+					BodyHash: object.Hash(ent.BodyHash),
+				}
+				entHash, err := store.Objects.WriteEntity(entObj)
+				if err != nil {
+					continue
+				}
+				entityRefs = append(entityRefs, entHash)
+			}
+			if len(entityRefs) > 0 {
+				elObj := &object.EntityListObj{
+					Language:   el.Language,
+					Path:       fullPath,
+					EntityRefs: entityRefs,
+				}
+				store.Objects.WriteEntityList(elObj)
+			}
+		}
+	}
+}
+
+func entityKindToString(k entity.EntityKind) string {
+	switch k {
+	case entity.KindPreamble:
+		return "preamble"
+	case entity.KindImportBlock:
+		return "import"
+	case entity.KindDeclaration:
+		return "declaration"
+	case entity.KindInterstitial:
+		return "interstitial"
+	default:
+		return "unknown"
+	}
+}
+
+// --- conversion helpers ---
+
+// parseGitTree converts git tree binary data to a Got TreeObj.
+func parseGitTree(data []byte, ctx context.Context, db database.DB, repoID int64) (*object.TreeObj, error) {
+	var entries []object.TreeEntry
+	buf := bytes.NewReader(data)
+	for buf.Len() > 0 {
+		// Read mode
+		var mode []byte
+		for {
+			b, err := buf.ReadByte()
+			if err != nil {
+				return nil, err
+			}
+			if b == ' ' {
+				break
+			}
+			mode = append(mode, b)
+		}
+		// Read name (null-terminated)
+		var name []byte
+		for {
+			b, err := buf.ReadByte()
+			if err != nil {
+				return nil, err
+			}
+			if b == 0 {
+				break
+			}
+			name = append(name, b)
+		}
+		// Read 20-byte hash
+		var hashBytes [20]byte
+		if _, err := io.ReadFull(buf, hashBytes[:]); err != nil {
+			return nil, err
+		}
+		gitHash := bytesToHex(hashBytes[:])
+
+		isDir := string(mode) == "40000"
+		gotHash, _ := db.GetGotHash(ctx, repoID, gitHash)
+
+		entry := object.TreeEntry{
+			Name:  string(name),
+			IsDir: isDir,
+		}
+		if isDir {
+			entry.SubtreeHash = object.Hash(gotHash)
+		} else {
+			entry.BlobHash = object.Hash(gotHash)
+		}
+		entries = append(entries, entry)
+	}
+	return &object.TreeObj{Entries: entries}, nil
+}
+
+// parseGitCommit converts git commit text to a Got CommitObj.
+func parseGitCommit(data []byte, ctx context.Context, db database.DB, repoID int64) (*object.CommitObj, error) {
+	lines := strings.Split(string(data), "\n")
+	c := &object.CommitObj{}
+	inBody := false
+	var bodyLines []string
+
+	for _, line := range lines {
+		if inBody {
+			bodyLines = append(bodyLines, line)
+			continue
+		}
+		if line == "" {
+			inBody = true
+			continue
+		}
+		parts := strings.SplitN(line, " ", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		switch parts[0] {
+		case "tree":
+			if gotHash, err := db.GetGotHash(ctx, repoID, parts[1]); err == nil {
+				c.TreeHash = object.Hash(gotHash)
+			}
+		case "parent":
+			if gotHash, err := db.GetGotHash(ctx, repoID, parts[1]); err == nil {
+				c.Parents = append(c.Parents, object.Hash(gotHash))
+			}
+		case "author":
+			// "Name <email> timestamp timezone"
+			c.Author = extractAuthorName(parts[1])
+			c.Timestamp = extractTimestamp(parts[1])
+		}
+	}
+	c.Message = strings.Join(bodyLines, "\n")
+	return c, nil
+}
+
+func extractAuthorName(s string) string {
+	if idx := strings.LastIndex(s, ">"); idx >= 0 {
+		return strings.TrimSpace(s[:idx+1])
+	}
+	return s
+}
+
+func extractTimestamp(s string) int64 {
+	// Format: "Name <email> 1234567890 +0000"
+	parts := strings.Fields(s)
+	if len(parts) >= 2 {
+		for i := len(parts) - 1; i >= 0; i-- {
+			if len(parts[i]) > 5 && parts[i][0] != '+' && parts[i][0] != '-' {
+				var ts int64
+				fmt.Sscanf(parts[i], "%d", &ts)
+				if ts > 0 {
+					return ts
+				}
+			}
+		}
+	}
+	return 0
+}
+
+// walkGotObjects walks the Got object graph collecting objects the client doesn't have.
+func walkGotObjects(store *object.Store, root object.Hash, has func(object.Hash) bool) ([]object.Hash, error) {
+	var missing []object.Hash
+	seen := make(map[object.Hash]bool)
+
+	var walk func(h object.Hash) error
+	walk = func(h object.Hash) error {
+		if h == "" || seen[h] || has(h) {
+			return nil
+		}
+		seen[h] = true
+		if !store.Has(h) {
+			return nil
+		}
+		objType, _, err := store.Read(h)
+		if err != nil {
+			return nil
+		}
+		missing = append(missing, h)
+
+		switch objType {
+		case object.TypeCommit:
+			commit, err := store.ReadCommit(h)
+			if err != nil {
+				return nil
+			}
+			walk(commit.TreeHash)
+			for _, p := range commit.Parents {
+				walk(p)
+			}
+		case object.TypeTree:
+			tree, err := store.ReadTree(h)
+			if err != nil {
+				return nil
+			}
+			for _, e := range tree.Entries {
+				if e.IsDir {
+					walk(e.SubtreeHash)
+				} else {
+					walk(e.BlobHash)
+				}
+			}
+		}
+		return nil
+	}
+
+	if err := walk(root); err != nil {
+		return nil, err
+	}
+	return missing, nil
+}
+
+// convertGotToGitData converts a Got object's data to git format.
+func convertGotToGitData(objType object.ObjectType, data []byte, store *object.Store, ctx context.Context, db database.DB, repoID int64) ([]byte, error) {
+	switch objType {
+	case object.TypeBlob:
+		return data, nil // blob data is the same
+	case object.TypeCommit:
+		commit, err := object.UnmarshalCommit(data)
+		if err != nil {
+			return nil, err
+		}
+		treeGitHash := getGitHash(ctx, db, repoID, string(commit.TreeHash))
+		var parentGitHashes []GitHash
+		for _, p := range commit.Parents {
+			parentGitHashes = append(parentGitHashes, GitHash(getGitHash(ctx, db, repoID, string(p))))
+		}
+		_, gitData := GotToGitCommit(commit, GitHash(treeGitHash), parentGitHashes)
+		return gitData, nil
+	case object.TypeTree:
+		tree, err := object.UnmarshalTree(data)
+		if err != nil {
+			return nil, err
+		}
+		entryHashes := make(map[string]GitHash)
+		for _, e := range tree.Entries {
+			var h object.Hash
+			if e.IsDir {
+				h = e.SubtreeHash
+			} else {
+				h = e.BlobHash
+			}
+			entryHashes[e.Name] = GitHash(getGitHash(ctx, db, repoID, string(h)))
+		}
+		_, gitData := GotToGitTree(tree, entryHashes)
+		return gitData, nil
+	default:
+		return data, nil
+	}
+}
+
+func getGitHash(ctx context.Context, db database.DB, repoID int64, gotHash string) string {
+	h, err := db.GetGitHash(ctx, repoID, gotHash)
+	if err != nil {
+		return strings.Repeat("0", 40) // fallback
+	}
+	return h
+}
+
+func gotTypeToPackType(t object.ObjectType) int {
+	switch t {
+	case object.TypeCommit:
+		return OBJ_COMMIT
+	case object.TypeTree:
+		return OBJ_TREE
+	case object.TypeBlob:
+		return OBJ_BLOB
+	default:
+		return OBJ_BLOB
+	}
+}

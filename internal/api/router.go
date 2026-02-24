@@ -2,28 +2,37 @@ package api
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"net/http"
 
 	"github.com/odvcencio/gothub/internal/auth"
 	"github.com/odvcencio/gothub/internal/database"
+	"github.com/odvcencio/gothub/internal/gitinterop"
 	"github.com/odvcencio/gothub/internal/gotprotocol"
 	"github.com/odvcencio/gothub/internal/gotstore"
 	"github.com/odvcencio/gothub/internal/service"
 )
 
 type Server struct {
-	db      database.DB
-	authSvc *auth.Service
-	repoSvc *service.RepoService
-	mux     *http.ServeMux
+	db        database.DB
+	authSvc   *auth.Service
+	repoSvc   *service.RepoService
+	browseSvc *service.BrowseService
+	diffSvc   *service.DiffService
+	mux       *http.ServeMux
 }
 
 func NewServer(db database.DB, authSvc *auth.Service, repoSvc *service.RepoService) *Server {
+	browseSvc := service.NewBrowseService(repoSvc)
+	diffSvc := service.NewDiffService(repoSvc, browseSvc)
 	s := &Server{
-		db:      db,
-		authSvc: authSvc,
-		repoSvc: repoSvc,
-		mux:     http.NewServeMux(),
+		db:        db,
+		authSvc:   authSvc,
+		repoSvc:   repoSvc,
+		browseSvc: browseSvc,
+		diffSvc:   diffSvc,
+		mux:       http.NewServeMux(),
 	}
 	s.routes()
 	return s
@@ -51,11 +60,41 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/user/repos", s.requireAuth(s.handleListUserRepos))
 	s.mux.HandleFunc("DELETE /api/v1/repos/{owner}/{repo}", s.requireAuth(s.handleDeleteRepo))
 
+	// Code browsing
+	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/tree/{ref}/{path...}", s.handleListTree)
+	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/tree/{ref}", s.handleListTree) // root dir
+	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/blob/{ref}/{path...}", s.handleGetBlob)
+	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/commits/{ref}", s.handleListCommits)
+	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/commit/{hash}", s.handleGetCommit)
+
+	// Entities & diff
+	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/entities/{ref}/{path...}", s.handleListEntities)
+	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/diff/{spec}", s.handleDiff)
+
 	// Got protocol
 	gotProto := gotprotocol.NewHandler(func(owner, repo string) (*gotstore.RepoStore, error) {
 		return s.repoSvc.OpenStore(context.Background(), owner, repo)
 	})
 	gotProto.RegisterRoutes(s.mux)
+
+	// Git smart HTTP protocol
+	gitHandler := gitinterop.NewSmartHTTPHandler(
+		func(owner, repo string) (*gotstore.RepoStore, error) {
+			return s.repoSvc.OpenStore(context.Background(), owner, repo)
+		},
+		s.db,
+		func(ctx context.Context, owner, repo string) (int64, error) {
+			r, err := s.repoSvc.Get(ctx, owner, repo)
+			if err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					return 0, err
+				}
+				return 0, err
+			}
+			return r.ID, nil
+		},
+	)
+	gitHandler.RegisterRoutes(s.mux)
 }
 
 func (s *Server) requireAuth(fn http.HandlerFunc) http.HandlerFunc {
