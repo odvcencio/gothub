@@ -27,6 +27,7 @@ type DB interface {
 	// Repositories
 	CreateRepository(ctx context.Context, repo *models.Repository) error
 	UpdateRepositoryStoragePath(ctx context.Context, id int64, storagePath string) error
+	CloneRepoMetadata(ctx context.Context, sourceRepoID, targetRepoID int64) error
 	GetRepository(ctx context.Context, ownerName, repoName string) (*models.Repository, error)
 	GetRepositoryByID(ctx context.Context, id int64) (*models.Repository, error)
 	ListUserRepositories(ctx context.Context, userID int64) ([]models.Repository, error)
@@ -55,6 +56,7 @@ type DB interface {
 	// PR Comments
 	CreatePRComment(ctx context.Context, comment *models.PRComment) error
 	ListPRComments(ctx context.Context, prID int64) ([]models.PRComment, error)
+	DeletePRComment(ctx context.Context, commentID, authorID int64) error
 
 	// PR Reviews
 	CreatePRReview(ctx context.Context, review *models.PRReview) error
@@ -76,6 +78,7 @@ type DB interface {
 	UpdateIssue(ctx context.Context, issue *models.Issue) error
 	CreateIssueComment(ctx context.Context, comment *models.IssueComment) error
 	ListIssueComments(ctx context.Context, issueID int64) ([]models.IssueComment, error)
+	DeleteIssueComment(ctx context.Context, commentID, authorID int64) error
 
 	// Notifications
 	CreateNotification(ctx context.Context, n *models.Notification) error

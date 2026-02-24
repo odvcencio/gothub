@@ -54,6 +54,8 @@ export const markAllNotificationsRead = () => request<void>('POST', '/notificati
 // Repos
 export const createRepo = (name: string, description: string, isPrivate: boolean) =>
   request<any>('POST', '/repos', { name, description, private: isPrivate });
+export const forkRepo = (owner: string, repo: string, name?: string) =>
+  request<any>('POST', `/repos/${owner}/${repo}/forks`, name ? { name } : undefined);
 export const getRepo = (owner: string, repo: string) =>
   request<any>('GET', `/repos/${owner}/${repo}`);
 export const listUserRepos = () => request<any[]>('GET', '/user/repos');
@@ -103,6 +105,8 @@ export const listPRs = (owner: string, repo: string, state?: string, page?: numb
 };
 export const getPR = (owner: string, repo: string, number: number) =>
   request<any>('GET', `/repos/${owner}/${repo}/pulls/${number}`);
+export const updatePR = (owner: string, repo: string, number: number, data: { title?: string; body?: string }) =>
+  request<any>('PATCH', `/repos/${owner}/${repo}/pulls/${number}`, data);
 export const getPRDiff = (owner: string, repo: string, number: number) =>
   request<any>('GET', `/repos/${owner}/${repo}/pulls/${number}/diff`);
 export const getMergePreview = (owner: string, repo: string, number: number) =>
@@ -115,6 +119,8 @@ export const listPRComments = (owner: string, repo: string, number: number) =>
   request<any[]>('GET', `/repos/${owner}/${repo}/pulls/${number}/comments`);
 export const createPRComment = (owner: string, repo: string, number: number, data: any) =>
   request<any>('POST', `/repos/${owner}/${repo}/pulls/${number}/comments`, data);
+export const deletePRComment = (owner: string, repo: string, number: number, commentId: number) =>
+  request<void>('DELETE', `/repos/${owner}/${repo}/pulls/${number}/comments/${commentId}`);
 export const listPRReviews = (owner: string, repo: string, number: number) =>
   request<any[]>('GET', `/repos/${owner}/${repo}/pulls/${number}/reviews`);
 export const createPRReview = (owner: string, repo: string, number: number, data: any) =>
@@ -227,3 +233,5 @@ export const createIssueComment = (owner: string, repo: string, number: number, 
   request<any>('POST', `/repos/${owner}/${repo}/issues/${number}/comments`, data);
 export const listIssueComments = (owner: string, repo: string, number: number) =>
   request<any[]>('GET', `/repos/${owner}/${repo}/issues/${number}/comments`);
+export const deleteIssueComment = (owner: string, repo: string, number: number, commentId: number) =>
+  request<void>('DELETE', `/repos/${owner}/${repo}/issues/${number}/comments/${commentId}`);

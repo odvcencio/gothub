@@ -35,6 +35,9 @@ func (p *PostgresDB) Migrate(ctx context.Context) error {
 	if _, err := p.db.ExecContext(ctx, pgSchema); err != nil {
 		return err
 	}
+	if _, err := p.db.ExecContext(ctx, `ALTER TABLE repositories ADD COLUMN IF NOT EXISTS parent_repo_id BIGINT REFERENCES repositories(id) ON DELETE SET NULL`); err != nil {
+		return err
+	}
 	if _, err := p.db.ExecContext(ctx, `ALTER TABLE pr_comments ADD COLUMN IF NOT EXISTS entity_stable_id TEXT NOT NULL DEFAULT ''`); err != nil {
 		return err
 	}
@@ -88,6 +91,7 @@ CREATE TABLE IF NOT EXISTS repositories (
 	id BIGSERIAL PRIMARY KEY,
 	owner_user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
 	owner_org_id BIGINT REFERENCES orgs(id) ON DELETE CASCADE,
+	parent_repo_id BIGINT REFERENCES repositories(id) ON DELETE SET NULL,
 	name TEXT NOT NULL,
 	description TEXT NOT NULL DEFAULT '',
 	default_branch TEXT NOT NULL DEFAULT 'main',
@@ -404,9 +408,9 @@ func (p *PostgresDB) DeleteSSHKey(ctx context.Context, id, userID int64) error {
 
 func (p *PostgresDB) CreateRepository(ctx context.Context, r *models.Repository) error {
 	return p.db.QueryRowContext(ctx,
-		`INSERT INTO repositories (owner_user_id, owner_org_id, name, description, default_branch, is_private, storage_path)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, created_at`,
-		r.OwnerUserID, r.OwnerOrgID, r.Name, r.Description, r.DefaultBranch, r.IsPrivate, r.StoragePath).Scan(&r.ID, &r.CreatedAt)
+		`INSERT INTO repositories (owner_user_id, owner_org_id, parent_repo_id, name, description, default_branch, is_private, storage_path)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id, created_at`,
+		r.OwnerUserID, r.OwnerOrgID, r.ParentRepoID, r.Name, r.Description, r.DefaultBranch, r.IsPrivate, r.StoragePath).Scan(&r.ID, &r.CreatedAt)
 }
 
 func (p *PostgresDB) UpdateRepositoryStoragePath(ctx context.Context, id int64, storagePath string) error {
@@ -414,15 +418,72 @@ func (p *PostgresDB) UpdateRepositoryStoragePath(ctx context.Context, id int64, 
 	return err
 }
 
+func (p *PostgresDB) CloneRepoMetadata(ctx context.Context, sourceRepoID, targetRepoID int64) error {
+	tx, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	copyStatements := []struct {
+		query string
+		args  []any
+	}{
+		{
+			query: `INSERT INTO hash_mapping (repo_id, git_hash, got_hash, object_type)
+					SELECT $1, git_hash, got_hash, object_type
+					FROM hash_mapping
+					WHERE repo_id = $2`,
+			args: []any{targetRepoID, sourceRepoID},
+		},
+		{
+			query: `INSERT INTO commit_indexes (repo_id, commit_hash, index_hash, created_at)
+					SELECT $1, commit_hash, index_hash, created_at
+					FROM commit_indexes
+					WHERE repo_id = $2`,
+			args: []any{targetRepoID, sourceRepoID},
+		},
+		{
+			query: `INSERT INTO git_tree_entry_modes (repo_id, got_tree_hash, entry_name, mode, created_at)
+					SELECT $1, got_tree_hash, entry_name, mode, created_at
+					FROM git_tree_entry_modes
+					WHERE repo_id = $2`,
+			args: []any{targetRepoID, sourceRepoID},
+		},
+		{
+			query: `INSERT INTO entity_identities (repo_id, stable_id, name, decl_kind, receiver, first_seen_commit, last_seen_commit, created_at, updated_at)
+					SELECT $1, stable_id, name, decl_kind, receiver, first_seen_commit, last_seen_commit, created_at, updated_at
+					FROM entity_identities
+					WHERE repo_id = $2`,
+			args: []any{targetRepoID, sourceRepoID},
+		},
+		{
+			query: `INSERT INTO entity_versions (repo_id, stable_id, commit_hash, path, entity_hash, body_hash, name, decl_kind, receiver, created_at)
+					SELECT $1, stable_id, commit_hash, path, entity_hash, body_hash, name, decl_kind, receiver, created_at
+					FROM entity_versions
+					WHERE repo_id = $2`,
+			args: []any{targetRepoID, sourceRepoID},
+		},
+	}
+
+	for _, stmt := range copyStatements {
+		if _, err := tx.ExecContext(ctx, stmt.query, stmt.args...); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
 func (p *PostgresDB) GetRepository(ctx context.Context, ownerName, repoName string) (*models.Repository, error) {
 	r := &models.Repository{}
 	// Try user-owned first, then org-owned
 	err := p.db.QueryRowContext(ctx,
-		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at, u.username
+		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.parent_repo_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at, u.username
 		 FROM repositories r
 		 JOIN users u ON u.id = r.owner_user_id
 		 WHERE u.username = $1 AND r.name = $2`, ownerName, repoName).
-		Scan(&r.ID, &r.OwnerUserID, &r.OwnerOrgID, &r.Name, &r.Description, &r.DefaultBranch, &r.IsPrivate, &r.StoragePath, &r.CreatedAt, &r.OwnerName)
+		Scan(&r.ID, &r.OwnerUserID, &r.OwnerOrgID, &r.ParentRepoID, &r.Name, &r.Description, &r.DefaultBranch, &r.IsPrivate, &r.StoragePath, &r.CreatedAt, &r.OwnerName)
 	if err == nil {
 		return r, nil
 	}
@@ -431,11 +492,11 @@ func (p *PostgresDB) GetRepository(ctx context.Context, ownerName, repoName stri
 	}
 	// Try org-owned
 	err = p.db.QueryRowContext(ctx,
-		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at, o.name
+		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.parent_repo_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at, o.name
 		 FROM repositories r
 		 JOIN orgs o ON o.id = r.owner_org_id
 		 WHERE o.name = $1 AND r.name = $2`, ownerName, repoName).
-		Scan(&r.ID, &r.OwnerUserID, &r.OwnerOrgID, &r.Name, &r.Description, &r.DefaultBranch, &r.IsPrivate, &r.StoragePath, &r.CreatedAt, &r.OwnerName)
+		Scan(&r.ID, &r.OwnerUserID, &r.OwnerOrgID, &r.ParentRepoID, &r.Name, &r.Description, &r.DefaultBranch, &r.IsPrivate, &r.StoragePath, &r.CreatedAt, &r.OwnerName)
 	if err != nil {
 		return nil, err
 	}
@@ -445,13 +506,13 @@ func (p *PostgresDB) GetRepository(ctx context.Context, ownerName, repoName stri
 func (p *PostgresDB) GetRepositoryByID(ctx context.Context, id int64) (*models.Repository, error) {
 	r := &models.Repository{}
 	err := p.db.QueryRowContext(ctx,
-		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at,
+		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.parent_repo_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at,
 		 COALESCE(u.username, o.name, '')
 		 FROM repositories r
 		 LEFT JOIN users u ON u.id = r.owner_user_id
 		 LEFT JOIN orgs o ON o.id = r.owner_org_id
 		 WHERE r.id = $1`, id).
-		Scan(&r.ID, &r.OwnerUserID, &r.OwnerOrgID, &r.Name, &r.Description, &r.DefaultBranch, &r.IsPrivate, &r.StoragePath, &r.CreatedAt, &r.OwnerName)
+		Scan(&r.ID, &r.OwnerUserID, &r.OwnerOrgID, &r.ParentRepoID, &r.Name, &r.Description, &r.DefaultBranch, &r.IsPrivate, &r.StoragePath, &r.CreatedAt, &r.OwnerName)
 	if err != nil {
 		return nil, err
 	}
@@ -460,14 +521,14 @@ func (p *PostgresDB) GetRepositoryByID(ctx context.Context, id int64) (*models.R
 
 func (p *PostgresDB) ListUserRepositories(ctx context.Context, userID int64) ([]models.Repository, error) {
 	rows, err := p.db.QueryContext(ctx,
-		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at,
+		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.parent_repo_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at,
 		 COALESCE(u.username, o.name, '')
 		 FROM repositories r
 		 LEFT JOIN users u ON u.id = r.owner_user_id
 		 LEFT JOIN orgs o ON o.id = r.owner_org_id
 		 WHERE r.owner_user_id = $1
 		 UNION
-		 SELECT r.id, r.owner_user_id, r.owner_org_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at,
+		 SELECT r.id, r.owner_user_id, r.owner_org_id, r.parent_repo_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at,
 		 o.name
 		 FROM repositories r
 		 JOIN orgs o ON o.id = r.owner_org_id
@@ -480,7 +541,7 @@ func (p *PostgresDB) ListUserRepositories(ctx context.Context, userID int64) ([]
 	var repos []models.Repository
 	for rows.Next() {
 		var r models.Repository
-		if err := rows.Scan(&r.ID, &r.OwnerUserID, &r.OwnerOrgID, &r.Name, &r.Description, &r.DefaultBranch, &r.IsPrivate, &r.StoragePath, &r.CreatedAt, &r.OwnerName); err != nil {
+		if err := rows.Scan(&r.ID, &r.OwnerUserID, &r.OwnerOrgID, &r.ParentRepoID, &r.Name, &r.Description, &r.DefaultBranch, &r.IsPrivate, &r.StoragePath, &r.CreatedAt, &r.OwnerName); err != nil {
 			return nil, err
 		}
 		repos = append(repos, r)
@@ -556,7 +617,7 @@ func (p *PostgresDB) ListRepoStargazers(ctx context.Context, repoID int64) ([]mo
 
 func (p *PostgresDB) ListUserStarredRepositories(ctx context.Context, userID int64) ([]models.Repository, error) {
 	rows, err := p.db.QueryContext(ctx,
-		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at,
+		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.parent_repo_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at,
 		 COALESCE(u.username, o.name, '')
 		 FROM repo_stars rs
 		 JOIN repositories r ON r.id = rs.repo_id
@@ -573,7 +634,7 @@ func (p *PostgresDB) ListUserStarredRepositories(ctx context.Context, userID int
 	var repos []models.Repository
 	for rows.Next() {
 		var r models.Repository
-		if err := rows.Scan(&r.ID, &r.OwnerUserID, &r.OwnerOrgID, &r.Name, &r.Description, &r.DefaultBranch, &r.IsPrivate, &r.StoragePath, &r.CreatedAt, &r.OwnerName); err != nil {
+		if err := rows.Scan(&r.ID, &r.OwnerUserID, &r.OwnerOrgID, &r.ParentRepoID, &r.Name, &r.Description, &r.DefaultBranch, &r.IsPrivate, &r.StoragePath, &r.CreatedAt, &r.OwnerName); err != nil {
 			return nil, err
 		}
 		repos = append(repos, r)
@@ -745,6 +806,18 @@ func (p *PostgresDB) ListPRComments(ctx context.Context, prID int64) ([]models.P
 	return comments, rows.Err()
 }
 
+func (p *PostgresDB) DeletePRComment(ctx context.Context, commentID, authorID int64) error {
+	res, err := p.db.ExecContext(ctx, `DELETE FROM pr_comments WHERE id = $1 AND author_id = $2`, commentID, authorID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("comment not found or not owned by user")
+	}
+	return nil
+}
+
 // --- PR Reviews ---
 
 func (p *PostgresDB) CreatePRReview(ctx context.Context, r *models.PRReview) error {
@@ -883,6 +956,18 @@ func (p *PostgresDB) ListIssueComments(ctx context.Context, issueID int64) ([]mo
 		comments = append(comments, c)
 	}
 	return comments, rows.Err()
+}
+
+func (p *PostgresDB) DeleteIssueComment(ctx context.Context, commentID, authorID int64) error {
+	res, err := p.db.ExecContext(ctx, `DELETE FROM issue_comments WHERE id = $1 AND author_id = $2`, commentID, authorID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("comment not found or not owned by user")
+	}
+	return nil
 }
 
 // --- Notifications ---
@@ -1439,7 +1524,7 @@ func (p *PostgresDB) RemoveOrgMember(ctx context.Context, orgID, userID int64) e
 
 func (p *PostgresDB) ListOrgRepositories(ctx context.Context, orgID int64) ([]models.Repository, error) {
 	rows, err := p.db.QueryContext(ctx,
-		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at, o.name
+		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.parent_repo_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at, o.name
 		 FROM repositories r
 		 JOIN orgs o ON o.id = r.owner_org_id
 		 WHERE r.owner_org_id = $1`, orgID)
@@ -1450,7 +1535,7 @@ func (p *PostgresDB) ListOrgRepositories(ctx context.Context, orgID int64) ([]mo
 	var repos []models.Repository
 	for rows.Next() {
 		var r models.Repository
-		if err := rows.Scan(&r.ID, &r.OwnerUserID, &r.OwnerOrgID, &r.Name, &r.Description, &r.DefaultBranch, &r.IsPrivate, &r.StoragePath, &r.CreatedAt, &r.OwnerName); err != nil {
+		if err := rows.Scan(&r.ID, &r.OwnerUserID, &r.OwnerOrgID, &r.ParentRepoID, &r.Name, &r.Description, &r.DefaultBranch, &r.IsPrivate, &r.StoragePath, &r.CreatedAt, &r.OwnerName); err != nil {
 			return nil, err
 		}
 		repos = append(repos, r)

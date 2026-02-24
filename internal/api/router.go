@@ -103,6 +103,7 @@ func (s *Server) routes() {
 	// Repositories
 	s.mux.HandleFunc("POST /api/v1/repos", s.requireAuth(s.handleCreateRepo))
 	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}", s.handleGetRepo)
+	s.mux.HandleFunc("POST /api/v1/repos/{owner}/{repo}/forks", s.requireAuth(s.handleForkRepo))
 	s.mux.HandleFunc("GET /api/v1/user/repos", s.requireAuth(s.handleListUserRepos))
 	s.mux.HandleFunc("DELETE /api/v1/repos/{owner}/{repo}", s.requireAuth(s.handleDeleteRepo))
 	s.mux.HandleFunc("POST /api/v1/repos/{owner}/{repo}/collaborators", s.requireAuth(s.handleAddCollaborator))
@@ -138,12 +139,14 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/repos/{owner}/{repo}/pulls", s.requireAuth(s.handleCreatePR))
 	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/pulls", s.handleListPRs)
 	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/pulls/{number}", s.handleGetPR)
+	s.mux.HandleFunc("PATCH /api/v1/repos/{owner}/{repo}/pulls/{number}", s.requireAuth(s.handleUpdatePR))
 	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/pulls/{number}/diff", s.handlePRDiff)
 	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/pulls/{number}/merge-preview", s.handleMergePreview)
 	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/pulls/{number}/merge-gate", s.handlePRMergeGate)
 	s.mux.HandleFunc("POST /api/v1/repos/{owner}/{repo}/pulls/{number}/merge", s.requireAuth(s.handleMergePR))
 	s.mux.HandleFunc("POST /api/v1/repos/{owner}/{repo}/pulls/{number}/comments", s.requireAuth(s.handleCreatePRComment))
 	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/pulls/{number}/comments", s.handleListPRComments)
+	s.mux.HandleFunc("DELETE /api/v1/repos/{owner}/{repo}/pulls/{number}/comments/{comment_id}", s.requireAuth(s.handleDeletePRComment))
 	s.mux.HandleFunc("POST /api/v1/repos/{owner}/{repo}/pulls/{number}/reviews", s.requireAuth(s.handleCreatePRReview))
 	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/pulls/{number}/reviews", s.handleListPRReviews)
 	s.mux.HandleFunc("POST /api/v1/repos/{owner}/{repo}/pulls/{number}/checks", s.requireAuth(s.handleUpsertPRCheckRun))
@@ -156,6 +159,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PATCH /api/v1/repos/{owner}/{repo}/issues/{number}", s.requireAuth(s.handleUpdateIssue))
 	s.mux.HandleFunc("POST /api/v1/repos/{owner}/{repo}/issues/{number}/comments", s.requireAuth(s.handleCreateIssueComment))
 	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/issues/{number}/comments", s.handleListIssueComments)
+	s.mux.HandleFunc("DELETE /api/v1/repos/{owner}/{repo}/issues/{number}/comments/{comment_id}", s.requireAuth(s.handleDeleteIssueComment))
 
 	// Branch protection
 	s.mux.HandleFunc("PUT /api/v1/repos/{owner}/{repo}/branch-protection/{branch...}", s.requireAuth(s.handleUpsertBranchProtection))

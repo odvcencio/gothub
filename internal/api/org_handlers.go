@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/odvcencio/gothub/internal/auth"
@@ -32,11 +33,13 @@ func (s *Server) handleCreateOrg(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Creator becomes owner
-	s.db.AddOrgMember(r.Context(), &models.OrgMember{
+	if err := s.db.AddOrgMember(r.Context(), &models.OrgMember{
 		OrgID:  org.ID,
 		UserID: claims.UserID,
 		Role:   "owner",
-	})
+	}); err != nil {
+		slog.Error("add org owner", "error", err, "org_id", org.ID, "user_id", claims.UserID)
+	}
 
 	jsonResponse(w, http.StatusCreated, org)
 }
@@ -152,6 +155,12 @@ func (s *Server) handleAddOrgMember(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Role == "" {
 		req.Role = "member"
+	}
+	switch req.Role {
+	case "owner", "member":
+	default:
+		jsonError(w, "role must be 'owner' or 'member'", http.StatusBadRequest)
+		return
 	}
 
 	user, err := s.db.GetUserByUsername(r.Context(), req.Username)

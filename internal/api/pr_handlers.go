@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -45,11 +46,15 @@ func (s *Server) handleCreatePR(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	_ = s.notifySvc.NotifyPullRequestOpened(r.Context(), repo, pr, claims.UserID)
+	if err := s.notifySvc.NotifyPullRequestOpened(r.Context(), repo, pr, claims.UserID); err != nil {
+		slog.Error("notify pr opened", "error", err, "repo_id", repo.ID, "pr", pr.Number)
+	}
 
 	// Best-effort webhook emission; does not block PR creation success.
 	go func(repoID int64, createdPR *models.PullRequest) {
-		_ = s.webhookSvc.EmitPullRequestEvent(context.Background(), repoID, "opened", createdPR)
+		if err := s.webhookSvc.EmitPullRequestEvent(context.Background(), repoID, "opened", createdPR); err != nil {
+			slog.Error("webhook pr opened", "error", err, "repo_id", repoID, "pr", createdPR.Number)
+		}
 	}(repo.ID, pr)
 
 	jsonResponse(w, http.StatusCreated, pr)
@@ -212,8 +217,72 @@ func (s *Server) handleMergePR(w http.ResponseWriter, r *http.Request) {
 
 	// Best-effort webhook emission after merge.
 	go func(repoID int64, mergedPR *models.PullRequest) {
-		_ = s.webhookSvc.EmitPullRequestEvent(context.Background(), repoID, "merged", mergedPR)
+		if err := s.webhookSvc.EmitPullRequestEvent(context.Background(), repoID, "merged", mergedPR); err != nil {
+			slog.Error("webhook pr merged", "error", err, "repo_id", repoID, "pr", mergedPR.Number)
+		}
 	}(repo.ID, pr)
+}
+
+func (s *Server) handleUpdatePR(w http.ResponseWriter, r *http.Request) {
+	claims := auth.GetClaims(r.Context())
+	number, _ := strconv.Atoi(r.PathValue("number"))
+
+	repo, ok := s.authorizeRepoRequest(w, r, true)
+	if !ok {
+		return
+	}
+
+	pr, err := s.prSvc.Get(r.Context(), repo.ID, number)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			jsonError(w, "pull request not found", http.StatusNotFound)
+			return
+		}
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	// Only the PR author or repo owner can edit
+	if pr.AuthorID != claims.UserID {
+		if repo.OwnerUserID == nil || *repo.OwnerUserID != claims.UserID {
+			jsonError(w, "forbidden", http.StatusForbidden)
+			return
+		}
+	}
+
+	var req struct {
+		Title *string `json:"title"`
+		Body  *string `json:"body"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.Title != nil {
+		pr.Title = strings.TrimSpace(*req.Title)
+	}
+	if req.Body != nil {
+		pr.Body = *req.Body
+	}
+	if err := s.db.UpdatePullRequest(r.Context(), pr); err != nil {
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	jsonResponse(w, http.StatusOK, pr)
+}
+
+func (s *Server) handleDeletePRComment(w http.ResponseWriter, r *http.Request) {
+	claims := auth.GetClaims(r.Context())
+	commentID, _ := strconv.ParseInt(r.PathValue("comment_id"), 10, 64)
+	if commentID == 0 {
+		jsonError(w, "invalid comment id", http.StatusBadRequest)
+		return
+	}
+	if err := s.db.DeletePRComment(r.Context(), commentID, claims.UserID); err != nil {
+		jsonError(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // PR Comments
@@ -267,7 +336,9 @@ func (s *Server) handleCreatePRComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	comment.AuthorName = claims.Username
-	_ = s.notifySvc.NotifyPullRequestComment(r.Context(), repo, pr, comment, claims.UserID)
+	if err := s.notifySvc.NotifyPullRequestComment(r.Context(), repo, pr, comment, claims.UserID); err != nil {
+		slog.Error("notify pr comment", "error", err, "repo_id", repo.ID, "pr", pr.Number)
+	}
 	jsonResponse(w, http.StatusCreated, comment)
 }
 
@@ -334,7 +405,9 @@ func (s *Server) handleCreatePRReview(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	_ = s.notifySvc.NotifyPullRequestReview(r.Context(), repo, pr, review, claims.UserID)
+	if err := s.notifySvc.NotifyPullRequestReview(r.Context(), repo, pr, review, claims.UserID); err != nil {
+		slog.Error("notify pr review", "error", err, "repo_id", repo.ID, "pr", pr.Number)
+	}
 	jsonResponse(w, http.StatusCreated, review)
 }
 

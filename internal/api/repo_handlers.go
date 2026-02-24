@@ -2,6 +2,8 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 
 	"github.com/odvcencio/gothub/internal/auth"
@@ -11,6 +13,10 @@ type createRepoRequest struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
 	Private     bool   `json:"private"`
+}
+
+type forkRepoRequest struct {
+	Name string `json:"name"`
 }
 
 func (s *Server) handleCreateRepo(w http.ResponseWriter, r *http.Request) {
@@ -70,4 +76,27 @@ func (s *Server) handleDeleteRepo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleForkRepo(w http.ResponseWriter, r *http.Request) {
+	claims := auth.GetClaims(r.Context())
+	sourceRepo, ok := s.authorizeRepoRequest(w, r, false)
+	if !ok {
+		return
+	}
+
+	req := forkRepoRequest{}
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			jsonError(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+	}
+
+	fork, err := s.repoSvc.Fork(r.Context(), sourceRepo.ID, claims.UserID, req.Name)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	jsonResponse(w, http.StatusCreated, fork)
 }

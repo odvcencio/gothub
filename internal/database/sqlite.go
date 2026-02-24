@@ -47,6 +47,12 @@ func (s *SQLiteDB) Migrate(ctx context.Context) error {
 			return err
 		}
 	}
+	// Backfill schema for existing installations created before fork support.
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE repositories ADD COLUMN parent_repo_id INTEGER`); err != nil {
+		if !isSQLiteDuplicateColumnErr(err) {
+			return err
+		}
+	}
 	// Backfill schema for existing installations created before entity owner merge-gate support.
 	if _, err := s.db.ExecContext(ctx, `ALTER TABLE branch_protection_rules ADD COLUMN require_entity_owner_approval BOOLEAN NOT NULL DEFAULT FALSE`); err != nil {
 		if !isSQLiteDuplicateColumnErr(err) {
@@ -111,6 +117,7 @@ CREATE TABLE IF NOT EXISTS repositories (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	owner_user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
 	owner_org_id INTEGER,
+	parent_repo_id INTEGER REFERENCES repositories(id) ON DELETE SET NULL,
 	name TEXT NOT NULL,
 	description TEXT NOT NULL DEFAULT '',
 	default_branch TEXT NOT NULL DEFAULT 'main',
@@ -437,9 +444,9 @@ func (s *SQLiteDB) DeleteSSHKey(ctx context.Context, id, userID int64) error {
 
 func (s *SQLiteDB) CreateRepository(ctx context.Context, r *models.Repository) error {
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO repositories (owner_user_id, owner_org_id, name, description, default_branch, is_private, storage_path)
-			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		r.OwnerUserID, r.OwnerOrgID, r.Name, r.Description, r.DefaultBranch, r.IsPrivate, r.StoragePath)
+		`INSERT INTO repositories (owner_user_id, owner_org_id, parent_repo_id, name, description, default_branch, is_private, storage_path)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.OwnerUserID, r.OwnerOrgID, r.ParentRepoID, r.Name, r.Description, r.DefaultBranch, r.IsPrivate, r.StoragePath)
 	if err != nil {
 		return err
 	}
@@ -452,14 +459,71 @@ func (s *SQLiteDB) UpdateRepositoryStoragePath(ctx context.Context, id int64, st
 	return err
 }
 
+func (s *SQLiteDB) CloneRepoMetadata(ctx context.Context, sourceRepoID, targetRepoID int64) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	copyStatements := []struct {
+		query string
+		args  []any
+	}{
+		{
+			query: `INSERT INTO hash_mapping (repo_id, git_hash, got_hash, object_type)
+					SELECT ?, git_hash, got_hash, object_type
+					FROM hash_mapping
+					WHERE repo_id = ?`,
+			args: []any{targetRepoID, sourceRepoID},
+		},
+		{
+			query: `INSERT INTO commit_indexes (repo_id, commit_hash, index_hash, created_at)
+					SELECT ?, commit_hash, index_hash, created_at
+					FROM commit_indexes
+					WHERE repo_id = ?`,
+			args: []any{targetRepoID, sourceRepoID},
+		},
+		{
+			query: `INSERT INTO git_tree_entry_modes (repo_id, got_tree_hash, entry_name, mode, created_at)
+					SELECT ?, got_tree_hash, entry_name, mode, created_at
+					FROM git_tree_entry_modes
+					WHERE repo_id = ?`,
+			args: []any{targetRepoID, sourceRepoID},
+		},
+		{
+			query: `INSERT INTO entity_identities (repo_id, stable_id, name, decl_kind, receiver, first_seen_commit, last_seen_commit, created_at, updated_at)
+					SELECT ?, stable_id, name, decl_kind, receiver, first_seen_commit, last_seen_commit, created_at, updated_at
+					FROM entity_identities
+					WHERE repo_id = ?`,
+			args: []any{targetRepoID, sourceRepoID},
+		},
+		{
+			query: `INSERT INTO entity_versions (repo_id, stable_id, commit_hash, path, entity_hash, body_hash, name, decl_kind, receiver, created_at)
+					SELECT ?, stable_id, commit_hash, path, entity_hash, body_hash, name, decl_kind, receiver, created_at
+					FROM entity_versions
+					WHERE repo_id = ?`,
+			args: []any{targetRepoID, sourceRepoID},
+		},
+	}
+
+	for _, stmt := range copyStatements {
+		if _, err := tx.ExecContext(ctx, stmt.query, stmt.args...); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
 func (s *SQLiteDB) GetRepository(ctx context.Context, ownerName, repoName string) (*models.Repository, error) {
 	r := &models.Repository{}
 	err := s.db.QueryRowContext(ctx,
-		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at, u.username
+		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.parent_repo_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at, u.username
 		 FROM repositories r
 		 JOIN users u ON u.id = r.owner_user_id
 		 WHERE u.username = ? AND r.name = ?`, ownerName, repoName).
-		Scan(&r.ID, &r.OwnerUserID, &r.OwnerOrgID, &r.Name, &r.Description, &r.DefaultBranch, &r.IsPrivate, &r.StoragePath, &r.CreatedAt, &r.OwnerName)
+		Scan(&r.ID, &r.OwnerUserID, &r.OwnerOrgID, &r.ParentRepoID, &r.Name, &r.Description, &r.DefaultBranch, &r.IsPrivate, &r.StoragePath, &r.CreatedAt, &r.OwnerName)
 	if err == nil {
 		return r, nil
 	}
@@ -468,11 +532,11 @@ func (s *SQLiteDB) GetRepository(ctx context.Context, ownerName, repoName string
 	}
 	// Fallback to org-owned repositories.
 	err = s.db.QueryRowContext(ctx,
-		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at, o.name
+		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.parent_repo_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at, o.name
 		 FROM repositories r
 		 JOIN orgs o ON o.id = r.owner_org_id
 		 WHERE o.name = ? AND r.name = ?`, ownerName, repoName).
-		Scan(&r.ID, &r.OwnerUserID, &r.OwnerOrgID, &r.Name, &r.Description, &r.DefaultBranch, &r.IsPrivate, &r.StoragePath, &r.CreatedAt, &r.OwnerName)
+		Scan(&r.ID, &r.OwnerUserID, &r.OwnerOrgID, &r.ParentRepoID, &r.Name, &r.Description, &r.DefaultBranch, &r.IsPrivate, &r.StoragePath, &r.CreatedAt, &r.OwnerName)
 	if err != nil {
 		return nil, err
 	}
@@ -482,13 +546,13 @@ func (s *SQLiteDB) GetRepository(ctx context.Context, ownerName, repoName string
 func (s *SQLiteDB) GetRepositoryByID(ctx context.Context, id int64) (*models.Repository, error) {
 	r := &models.Repository{}
 	err := s.db.QueryRowContext(ctx,
-		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at,
+		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.parent_repo_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at,
 		 COALESCE(u.username, o.name, '')
 		 FROM repositories r
 		 LEFT JOIN users u ON u.id = r.owner_user_id
 		 LEFT JOIN orgs o ON o.id = r.owner_org_id
 		 WHERE r.id = ?`, id).
-		Scan(&r.ID, &r.OwnerUserID, &r.OwnerOrgID, &r.Name, &r.Description, &r.DefaultBranch, &r.IsPrivate, &r.StoragePath, &r.CreatedAt, &r.OwnerName)
+		Scan(&r.ID, &r.OwnerUserID, &r.OwnerOrgID, &r.ParentRepoID, &r.Name, &r.Description, &r.DefaultBranch, &r.IsPrivate, &r.StoragePath, &r.CreatedAt, &r.OwnerName)
 	if err != nil {
 		return nil, err
 	}
@@ -497,7 +561,7 @@ func (s *SQLiteDB) GetRepositoryByID(ctx context.Context, id int64) (*models.Rep
 
 func (s *SQLiteDB) ListUserRepositories(ctx context.Context, userID int64) ([]models.Repository, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at, u.username
+		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.parent_repo_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at, u.username
 		 FROM repositories r
 		 JOIN users u ON u.id = r.owner_user_id
 		 WHERE r.owner_user_id = ?`, userID)
@@ -508,7 +572,7 @@ func (s *SQLiteDB) ListUserRepositories(ctx context.Context, userID int64) ([]mo
 	var repos []models.Repository
 	for rows.Next() {
 		var r models.Repository
-		if err := rows.Scan(&r.ID, &r.OwnerUserID, &r.OwnerOrgID, &r.Name, &r.Description, &r.DefaultBranch, &r.IsPrivate, &r.StoragePath, &r.CreatedAt, &r.OwnerName); err != nil {
+		if err := rows.Scan(&r.ID, &r.OwnerUserID, &r.OwnerOrgID, &r.ParentRepoID, &r.Name, &r.Description, &r.DefaultBranch, &r.IsPrivate, &r.StoragePath, &r.CreatedAt, &r.OwnerName); err != nil {
 			return nil, err
 		}
 		repos = append(repos, r)
@@ -587,7 +651,7 @@ func (s *SQLiteDB) ListRepoStargazers(ctx context.Context, repoID int64) ([]mode
 
 func (s *SQLiteDB) ListUserStarredRepositories(ctx context.Context, userID int64) ([]models.Repository, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at,
+		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.parent_repo_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at,
 		 COALESCE(u.username, o.name, '')
 		 FROM repo_stars rs
 		 JOIN repositories r ON r.id = rs.repo_id
@@ -604,7 +668,7 @@ func (s *SQLiteDB) ListUserStarredRepositories(ctx context.Context, userID int64
 	var repos []models.Repository
 	for rows.Next() {
 		var r models.Repository
-		if err := rows.Scan(&r.ID, &r.OwnerUserID, &r.OwnerOrgID, &r.Name, &r.Description, &r.DefaultBranch, &r.IsPrivate, &r.StoragePath, &r.CreatedAt, &r.OwnerName); err != nil {
+		if err := rows.Scan(&r.ID, &r.OwnerUserID, &r.OwnerOrgID, &r.ParentRepoID, &r.Name, &r.Description, &r.DefaultBranch, &r.IsPrivate, &r.StoragePath, &r.CreatedAt, &r.OwnerName); err != nil {
 			return nil, err
 		}
 		repos = append(repos, r)
@@ -822,6 +886,18 @@ func (s *SQLiteDB) ListPRComments(ctx context.Context, prID int64) ([]models.PRC
 	return comments, rows.Err()
 }
 
+func (s *SQLiteDB) DeletePRComment(ctx context.Context, commentID, authorID int64) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM pr_comments WHERE id = ? AND author_id = ?`, commentID, authorID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("comment not found or not owned by user")
+	}
+	return nil
+}
+
 // --- PR Reviews ---
 
 func (s *SQLiteDB) CreatePRReview(ctx context.Context, r *models.PRReview) error {
@@ -989,6 +1065,18 @@ func (s *SQLiteDB) ListIssueComments(ctx context.Context, issueID int64) ([]mode
 		comments = append(comments, c)
 	}
 	return comments, rows.Err()
+}
+
+func (s *SQLiteDB) DeleteIssueComment(ctx context.Context, commentID, authorID int64) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM issue_comments WHERE id = ? AND author_id = ?`, commentID, authorID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("comment not found or not owned by user")
+	}
+	return nil
 }
 
 // --- Notifications ---
@@ -1575,7 +1663,7 @@ func (s *SQLiteDB) RemoveOrgMember(ctx context.Context, orgID, userID int64) err
 
 func (s *SQLiteDB) ListOrgRepositories(ctx context.Context, orgID int64) ([]models.Repository, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at, o.name
+		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.parent_repo_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at, o.name
 		 FROM repositories r
 		 JOIN orgs o ON o.id = r.owner_org_id
 		 WHERE r.owner_org_id = ?`, orgID)
@@ -1586,7 +1674,7 @@ func (s *SQLiteDB) ListOrgRepositories(ctx context.Context, orgID int64) ([]mode
 	var repos []models.Repository
 	for rows.Next() {
 		var r models.Repository
-		if err := rows.Scan(&r.ID, &r.OwnerUserID, &r.OwnerOrgID, &r.Name, &r.Description, &r.DefaultBranch, &r.IsPrivate, &r.StoragePath, &r.CreatedAt, &r.OwnerName); err != nil {
+		if err := rows.Scan(&r.ID, &r.OwnerUserID, &r.OwnerOrgID, &r.ParentRepoID, &r.Name, &r.Description, &r.DefaultBranch, &r.IsPrivate, &r.StoragePath, &r.CreatedAt, &r.OwnerName); err != nil {
 			return nil, err
 		}
 		repos = append(repos, r)

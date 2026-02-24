@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -40,6 +41,10 @@ func (s *WebhookService) CreateWebhook(ctx context.Context, hook *models.Webhook
 	hook.URL = strings.TrimSpace(hook.URL)
 	if hook.URL == "" {
 		return fmt.Errorf("url is required")
+	}
+	u, err := url.Parse(hook.URL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("url must be a valid HTTP or HTTPS URL")
 	}
 	hook.Events = normalizeWebhookEvents(hook.Events)
 	hook.EventsCSV = strings.Join(hook.Events, ",")
@@ -367,7 +372,7 @@ func (s *WebhookService) deliverWithRetry(ctx context.Context, hook *models.Webh
 			return delivery, nil
 		}
 		if attempt < maxAttempts {
-			time.Sleep(time.Duration(attempt*100) * time.Millisecond)
+			time.Sleep(time.Duration(1<<uint(attempt-1)) * time.Second)
 		}
 	}
 

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -35,10 +36,14 @@ func (s *Server) handleCreateIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	issue.AuthorName = claims.Username
-	_ = s.notifySvc.NotifyIssueOpened(r.Context(), repo, issue, claims.UserID)
+	if err := s.notifySvc.NotifyIssueOpened(r.Context(), repo, issue, claims.UserID); err != nil {
+		slog.Error("notify issue opened", "error", err, "repo_id", repo.ID, "issue", issue.Number)
+	}
 
 	go func(repoID int64, createdIssueID int, issueTitle string, issueBody string) {
-		_ = s.webhookSvc.EmitIssueEvent(context.Background(), repoID, "opened", createdIssueID, issueTitle, issueBody, "open")
+		if err := s.webhookSvc.EmitIssueEvent(context.Background(), repoID, "opened", createdIssueID, issueTitle, issueBody, "open"); err != nil {
+			slog.Error("webhook issue opened", "error", err, "repo_id", repoID, "issue", createdIssueID)
+		}
 	}(repo.ID, issue.Number, issue.Title, issue.Body)
 
 	jsonResponse(w, http.StatusCreated, issue)
@@ -132,7 +137,9 @@ func (s *Server) handleUpdateIssue(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	go func(repoID int64, n int, title string, body string, state string, eventAction string) {
-		_ = s.webhookSvc.EmitIssueEvent(context.Background(), repoID, eventAction, n, title, body, state)
+		if err := s.webhookSvc.EmitIssueEvent(context.Background(), repoID, eventAction, n, title, body, state); err != nil {
+			slog.Error("webhook issue event", "error", err, "repo_id", repoID, "issue", n, "action", eventAction)
+		}
 	}(repo.ID, issue.Number, issue.Title, issue.Body, issue.State, action)
 
 	jsonResponse(w, http.StatusOK, issue)
@@ -170,8 +177,24 @@ func (s *Server) handleCreateIssueComment(w http.ResponseWriter, r *http.Request
 		return
 	}
 	comment.AuthorName = claims.Username
-	_ = s.notifySvc.NotifyIssueComment(r.Context(), repo, issue, comment, claims.UserID)
+	if err := s.notifySvc.NotifyIssueComment(r.Context(), repo, issue, comment, claims.UserID); err != nil {
+		slog.Error("notify issue comment", "error", err, "repo_id", repo.ID, "issue", issue.Number)
+	}
 	jsonResponse(w, http.StatusCreated, comment)
+}
+
+func (s *Server) handleDeleteIssueComment(w http.ResponseWriter, r *http.Request) {
+	claims := auth.GetClaims(r.Context())
+	commentID, _ := strconv.ParseInt(r.PathValue("comment_id"), 10, 64)
+	if commentID == 0 {
+		jsonError(w, "invalid comment id", http.StatusBadRequest)
+		return
+	}
+	if err := s.db.DeleteIssueComment(r.Context(), commentID, claims.UserID); err != nil {
+		jsonError(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleListIssueComments(w http.ResponseWriter, r *http.Request) {

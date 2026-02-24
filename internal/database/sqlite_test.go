@@ -134,6 +134,169 @@ func TestSQLiteUpdateRepositoryStoragePath(t *testing.T) {
 	}
 }
 
+func TestSQLiteRepositoryPersistsParentRepoID(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	user := &models.User{Username: "alice", Email: "alice@example.com", PasswordHash: "x"}
+	if err := db.CreateUser(ctx, user); err != nil {
+		t.Fatal(err)
+	}
+
+	parent := &models.Repository{
+		OwnerUserID:   &user.ID,
+		Name:          "upstream",
+		DefaultBranch: "main",
+		StoragePath:   "pending",
+	}
+	if err := db.CreateRepository(ctx, parent); err != nil {
+		t.Fatal(err)
+	}
+
+	child := &models.Repository{
+		OwnerUserID:   &user.ID,
+		ParentRepoID:  &parent.ID,
+		Name:          "upstream-fork",
+		DefaultBranch: "main",
+		StoragePath:   "pending",
+	}
+	if err := db.CreateRepository(ctx, child); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := db.GetRepositoryByID(ctx, child.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ParentRepoID == nil || *got.ParentRepoID != parent.ID {
+		t.Fatalf("expected parent repo id %d, got %+v", parent.ID, got.ParentRepoID)
+	}
+}
+
+func TestSQLiteCloneRepoMetadataCopiesRecords(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	user := &models.User{Username: "alice", Email: "alice@example.com", PasswordHash: "x"}
+	if err := db.CreateUser(ctx, user); err != nil {
+		t.Fatal(err)
+	}
+
+	src := &models.Repository{
+		OwnerUserID:   &user.ID,
+		Name:          "src",
+		DefaultBranch: "main",
+		StoragePath:   "pending",
+	}
+	if err := db.CreateRepository(ctx, src); err != nil {
+		t.Fatal(err)
+	}
+	dst := &models.Repository{
+		OwnerUserID:   &user.ID,
+		Name:          "dst",
+		DefaultBranch: "main",
+		StoragePath:   "pending",
+	}
+	if err := db.CreateRepository(ctx, dst); err != nil {
+		t.Fatal(err)
+	}
+
+	const (
+		gitHash    = "1111111111111111111111111111111111111111"
+		gotHash    = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		commitHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+		treeHash   = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+		indexHash  = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+	)
+	if err := db.SetHashMappings(ctx, []models.HashMapping{
+		{RepoID: src.ID, GitHash: gitHash, GotHash: gotHash, ObjectType: "commit"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetCommitIndex(ctx, src.ID, commitHash, indexHash); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetGitTreeEntryModes(ctx, src.ID, treeHash, map[string]string{"main.go": "100755"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpsertEntityIdentity(ctx, &models.EntityIdentity{
+		RepoID:          src.ID,
+		StableID:        "ent-1",
+		Name:            "Process",
+		DeclKind:        "function",
+		FirstSeenCommit: commitHash,
+		LastSeenCommit:  commitHash,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetEntityVersion(ctx, &models.EntityVersion{
+		RepoID:     src.ID,
+		StableID:   "ent-1",
+		CommitHash: commitHash,
+		Path:       "main.go",
+		EntityHash: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+		BodyHash:   "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+		Name:       "Process",
+		DeclKind:   "function",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := db.CloneRepoMetadata(ctx, src.ID, dst.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	gotDstHash, err := db.GetGotHash(ctx, dst.ID, gitHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotDstHash != gotHash {
+		t.Fatalf("expected copied got hash %q, got %q", gotHash, gotDstHash)
+	}
+
+	gotDstIndex, err := db.GetCommitIndex(ctx, dst.ID, commitHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotDstIndex != indexHash {
+		t.Fatalf("expected copied index hash %q, got %q", indexHash, gotDstIndex)
+	}
+
+	modes, err := db.GetGitTreeEntryModes(ctx, dst.ID, treeHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if modes["main.go"] != "100755" {
+		t.Fatalf("expected copied mode 100755, got %#v", modes)
+	}
+
+	versions, err := db.ListEntityVersionsByCommit(ctx, dst.ID, commitHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(versions) != 1 || versions[0].StableID != "ent-1" {
+		t.Fatalf("expected copied entity versions, got %+v", versions)
+	}
+}
+
 func TestSQLiteCreatePullRequestAssignsUniqueNumbersConcurrently(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	db, err := OpenSQLite(dbPath)

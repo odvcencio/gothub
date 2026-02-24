@@ -171,6 +171,192 @@ func TestCreateAndGetRepo(t *testing.T) {
 	}
 }
 
+func TestForkRepoCopiesStoreAndMetadata(t *testing.T) {
+	server, db := setupTestServer(t)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	ownerToken := registerAndGetToken(t, ts.URL, "alice")
+	forkerToken := registerAndGetToken(t, ts.URL, "bob")
+	createRepo(t, ts.URL, ownerToken, "repo", false)
+
+	ctx := context.Background()
+	sourceRepo, err := db.GetRepository(ctx, "alice", "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sourceStore, err := gotstore.Open(sourceRepo.StoragePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blobHash, err := sourceStore.Objects.WriteBlob(&object.Blob{Data: []byte("hello fork\n")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	treeHash, err := sourceStore.Objects.WriteTree(&object.TreeObj{
+		Entries: []object.TreeEntry{
+			{Name: "README.md", BlobHash: blobHash},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitHash, err := sourceStore.Objects.WriteCommit(&object.CommitObj{
+		TreeHash:           treeHash,
+		Author:             "Alice <alice@example.com>",
+		Timestamp:          1700000000,
+		Message:            "initial commit",
+		AuthorTimezone:     "+0000",
+		Committer:          "Alice <alice@example.com>",
+		CommitterTimestamp: 1700000000,
+		CommitterTimezone:  "+0000",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sourceStore.Refs.Set("heads/main", commitHash); err != nil {
+		t.Fatal(err)
+	}
+
+	blobGit := strings.Repeat("1", 40)
+	treeGit := strings.Repeat("2", 40)
+	commitGit := strings.Repeat("3", 40)
+	if err := db.SetHashMappings(ctx, []models.HashMapping{
+		{RepoID: sourceRepo.ID, GotHash: string(blobHash), GitHash: blobGit, ObjectType: "blob"},
+		{RepoID: sourceRepo.ID, GotHash: string(treeHash), GitHash: treeGit, ObjectType: "tree"},
+		{RepoID: sourceRepo.ID, GotHash: string(commitHash), GitHash: commitGit, ObjectType: "commit"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	indexHash := strings.Repeat("a", 64)
+	if err := db.SetCommitIndex(ctx, sourceRepo.ID, string(commitHash), indexHash); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetGitTreeEntryModes(ctx, sourceRepo.ID, string(treeHash), map[string]string{"README.md": "100644"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpsertEntityIdentity(ctx, &models.EntityIdentity{
+		RepoID:          sourceRepo.ID,
+		StableID:        "ent-readme",
+		Name:            "README",
+		DeclKind:        "file",
+		FirstSeenCommit: string(commitHash),
+		LastSeenCommit:  string(commitHash),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetEntityVersion(ctx, &models.EntityVersion{
+		RepoID:     sourceRepo.ID,
+		StableID:   "ent-readme",
+		CommitHash: string(commitHash),
+		Path:       "README.md",
+		EntityHash: strings.Repeat("b", 64),
+		BodyHash:   strings.Repeat("c", 64),
+		Name:       "README",
+		DeclKind:   "file",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/repos/alice/repo/forks", bytes.NewBufferString(`{}`))
+	req.Header.Set("Authorization", "Bearer "+forkerToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("fork repo: expected 201, got %d", resp.StatusCode)
+	}
+	var forkResp struct {
+		ID           int64  `json:"id"`
+		Name         string `json:"name"`
+		ParentRepoID *int64 `json:"parent_repo_id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&forkResp); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if forkResp.Name != "repo" {
+		t.Fatalf("expected fork name repo, got %q", forkResp.Name)
+	}
+	if forkResp.ParentRepoID == nil || *forkResp.ParentRepoID != sourceRepo.ID {
+		t.Fatalf("expected parent_repo_id %d, got %+v", sourceRepo.ID, forkResp.ParentRepoID)
+	}
+
+	forkRepo, err := db.GetRepository(ctx, "bob", "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if forkRepo.ParentRepoID == nil || *forkRepo.ParentRepoID != sourceRepo.ID {
+		t.Fatalf("expected persisted parent repo id %d, got %+v", sourceRepo.ID, forkRepo.ParentRepoID)
+	}
+
+	forkStore, err := gotstore.Open(forkRepo.StoragePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forkHead, err := forkStore.Refs.Get("heads/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if forkHead != commitHash {
+		t.Fatalf("expected fork head %q, got %q", commitHash, forkHead)
+	}
+
+	forkGitHash, err := db.GetGitHash(ctx, forkRepo.ID, string(commitHash))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if forkGitHash != commitGit {
+		t.Fatalf("expected git hash mapping %q, got %q", commitGit, forkGitHash)
+	}
+	forkIndex, err := db.GetCommitIndex(ctx, forkRepo.ID, string(commitHash))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if forkIndex != indexHash {
+		t.Fatalf("expected copied commit index %q, got %q", indexHash, forkIndex)
+	}
+	modes, err := db.GetGitTreeEntryModes(ctx, forkRepo.ID, string(treeHash))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if modes["README.md"] != "100644" {
+		t.Fatalf("expected copied mode 100644, got %#v", modes)
+	}
+	versions, err := db.ListEntityVersionsByCommit(ctx, forkRepo.ID, string(commitHash))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(versions) != 1 || versions[0].StableID != "ent-readme" {
+		t.Fatalf("expected copied entity versions, got %+v", versions)
+	}
+
+	// A second fork by the same user should auto-suffix to avoid name collisions.
+	req, _ = http.NewRequest("POST", ts.URL+"/api/v1/repos/alice/repo/forks", nil)
+	req.Header.Set("Authorization", "Bearer "+forkerToken)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("second fork repo: expected 201, got %d", resp.StatusCode)
+	}
+	var secondFork struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&secondFork); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if secondFork.Name != "repo-fork-1" {
+		t.Fatalf("expected auto-suffixed fork name repo-fork-1, got %q", secondFork.Name)
+	}
+}
+
 func TestUnauthenticatedAccess(t *testing.T) {
 	server, _ := setupTestServer(t)
 	ts := httptest.NewServer(server)
