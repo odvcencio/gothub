@@ -242,6 +242,37 @@ type HashMapping struct {
 	ObjectType string `json:"object_type"`
 }
 
+type IndexJobType string
+
+const (
+	IndexJobTypeCommitIndex IndexJobType = "commit_index"
+)
+
+type IndexJobStatus string
+
+const (
+	IndexJobQueued     IndexJobStatus = "queued"
+	IndexJobInProgress IndexJobStatus = "in_progress"
+	IndexJobCompleted  IndexJobStatus = "completed"
+	IndexJobFailed     IndexJobStatus = "failed"
+)
+
+type IndexingJob struct {
+	ID            int64          `json:"id"`
+	RepoID        int64          `json:"repo_id"`
+	CommitHash    string         `json:"commit_hash"`
+	JobType       IndexJobType   `json:"job_type"`
+	Status        IndexJobStatus `json:"status"`
+	AttemptCount  int            `json:"attempt_count"`
+	MaxAttempts   int            `json:"max_attempts"`
+	LastError     string         `json:"last_error,omitempty"`
+	NextAttemptAt time.Time      `json:"next_attempt_at"`
+	CreatedAt     time.Time      `json:"created_at"`
+	UpdatedAt     time.Time      `json:"updated_at"`
+	StartedAt     *time.Time     `json:"started_at,omitempty"`
+	CompletedAt   *time.Time     `json:"completed_at,omitempty"`
+}
+
 type EntityIdentity struct {
 	RepoID          int64     `json:"repo_id"`
 	StableID        string    `json:"stable_id"`

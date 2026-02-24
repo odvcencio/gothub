@@ -301,6 +301,23 @@ CREATE TABLE IF NOT EXISTS hash_mapping (
 	UNIQUE (repo_id, got_hash)
 );
 
+CREATE TABLE IF NOT EXISTS indexing_jobs (
+	id BIGSERIAL PRIMARY KEY,
+	repo_id BIGINT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+	commit_hash TEXT NOT NULL,
+	job_type TEXT NOT NULL DEFAULT 'commit_index',
+	status TEXT NOT NULL DEFAULT 'queued',
+	attempt_count INTEGER NOT NULL DEFAULT 0,
+	max_attempts INTEGER NOT NULL DEFAULT 3,
+	last_error TEXT NOT NULL DEFAULT '',
+	next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	started_at TIMESTAMPTZ,
+	completed_at TIMESTAMPTZ,
+	UNIQUE (repo_id, commit_hash, job_type)
+);
+
 CREATE TABLE IF NOT EXISTS commit_indexes (
 	repo_id BIGINT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
 	commit_hash TEXT NOT NULL,
@@ -353,6 +370,8 @@ CREATE INDEX IF NOT EXISTS idx_magic_link_tokens_user ON magic_link_tokens(user_
 CREATE INDEX IF NOT EXISTS idx_ssh_auth_challenges_user ON ssh_auth_challenges(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_webauthn_credentials_user ON webauthn_credentials(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_webauthn_sessions_user_flow ON webauthn_sessions(user_id, flow, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_indexing_jobs_claim ON indexing_jobs(status, next_attempt_at, id);
+CREATE INDEX IF NOT EXISTS idx_indexing_jobs_repo_commit ON indexing_jobs(repo_id, commit_hash, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_commit_indexes_repo ON commit_indexes(repo_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_tree_modes_repo_tree ON git_tree_entry_modes(repo_id, got_tree_hash);
 CREATE INDEX IF NOT EXISTS idx_entity_versions_repo_commit ON entity_versions(repo_id, commit_hash);
@@ -1666,6 +1685,221 @@ func (p *PostgresDB) GetGitHash(ctx context.Context, repoID int64, gotHash strin
 	err := p.db.QueryRowContext(ctx,
 		`SELECT git_hash FROM hash_mapping WHERE repo_id = $1 AND got_hash = $2`, repoID, gotHash).Scan(&h)
 	return h, err
+}
+
+func (p *PostgresDB) EnqueueIndexingJob(ctx context.Context, job *models.IndexingJob) error {
+	if job == nil {
+		return fmt.Errorf("indexing job is nil")
+	}
+	status := job.Status
+	if status == "" {
+		status = models.IndexJobQueued
+	}
+	jobType := job.JobType
+	if jobType == "" {
+		jobType = models.IndexJobTypeCommitIndex
+	}
+	maxAttempts := job.MaxAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = 3
+	}
+	nextAttemptAt := job.NextAttemptAt
+	if nextAttemptAt.IsZero() {
+		nextAttemptAt = time.Now().UTC()
+	}
+
+	row := p.db.QueryRowContext(ctx,
+		`INSERT INTO indexing_jobs (
+			 repo_id, commit_hash, job_type, status, attempt_count, max_attempts, last_error, next_attempt_at
+		 ) VALUES ($1, $2, $3, $4, 0, $5, '', $6)
+		 ON CONFLICT (repo_id, commit_hash, job_type) DO UPDATE SET
+			 status = CASE
+				WHEN indexing_jobs.status = $7 THEN indexing_jobs.status
+				ELSE $8
+			 END,
+			 last_error = CASE
+				WHEN indexing_jobs.status = $7 THEN indexing_jobs.last_error
+				ELSE ''
+			 END,
+			 next_attempt_at = CASE
+				WHEN indexing_jobs.status = $7 THEN indexing_jobs.next_attempt_at
+				ELSE EXCLUDED.next_attempt_at
+			 END,
+			 completed_at = CASE
+				WHEN indexing_jobs.status = $7 THEN indexing_jobs.completed_at
+				ELSE NULL
+			 END,
+			 updated_at = CASE
+				WHEN indexing_jobs.status = $7 THEN indexing_jobs.updated_at
+				ELSE NOW()
+			 END
+		 RETURNING id, repo_id, commit_hash, job_type, status, attempt_count, max_attempts, last_error, next_attempt_at, created_at, updated_at, started_at, completed_at`,
+		job.RepoID, job.CommitHash, jobType, status, maxAttempts, nextAttemptAt,
+		models.IndexJobCompleted, models.IndexJobQueued,
+	)
+
+	loaded, err := scanPostgresIndexingJob(row)
+	if err != nil {
+		return err
+	}
+	*job = *loaded
+	return nil
+}
+
+func (p *PostgresDB) ClaimIndexingJob(ctx context.Context) (*models.IndexingJob, error) {
+	row := p.db.QueryRowContext(ctx,
+		`WITH next_job AS (
+			 SELECT id
+			 FROM indexing_jobs
+			 WHERE status = $1
+			   AND next_attempt_at <= NOW()
+			 ORDER BY next_attempt_at ASC, id ASC
+			 LIMIT 1
+			 FOR UPDATE SKIP LOCKED
+		 )
+		 UPDATE indexing_jobs j
+		 SET status = $2,
+			 attempt_count = j.attempt_count + 1,
+			 started_at = NOW(),
+			 completed_at = NULL,
+			 updated_at = NOW()
+		 FROM next_job
+		 WHERE j.id = next_job.id
+		 RETURNING j.id, j.repo_id, j.commit_hash, j.job_type, j.status, j.attempt_count, j.max_attempts, j.last_error, j.next_attempt_at, j.created_at, j.updated_at, j.started_at, j.completed_at`,
+		models.IndexJobQueued, models.IndexJobInProgress,
+	)
+	job, err := scanPostgresIndexingJob(row)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return job, nil
+}
+
+func (p *PostgresDB) CompleteIndexingJob(ctx context.Context, jobID int64, status models.IndexJobStatus, errMsg string) error {
+	trimmedErr := strings.TrimSpace(errMsg)
+	switch status {
+	case models.IndexJobCompleted:
+		trimmedErr = ""
+	case models.IndexJobFailed:
+		if trimmedErr == "" {
+			trimmedErr = "job failed"
+		}
+	default:
+		return fmt.Errorf("unsupported terminal status %q", status)
+	}
+	res, err := p.db.ExecContext(ctx,
+		`UPDATE indexing_jobs
+		 SET status = $1,
+			 last_error = $2,
+			 completed_at = NOW(),
+			 updated_at = NOW()
+		 WHERE id = $3 AND status = $4`,
+		status, trimmedErr, jobID, models.IndexJobInProgress,
+	)
+	if err != nil {
+		return err
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+func (p *PostgresDB) RequeueIndexingJob(ctx context.Context, jobID int64, errMsg string, nextAttemptAt time.Time) error {
+	trimmedErr := strings.TrimSpace(errMsg)
+	if trimmedErr == "" {
+		trimmedErr = "job failed"
+	}
+	if nextAttemptAt.IsZero() {
+		nextAttemptAt = time.Now().UTC()
+	}
+	res, err := p.db.ExecContext(ctx,
+		`UPDATE indexing_jobs
+		 SET status = CASE
+				 WHEN attempt_count >= max_attempts THEN $1
+				 ELSE $2
+			 END,
+			 last_error = $3,
+			 next_attempt_at = CASE
+				 WHEN attempt_count >= max_attempts THEN next_attempt_at
+				 ELSE $4
+			 END,
+			 started_at = NULL,
+			 completed_at = CASE
+				 WHEN attempt_count >= max_attempts THEN NOW()
+				 ELSE NULL
+			 END,
+			 updated_at = NOW()
+		 WHERE id = $5 AND status = $6`,
+		models.IndexJobFailed, models.IndexJobQueued, trimmedErr, nextAttemptAt, jobID, models.IndexJobInProgress,
+	)
+	if err != nil {
+		return err
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+func (p *PostgresDB) GetIndexingJobStatus(ctx context.Context, repoID int64, commitHash string) (*models.IndexingJob, error) {
+	row := p.db.QueryRowContext(ctx,
+		`SELECT id, repo_id, commit_hash, job_type, status, attempt_count, max_attempts, last_error, next_attempt_at, created_at, updated_at, started_at, completed_at
+		 FROM indexing_jobs
+		 WHERE repo_id = $1 AND commit_hash = $2
+		 ORDER BY created_at DESC, id DESC
+		 LIMIT 1`,
+		repoID, commitHash,
+	)
+	job, err := scanPostgresIndexingJob(row)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return job, nil
+}
+
+func scanPostgresIndexingJob(row *sql.Row) (*models.IndexingJob, error) {
+	var job models.IndexingJob
+	var jobType string
+	var status string
+	var startedAt sql.NullTime
+	var completedAt sql.NullTime
+	if err := row.Scan(
+		&job.ID,
+		&job.RepoID,
+		&job.CommitHash,
+		&jobType,
+		&status,
+		&job.AttemptCount,
+		&job.MaxAttempts,
+		&job.LastError,
+		&job.NextAttemptAt,
+		&job.CreatedAt,
+		&job.UpdatedAt,
+		&startedAt,
+		&completedAt,
+	); err != nil {
+		return nil, err
+	}
+	job.JobType = models.IndexJobType(jobType)
+	job.Status = models.IndexJobStatus(status)
+	if startedAt.Valid {
+		v := startedAt.Time
+		job.StartedAt = &v
+	}
+	if completedAt.Valid {
+		v := completedAt.Time
+		job.CompletedAt = &v
+	}
+	return &job, nil
 }
 
 func (p *PostgresDB) SetCommitIndex(ctx context.Context, repoID int64, commitHash, indexHash string) error {

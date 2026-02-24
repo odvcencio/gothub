@@ -31,6 +31,8 @@ type Server struct {
 	notifySvc    *service.NotificationService
 	codeIntelSvc *service.CodeIntelService
 	lineageSvc   *service.EntityLineageService
+	indexQueue   *jobs.Queue
+	asyncIndex   bool
 	rateLimiter  *requestRateLimiter
 	httpMetrics  *httpMetrics
 	passkey      *webauthn.WebAuthn
@@ -40,7 +42,7 @@ type Server struct {
 }
 
 type ServerOptions struct {
-	EnablePasswordAuth   bool
+	EnablePasswordAuth  bool
 	EnableAsyncIndexing bool
 }
 
@@ -73,6 +75,8 @@ func NewServerWithOptions(db database.DB, authSvc *auth.Service, repoSvc *servic
 		notifySvc:    notifySvc,
 		codeIntelSvc: codeIntelSvc,
 		lineageSvc:   lineageSvc,
+		indexQueue:   indexQueue,
+		asyncIndex:   opts.EnableAsyncIndexing,
 		rateLimiter:  newRequestRateLimiter(),
 		httpMetrics:  httpMetrics,
 		passkey:      initWebAuthn(),
@@ -238,8 +242,8 @@ func (s *Server) routes() {
 		if err != nil {
 			return err
 		}
-		if opts.EnableAsyncIndexing {
-			_, err := indexQueue.EnqueueCommitIndex(ctx, repoModel.ID, string(commitHash))
+		if s.asyncIndex {
+			_, err := s.indexQueue.EnqueueCommitIndex(ctx, repoModel.ID, string(commitHash))
 			return err
 		}
 		store, err := s.repoSvc.OpenStore(ctx, owner, repo)
@@ -253,8 +257,8 @@ func (s *Server) routes() {
 	}
 
 	indexByRepoID := func(ctx context.Context, repoID int64, store *gotstore.RepoStore, commitHash object.Hash) error {
-		if opts.EnableAsyncIndexing {
-			_, err := indexQueue.EnqueueCommitIndex(ctx, repoID, string(commitHash))
+		if s.asyncIndex {
+			_, err := s.indexQueue.EnqueueCommitIndex(ctx, repoID, string(commitHash))
 			return err
 		}
 		if err := s.lineageSvc.IndexCommit(ctx, repoID, store, commitHash); err != nil {

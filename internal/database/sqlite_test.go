@@ -1118,3 +1118,185 @@ func TestSQLiteIssueCRUDAndComments(t *testing.T) {
 		t.Fatalf("unexpected comments: %+v", comments)
 	}
 }
+
+func TestSQLiteIndexingJobLifecycle(t *testing.T) {
+	db, ctx, repoID := setupSQLiteIndexingRepo(t)
+	commitHash := strings.Repeat("a", 64)
+
+	job := &models.IndexingJob{
+		RepoID:      repoID,
+		CommitHash:  commitHash,
+		JobType:     models.IndexJobTypeCommitIndex,
+		Status:      models.IndexJobQueued,
+		MaxAttempts: 2,
+	}
+	if err := db.EnqueueIndexingJob(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	if job.ID == 0 {
+		t.Fatal("expected indexing job id to be set")
+	}
+	if job.Status != models.IndexJobQueued {
+		t.Fatalf("expected queued status after enqueue, got %q", job.Status)
+	}
+
+	claimed, err := db.ClaimIndexingJob(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed == nil {
+		t.Fatal("expected claimed indexing job")
+	}
+	if claimed.ID != job.ID {
+		t.Fatalf("expected claimed id %d, got %d", job.ID, claimed.ID)
+	}
+	if claimed.Status != models.IndexJobInProgress {
+		t.Fatalf("expected in_progress status after claim, got %q", claimed.Status)
+	}
+	if claimed.AttemptCount != 1 {
+		t.Fatalf("expected attempt_count 1 after first claim, got %d", claimed.AttemptCount)
+	}
+	if claimed.StartedAt == nil {
+		t.Fatal("expected started_at to be set after claim")
+	}
+
+	emptyClaim, err := db.ClaimIndexingJob(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if emptyClaim != nil {
+		t.Fatal("expected queue to be empty after single claim")
+	}
+
+	if err := db.CompleteIndexingJob(ctx, claimed.ID, models.IndexJobCompleted, ""); err != nil {
+		t.Fatal(err)
+	}
+	status, err := db.GetIndexingJobStatus(ctx, repoID, commitHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status == nil {
+		t.Fatal("expected persisted indexing job status")
+	}
+	if status.Status != models.IndexJobCompleted {
+		t.Fatalf("expected completed status, got %q", status.Status)
+	}
+	if status.CompletedAt == nil {
+		t.Fatal("expected completed_at to be set")
+	}
+}
+
+func TestSQLiteIndexingJobRetryAndFailureTransitions(t *testing.T) {
+	db, ctx, repoID := setupSQLiteIndexingRepo(t)
+	commitHash := strings.Repeat("b", 64)
+
+	job := &models.IndexingJob{
+		RepoID:      repoID,
+		CommitHash:  commitHash,
+		JobType:     models.IndexJobTypeCommitIndex,
+		Status:      models.IndexJobQueued,
+		MaxAttempts: 2,
+	}
+	if err := db.EnqueueIndexingJob(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := db.ClaimIndexingJob(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == nil {
+		t.Fatal("expected first claim to return job")
+	}
+
+	retryAt := time.Now().UTC().Add(-time.Second)
+	if err := db.RequeueIndexingJob(ctx, first.ID, "temporary failure", retryAt); err != nil {
+		t.Fatal(err)
+	}
+
+	queued, err := db.GetIndexingJobStatus(ctx, repoID, commitHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if queued == nil {
+		t.Fatal("expected queued indexing job after retry")
+	}
+	if queued.Status != models.IndexJobQueued {
+		t.Fatalf("expected queued status after requeue, got %q", queued.Status)
+	}
+	if queued.AttemptCount != 1 {
+		t.Fatalf("expected attempt_count to remain 1 after requeue, got %d", queued.AttemptCount)
+	}
+	if queued.LastError != "temporary failure" {
+		t.Fatalf("expected last_error to be persisted, got %q", queued.LastError)
+	}
+
+	second, err := db.ClaimIndexingJob(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second == nil {
+		t.Fatal("expected second claim to return job")
+	}
+	if second.AttemptCount != 2 {
+		t.Fatalf("expected attempt_count 2 on second claim, got %d", second.AttemptCount)
+	}
+
+	if err := db.RequeueIndexingJob(ctx, second.ID, "terminal failure", retryAt); err != nil {
+		t.Fatal(err)
+	}
+	final, err := db.GetIndexingJobStatus(ctx, repoID, commitHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if final == nil {
+		t.Fatal("expected final indexing job status")
+	}
+	if final.Status != models.IndexJobFailed {
+		t.Fatalf("expected failed status after max attempts, got %q", final.Status)
+	}
+	if final.CompletedAt == nil {
+		t.Fatal("expected completed_at to be set for terminal failure")
+	}
+	if final.LastError != "terminal failure" {
+		t.Fatalf("expected terminal last_error, got %q", final.LastError)
+	}
+
+	none, err := db.ClaimIndexingJob(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if none != nil {
+		t.Fatal("expected no claimable job after terminal failure")
+	}
+}
+
+func setupSQLiteIndexingRepo(t *testing.T) (*SQLiteDB, context.Context, int64) {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	ctx := context.Background()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	user := &models.User{Username: "queue-user", Email: "queue@example.com", PasswordHash: "x"}
+	if err := db.CreateUser(ctx, user); err != nil {
+		t.Fatal(err)
+	}
+	repo := &models.Repository{
+		OwnerUserID:   &user.ID,
+		Name:          "queue-repo",
+		DefaultBranch: "main",
+		StoragePath:   "pending",
+	}
+	if err := db.CreateRepository(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	return db, ctx, repo.ID
+}

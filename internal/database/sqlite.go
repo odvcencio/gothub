@@ -326,6 +326,23 @@ CREATE TABLE IF NOT EXISTS hash_mapping (
 	UNIQUE (repo_id, got_hash)
 );
 
+CREATE TABLE IF NOT EXISTS indexing_jobs (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	repo_id INTEGER NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+	commit_hash TEXT NOT NULL,
+	job_type TEXT NOT NULL DEFAULT 'commit_index',
+	status TEXT NOT NULL DEFAULT 'queued',
+	attempt_count INTEGER NOT NULL DEFAULT 0,
+	max_attempts INTEGER NOT NULL DEFAULT 3,
+	last_error TEXT NOT NULL DEFAULT '',
+	next_attempt_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	started_at DATETIME,
+	completed_at DATETIME,
+	UNIQUE (repo_id, commit_hash, job_type)
+);
+
 CREATE TABLE IF NOT EXISTS commit_indexes (
 	repo_id INTEGER NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
 	commit_hash TEXT NOT NULL,
@@ -378,6 +395,8 @@ CREATE INDEX IF NOT EXISTS idx_magic_link_tokens_user ON magic_link_tokens(user_
 CREATE INDEX IF NOT EXISTS idx_ssh_auth_challenges_user ON ssh_auth_challenges(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_webauthn_credentials_user ON webauthn_credentials(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_webauthn_sessions_user_flow ON webauthn_sessions(user_id, flow, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_indexing_jobs_claim ON indexing_jobs(status, next_attempt_at, id);
+CREATE INDEX IF NOT EXISTS idx_indexing_jobs_repo_commit ON indexing_jobs(repo_id, commit_hash, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_commit_indexes_repo ON commit_indexes(repo_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_tree_modes_repo_tree ON git_tree_entry_modes(repo_id, got_tree_hash);
 CREATE INDEX IF NOT EXISTS idx_entity_versions_repo_commit ON entity_versions(repo_id, commit_hash);
@@ -1802,6 +1821,251 @@ func (s *SQLiteDB) GetGitHash(ctx context.Context, repoID int64, gotHash string)
 	err := s.db.QueryRowContext(ctx,
 		`SELECT git_hash FROM hash_mapping WHERE repo_id = ? AND got_hash = ?`, repoID, gotHash).Scan(&h)
 	return h, err
+}
+
+func (s *SQLiteDB) EnqueueIndexingJob(ctx context.Context, job *models.IndexingJob) error {
+	if job == nil {
+		return fmt.Errorf("indexing job is nil")
+	}
+	status := job.Status
+	if status == "" {
+		status = models.IndexJobQueued
+	}
+	jobType := job.JobType
+	if jobType == "" {
+		jobType = models.IndexJobTypeCommitIndex
+	}
+	maxAttempts := job.MaxAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = 3
+	}
+	nextAttemptAt := job.NextAttemptAt
+	if nextAttemptAt.IsZero() {
+		nextAttemptAt = time.Now().UTC()
+	}
+	nextAttempt := sqliteTimestamp(nextAttemptAt)
+
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO indexing_jobs (
+			 repo_id, commit_hash, job_type, status, attempt_count, max_attempts, last_error, next_attempt_at
+		 ) VALUES (?, ?, ?, ?, 0, ?, '', datetime(?))
+		 ON CONFLICT(repo_id, commit_hash, job_type) DO UPDATE SET
+			 status = CASE
+				WHEN indexing_jobs.status = ? THEN indexing_jobs.status
+				ELSE ?
+			 END,
+			 last_error = CASE
+				WHEN indexing_jobs.status = ? THEN indexing_jobs.last_error
+				ELSE ''
+			 END,
+			 next_attempt_at = CASE
+				WHEN indexing_jobs.status = ? THEN indexing_jobs.next_attempt_at
+				ELSE excluded.next_attempt_at
+			 END,
+			 completed_at = CASE
+				WHEN indexing_jobs.status = ? THEN indexing_jobs.completed_at
+				ELSE NULL
+			 END,
+			 updated_at = CASE
+				WHEN indexing_jobs.status = ? THEN indexing_jobs.updated_at
+				ELSE CURRENT_TIMESTAMP
+			 END`,
+		job.RepoID, job.CommitHash, jobType, status, maxAttempts, nextAttempt,
+		models.IndexJobCompleted, models.IndexJobQueued,
+		models.IndexJobCompleted,
+		models.IndexJobCompleted,
+		models.IndexJobCompleted,
+		models.IndexJobCompleted,
+	)
+	if err != nil {
+		return err
+	}
+
+	loaded, err := s.getIndexingJobStatusByType(ctx, job.RepoID, job.CommitHash, jobType)
+	if err != nil {
+		return err
+	}
+	if loaded == nil {
+		return sql.ErrNoRows
+	}
+	*job = *loaded
+	return nil
+}
+
+func (s *SQLiteDB) ClaimIndexingJob(ctx context.Context) (*models.IndexingJob, error) {
+	row := s.db.QueryRowContext(ctx,
+		`UPDATE indexing_jobs
+		 SET status = ?,
+			 attempt_count = attempt_count + 1,
+			 started_at = CURRENT_TIMESTAMP,
+			 completed_at = NULL,
+			 updated_at = CURRENT_TIMESTAMP
+		 WHERE id = (
+			 SELECT id
+			 FROM indexing_jobs
+			 WHERE status = ?
+			   AND datetime(next_attempt_at) <= CURRENT_TIMESTAMP
+			 ORDER BY next_attempt_at ASC, id ASC
+			 LIMIT 1
+		 )
+		 RETURNING id, repo_id, commit_hash, job_type, status, attempt_count, max_attempts, last_error, next_attempt_at, created_at, updated_at, started_at, completed_at`,
+		models.IndexJobInProgress, models.IndexJobQueued,
+	)
+	job, err := scanSQLiteIndexingJob(row)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return job, nil
+}
+
+func (s *SQLiteDB) CompleteIndexingJob(ctx context.Context, jobID int64, status models.IndexJobStatus, errMsg string) error {
+	trimmedErr := strings.TrimSpace(errMsg)
+	switch status {
+	case models.IndexJobCompleted:
+		trimmedErr = ""
+	case models.IndexJobFailed:
+		if trimmedErr == "" {
+			trimmedErr = "job failed"
+		}
+	default:
+		return fmt.Errorf("unsupported terminal status %q", status)
+	}
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE indexing_jobs
+		 SET status = ?,
+			 last_error = ?,
+			 completed_at = CURRENT_TIMESTAMP,
+			 updated_at = CURRENT_TIMESTAMP
+		 WHERE id = ? AND status = ?`,
+		status, trimmedErr, jobID, models.IndexJobInProgress,
+	)
+	if err != nil {
+		return err
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+func (s *SQLiteDB) RequeueIndexingJob(ctx context.Context, jobID int64, errMsg string, nextAttemptAt time.Time) error {
+	trimmedErr := strings.TrimSpace(errMsg)
+	if trimmedErr == "" {
+		trimmedErr = "job failed"
+	}
+	if nextAttemptAt.IsZero() {
+		nextAttemptAt = time.Now().UTC()
+	}
+	nextAttempt := sqliteTimestamp(nextAttemptAt)
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE indexing_jobs
+		 SET status = CASE
+				 WHEN attempt_count >= max_attempts THEN ?
+				 ELSE ?
+			 END,
+			 last_error = ?,
+			 next_attempt_at = CASE
+				 WHEN attempt_count >= max_attempts THEN next_attempt_at
+				 ELSE datetime(?)
+			 END,
+			 started_at = NULL,
+			 completed_at = CASE
+				 WHEN attempt_count >= max_attempts THEN CURRENT_TIMESTAMP
+				 ELSE NULL
+			 END,
+			 updated_at = CURRENT_TIMESTAMP
+		 WHERE id = ? AND status = ?`,
+		models.IndexJobFailed, models.IndexJobQueued, trimmedErr, nextAttempt, jobID, models.IndexJobInProgress,
+	)
+	if err != nil {
+		return err
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+func (s *SQLiteDB) GetIndexingJobStatus(ctx context.Context, repoID int64, commitHash string) (*models.IndexingJob, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT id, repo_id, commit_hash, job_type, status, attempt_count, max_attempts, last_error, next_attempt_at, created_at, updated_at, started_at, completed_at
+		 FROM indexing_jobs
+		 WHERE repo_id = ? AND commit_hash = ?
+		 ORDER BY created_at DESC, id DESC
+		 LIMIT 1`,
+		repoID, commitHash,
+	)
+	job, err := scanSQLiteIndexingJob(row)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return job, nil
+}
+
+func (s *SQLiteDB) getIndexingJobStatusByType(ctx context.Context, repoID int64, commitHash string, jobType models.IndexJobType) (*models.IndexingJob, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT id, repo_id, commit_hash, job_type, status, attempt_count, max_attempts, last_error, next_attempt_at, created_at, updated_at, started_at, completed_at
+		 FROM indexing_jobs
+		 WHERE repo_id = ? AND commit_hash = ? AND job_type = ?
+		 LIMIT 1`,
+		repoID, commitHash, jobType,
+	)
+	job, err := scanSQLiteIndexingJob(row)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return job, nil
+}
+
+func scanSQLiteIndexingJob(row *sql.Row) (*models.IndexingJob, error) {
+	var job models.IndexingJob
+	var jobType string
+	var status string
+	var startedAt sql.NullTime
+	var completedAt sql.NullTime
+	if err := row.Scan(
+		&job.ID,
+		&job.RepoID,
+		&job.CommitHash,
+		&jobType,
+		&status,
+		&job.AttemptCount,
+		&job.MaxAttempts,
+		&job.LastError,
+		&job.NextAttemptAt,
+		&job.CreatedAt,
+		&job.UpdatedAt,
+		&startedAt,
+		&completedAt,
+	); err != nil {
+		return nil, err
+	}
+	job.JobType = models.IndexJobType(jobType)
+	job.Status = models.IndexJobStatus(status)
+	if startedAt.Valid {
+		v := startedAt.Time
+		job.StartedAt = &v
+	}
+	if completedAt.Valid {
+		v := completedAt.Time
+		job.CompletedAt = &v
+	}
+	return &job, nil
+}
+
+func sqliteTimestamp(t time.Time) string {
+	return t.UTC().Format("2006-01-02 15:04:05")
 }
 
 func (s *SQLiteDB) SetCommitIndex(ctx context.Context, repoID int64, commitHash, indexHash string) error {

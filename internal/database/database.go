@@ -126,6 +126,11 @@ type DB interface {
 	SetHashMappings(ctx context.Context, mappings []models.HashMapping) error
 	GetGotHash(ctx context.Context, repoID int64, gitHash string) (string, error)
 	GetGitHash(ctx context.Context, repoID int64, gotHash string) (string, error)
+	EnqueueIndexingJob(ctx context.Context, job *models.IndexingJob) error
+	ClaimIndexingJob(ctx context.Context) (*models.IndexingJob, error)
+	CompleteIndexingJob(ctx context.Context, jobID int64, status models.IndexJobStatus, errMsg string) error
+	RequeueIndexingJob(ctx context.Context, jobID int64, errMsg string, nextAttemptAt time.Time) error
+	GetIndexingJobStatus(ctx context.Context, repoID int64, commitHash string) (*models.IndexingJob, error)
 	SetCommitIndex(ctx context.Context, repoID int64, commitHash, indexHash string) error
 	GetCommitIndex(ctx context.Context, repoID int64, commitHash string) (string, error)
 	SetGitTreeEntryModes(ctx context.Context, repoID int64, gotTreeHash string, modes map[string]string) error
