@@ -13,6 +13,10 @@ require (
 	modernc.org/sqlite v1.37.1
 )
 
+replace github.com/odvcencio/got => ../got
+replace github.com/odvcencio/gotreesitter => ../gotreesitter
+replace github.com/odvcencio/gts-suite => ../gts-suite
+
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect

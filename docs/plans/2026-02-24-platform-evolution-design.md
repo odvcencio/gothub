@@ -1,7 +1,7 @@
 # Platform Evolution: Fastest, Most Intelligent Code Awareness Platform
 
 **Date:** 2026-02-24
-**Revised:** 2026-02-24 (second revision — includes uncommitted SSH signing work)
+**Revised:** 2026-02-24 (third revision — signature flow shipped, protocol hardening landed)
 **Status:** Approved
 **Scope:** Got (structural VCS engine) + GotHub (hosting platform)
 
@@ -17,8 +17,8 @@ Four repos work together (all under active development):
 
 | Repo | Role | Recent work |
 |------|------|-------------|
-| **got** | Structural VCS engine | SSH commit signing, remote sync, structural merge |
-| **gothub** | Hosting platform | Signature verification, merge gates, code intelligence, entity lineage |
+| **got** | Structural VCS engine | SSH commit signing, remote sync, structural merge, multi-round batch negotiation, gothub e2e coverage |
+| **gothub** | Hosting platform | Signature verification, merge gates, proactive commit indexing, entity lineage |
 | **gotreesitter** | Pure-Go tree-sitter runtime | 205 grammars, external scanner support, fuzz testing, benchmarks |
 | **gts-suite** | Code intelligence library | Tree-sitter AST classification, xref/structdiff/model test suites (2000+ new test LOC), lint integration |
 
@@ -40,7 +40,7 @@ Four repos work together (all under active development):
 - Batch object negotiation (wants/haves), graph closure guarantees
 - .gotignore support, config management, detached HEAD
 - Benchmarks for store, entity extraction, merge, diff3
-- SSH commit signing (in progress): `CommitSigner` function type, `CommitWithSigner()`, `--sign` / `--sign-key` CLI flags, sshsig-v1 format with ed25519/ecdsa/rsa key auto-detection
+- SSH commit signing: `CommitSigner` function type, `CommitWithSigner()`, `--sign` / `--sign-key` CLI flags, sshsig-v1 format with ed25519/ecdsa/rsa key auto-detection
 - `CommitSigningPayload()` produces canonical bytes excluding signature field for deterministic verification
 
 **What doesn't work / doesn't exist:**
@@ -73,7 +73,7 @@ Four repos work together (all under active development):
 - Webhook delivery with entity change tracking in payloads
 - Dual database: SQLite (WAL mode) + PostgreSQL, full schema with migrations
 - JWT auth with bcrypt passwords, SSH key management
-- SSH commit signature verification (in progress): parses sshsig-v1 format, verifies signature against SSH keys in DB, resolves signer to username. `CommitInfo` now includes `Verified` and `Signer` fields. Both `GetCommit` and `ListCommits` verify signatures.
+- SSH commit signature verification: parses sshsig-v1 format, verifies signature against SSH keys in DB, resolves signer to username. `CommitInfo` includes `Verified` and `Signer` fields. Both `GetCommit` and `ListCommits` verify signatures.
 - Organizations with member roles, collaborator permissions
 - Rate limiting (10 req/sec per IP), CORS, request body limits (8MB)
 - Preact SPA with code browsing, PRs, issues, merge preview, entity diff views
@@ -372,7 +372,7 @@ Index status API:
 - Collaborator permissions (admin/write/read)
 - Branch protection rules with multiple policy types
 - Webhook system with delivery tracking and redelivery
-- SSH commit signing + server-side verification (in progress) — foundation for commit provenance, signed merge enforcement, and supply chain security
+- SSH commit signing + server-side verification — foundation for commit provenance, signed merge enforcement, and supply chain security
 
 **What's new:**
 
