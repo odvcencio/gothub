@@ -38,14 +38,20 @@ type codeIntelCacheEntry struct {
 	lastAccess time.Time
 }
 
+type codeIntelBloomCacheEntry struct {
+	filter     *symbolSearchBloomFilter
+	lastAccess time.Time
+}
+
 // CodeIntelService provides code intelligence powered by gts-suite.
 type CodeIntelService struct {
 	db        database.DB
 	repoSvc   *RepoService
 	browseSvc *BrowseService
 
-	mu      sync.RWMutex
-	indexes map[string]codeIntelCacheEntry // cache: "owner/repo@commitHash" -> index
+	mu           sync.RWMutex
+	indexes      map[string]codeIntelCacheEntry      // cache: "owner/repo@commitHash" -> index
+	symbolBlooms map[string]codeIntelBloomCacheEntry // cache: "repoID@commitHash" -> bloom filter
 
 	cacheMaxItems int
 	cacheTTL      time.Duration
@@ -57,6 +63,7 @@ func NewCodeIntelService(db database.DB, repoSvc *RepoService, browseSvc *Browse
 		repoSvc:       repoSvc,
 		browseSvc:     browseSvc,
 		indexes:       make(map[string]codeIntelCacheEntry),
+		symbolBlooms:  make(map[string]codeIntelBloomCacheEntry),
 		cacheMaxItems: defaultCodeIntelCacheMaxItems,
 		cacheTTL:      defaultCodeIntelCacheTTL,
 	}
@@ -107,6 +114,7 @@ func (s *CodeIntelService) EnsureCommitIndexed(ctx context.Context, repoID int64
 	if strings.TrimSpace(cacheKey) != "" {
 		key = fmt.Sprintf("%s@%s", cacheKey, commitHash)
 		if idx, ok := s.getCachedIndex(key); ok {
+			s.setCommitSymbolBloom(repoID, string(commitHash), buildSymbolSearchBloomFromIndex(idx))
 			return s.persistEntityIndexIfNeeded(ctx, repoID, string(commitHash), idx)
 		}
 	}
@@ -215,9 +223,23 @@ func (s *CodeIntelService) loadPersistedIndex(ctx context.Context, store *gotsto
 	if objType != repoIndexObjectType {
 		return nil, false, nil
 	}
+
+	// New format: wrapped index payload with optional bloom filter metadata.
+	var wrapped persistedRepoIndexObject
+	if err := json.Unmarshal(raw, &wrapped); err == nil && wrapped.Index != nil {
+		if wrapped.SymbolBloom != nil {
+			s.setCommitSymbolBloom(repoID, commitHash, wrapped.SymbolBloom)
+		}
+		return wrapped.Index, true, nil
+	}
+
+	// Backward compatibility with older index objects.
 	var idx model.Index
 	if err := json.Unmarshal(raw, &idx); err != nil {
 		return nil, false, nil
+	}
+	if bloom := buildSymbolSearchBloomFromIndex(&idx); bloom != nil {
+		s.setCommitSymbolBloom(repoID, commitHash, bloom)
 	}
 	return &idx, true, nil
 }
@@ -226,13 +248,22 @@ func (s *CodeIntelService) persistIndex(ctx context.Context, store *gotstore.Rep
 	if idx == nil {
 		return nil
 	}
-	raw, err := json.Marshal(idx)
+	bloom := buildSymbolSearchBloomFromIndex(idx)
+	payload := persistedRepoIndexObject{
+		Index:       idx,
+		SymbolBloom: bloom,
+	}
+
+	raw, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
 	indexHash, err := store.Objects.Write(repoIndexObjectType, raw)
 	if err != nil {
 		return err
+	}
+	if bloom != nil {
+		s.setCommitSymbolBloom(repoID, commitHash, bloom)
 	}
 	return s.db.SetCommitIndex(ctx, repoID, commitHash, string(indexHash))
 }
@@ -250,7 +281,11 @@ func (s *CodeIntelService) persistEntityIndex(ctx context.Context, repoID int64,
 	if idx != nil {
 		entries = buildEntityIndexEntries(repoID, commitHash, idx)
 	}
-	return s.db.SetEntityIndexEntries(ctx, repoID, commitHash, entries)
+	if err := s.db.SetEntityIndexEntries(ctx, repoID, commitHash, entries); err != nil {
+		return err
+	}
+	s.setCommitSymbolBloom(repoID, commitHash, buildSymbolSearchBloomFromEntries(entries))
+	return nil
 }
 
 func buildEntityIndexEntries(repoID int64, commitHash string, idx *model.Index) []models.EntityIndexEntry {
@@ -339,6 +374,88 @@ func (s *CodeIntelService) setCachedIndex(key string, idx *model.Index) {
 	}
 }
 
+func symbolBloomCacheKey(repoID int64, commitHash string) string {
+	return fmt.Sprintf("%d@%s", repoID, strings.TrimSpace(commitHash))
+}
+
+func (s *CodeIntelService) getCommitSymbolBloom(repoID int64, commitHash string) (*symbolSearchBloomFilter, bool) {
+	return s.getCachedSymbolBloom(symbolBloomCacheKey(repoID, commitHash))
+}
+
+func (s *CodeIntelService) getCachedSymbolBloom(key string) (*symbolSearchBloomFilter, bool) {
+	now := time.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry, ok := s.symbolBlooms[key]
+	if !ok {
+		return nil, false
+	}
+	if s.cacheTTL > 0 && now.Sub(entry.lastAccess) > s.cacheTTL {
+		delete(s.symbolBlooms, key)
+		return nil, false
+	}
+	entry.lastAccess = now
+	s.symbolBlooms[key] = entry
+	return entry.filter, true
+}
+
+func (s *CodeIntelService) setCommitSymbolBloom(repoID int64, commitHash string, bloom *symbolSearchBloomFilter) {
+	if bloom == nil {
+		return
+	}
+	s.setCachedSymbolBloom(symbolBloomCacheKey(repoID, commitHash), bloom)
+}
+
+func (s *CodeIntelService) setCachedSymbolBloom(key string, bloom *symbolSearchBloomFilter) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.symbolBlooms == nil {
+		s.symbolBlooms = make(map[string]codeIntelBloomCacheEntry)
+	}
+	s.symbolBlooms[key] = codeIntelBloomCacheEntry{
+		filter:     bloom,
+		lastAccess: time.Now(),
+	}
+	if s.cacheMaxItems <= 0 {
+		return
+	}
+	for len(s.symbolBlooms) > s.cacheMaxItems {
+		oldestKey := ""
+		var oldest time.Time
+		for k, entry := range s.symbolBlooms {
+			if oldestKey == "" || entry.lastAccess.Before(oldest) {
+				oldestKey = k
+				oldest = entry.lastAccess
+			}
+		}
+		if oldestKey == "" {
+			break
+		}
+		delete(s.symbolBlooms, oldestKey)
+	}
+}
+
+func (s *CodeIntelService) loadCommitSymbolBloom(ctx context.Context, owner, repo string, repoID int64, commitHash object.Hash) (*symbolSearchBloomFilter, bool) {
+	commit := string(commitHash)
+	if bloom, ok := s.getCommitSymbolBloom(repoID, commit); ok {
+		return bloom, true
+	}
+
+	cacheKey := fmt.Sprintf("%s/%s@%s", owner, repo, commitHash)
+	if idx, ok := s.getCachedIndex(cacheKey); ok {
+		bloom := buildSymbolSearchBloomFromIndex(idx)
+		s.setCommitSymbolBloom(repoID, commit, bloom)
+		return bloom, true
+	}
+
+	store, err := s.repoSvc.OpenStore(ctx, owner, repo)
+	if err != nil {
+		return nil, false
+	}
+	_, _, _ = s.loadPersistedIndex(ctx, store, repoID, commit)
+	return s.getCommitSymbolBloom(repoID, commit)
+}
+
 // SymbolResult is a symbol with its file path.
 type SymbolResult struct {
 	File      string `json:"file"`
@@ -378,10 +495,23 @@ func (s *CodeIntelService) SearchSymbols(ctx context.Context, owner, repo, ref, 
 				return results, nil
 			}
 		} else {
+			if bloom, ok := s.loadCommitSymbolBloom(ctx, owner, repo, repoModel.ID, commitHash); ok &&
+				bloom.supportsEntityTextSearch() &&
+				!bloomMightContainPlainTextQuery(bloom, selectorText) {
+				return []SymbolResult{}, nil
+			}
 			entries, err := s.db.SearchEntityIndexEntries(ctx, repoModel.ID, string(commitHash), selectorText, "", defaultSymbolSearchLimit)
 			if err == nil {
 				return symbolResultsFromEntityIndexEntries(entries), nil
 			}
+		}
+	}
+
+	if selErr != nil {
+		if bloom, ok := s.loadCommitSymbolBloom(ctx, owner, repo, repoModel.ID, commitHash); ok &&
+			bloom.supportsIndexContainsSearch() &&
+			!bloomMightContainPlainTextQuery(bloom, selectorText) {
+			return []SymbolResult{}, nil
 		}
 	}
 
