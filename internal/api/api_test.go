@@ -52,6 +52,30 @@ func setupTestServer(t *testing.T) (*api.Server, database.DB) {
 	return server, db
 }
 
+func setupTestServerAsyncIndexing(t *testing.T) (*api.Server, database.DB) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	dbPath := tmpDir + "/test.db"
+	storagePath := tmpDir + "/repos"
+
+	db, err := database.OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Migrate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	authSvc := auth.NewService("test-secret", 24*time.Hour)
+	repoSvc := service.NewRepoService(db, storagePath)
+	server := api.NewServerWithOptions(db, authSvc, repoSvc, api.ServerOptions{
+		EnablePasswordAuth:  true,
+		EnableAsyncIndexing: true,
+	})
+	return server, db
+}
+
 func TestRegisterAndLogin(t *testing.T) {
 	server, _ := setupTestServer(t)
 	ts := httptest.NewServer(server)
@@ -1894,6 +1918,146 @@ func TestGitReceivePackSupportsSubmoduleTreeEntries(t *testing.T) {
 	}
 }
 
+func TestIndexStatusEndpointQueuedState(t *testing.T) {
+	server, db := setupTestServerAsyncIndexing(t)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	token := registerAndGetToken(t, ts.URL, "owner")
+	createRepo(t, ts.URL, token, "repo", false)
+
+	gitCommitHash := pushSimpleGoCommit(t, ts.URL, "owner", "repo")
+
+	ctx := context.Background()
+	repo, err := db.GetRepository(ctx, "owner", "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotCommitHash, err := db.GetGotHash(ctx, repo.ID, gitCommitHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := http.Get(ts.URL + "/api/v1/repos/owner/repo/index/status?ref=main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("index status queued: expected 200, got %d", resp.StatusCode)
+	}
+	var payload struct {
+		Ref         string    `json:"ref"`
+		CommitHash  string    `json:"commit_hash"`
+		Indexed     bool      `json:"indexed"`
+		QueueStatus string    `json:"queue_status"`
+		Attempts    int       `json:"attempts"`
+		LastError   string    `json:"last_error"`
+		UpdatedAt   time.Time `json:"updated_at"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if payload.Ref != "main" {
+		t.Fatalf("expected ref main, got %q", payload.Ref)
+	}
+	if payload.CommitHash != gotCommitHash {
+		t.Fatalf("expected commit hash %q, got %q", gotCommitHash, payload.CommitHash)
+	}
+	if payload.Indexed {
+		t.Fatal("expected indexed=false for queued job")
+	}
+	if payload.QueueStatus != "queued" {
+		t.Fatalf("expected queue_status queued, got %q", payload.QueueStatus)
+	}
+	if payload.Attempts != 0 {
+		t.Fatalf("expected attempts 0 before claim, got %d", payload.Attempts)
+	}
+	if !payload.UpdatedAt.UTC().After(time.Time{}) {
+		t.Fatalf("expected non-zero updated_at, got %s", payload.UpdatedAt)
+	}
+}
+
+func TestIndexStatusEndpointCompletedState(t *testing.T) {
+	server, db := setupTestServerAsyncIndexing(t)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	token := registerAndGetToken(t, ts.URL, "owner")
+	createRepo(t, ts.URL, token, "repo", false)
+
+	gitCommitHash := pushSimpleGoCommit(t, ts.URL, "owner", "repo")
+
+	ctx := context.Background()
+	repo, err := db.GetRepository(ctx, "owner", "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotCommitHash, err := db.GetGotHash(ctx, repo.ID, gitCommitHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	claimed, err := db.ClaimIndexingJob(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed == nil {
+		t.Fatal("expected claimed indexing job")
+	}
+	if claimed.CommitHash != gotCommitHash {
+		t.Fatalf("expected claimed commit hash %q, got %q", gotCommitHash, claimed.CommitHash)
+	}
+
+	if err := db.SetCommitIndex(ctx, repo.ID, gotCommitHash, strings.Repeat("d", 64)); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CompleteIndexingJob(ctx, claimed.ID, models.IndexJobCompleted, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := http.Get(ts.URL + "/api/v1/repos/owner/repo/index/status?ref=main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("index status completed: expected 200, got %d", resp.StatusCode)
+	}
+	var payload struct {
+		Ref         string    `json:"ref"`
+		CommitHash  string    `json:"commit_hash"`
+		Indexed     bool      `json:"indexed"`
+		QueueStatus string    `json:"queue_status"`
+		Attempts    int       `json:"attempts"`
+		LastError   string    `json:"last_error"`
+		UpdatedAt   time.Time `json:"updated_at"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if payload.Ref != "main" {
+		t.Fatalf("expected ref main, got %q", payload.Ref)
+	}
+	if payload.CommitHash != gotCommitHash {
+		t.Fatalf("expected commit hash %q, got %q", gotCommitHash, payload.CommitHash)
+	}
+	if !payload.Indexed {
+		t.Fatal("expected indexed=true for completed job")
+	}
+	if payload.QueueStatus != "completed" {
+		t.Fatalf("expected queue_status completed, got %q", payload.QueueStatus)
+	}
+	if payload.Attempts != 1 {
+		t.Fatalf("expected attempts 1 after claim, got %d", payload.Attempts)
+	}
+	if !payload.UpdatedAt.UTC().After(time.Time{}) {
+		t.Fatalf("expected non-zero updated_at, got %s", payload.UpdatedAt)
+	}
+}
+
 func TestCodeIntelPersistsCommitIndex(t *testing.T) {
 	server, db := setupTestServer(t)
 	ts := httptest.NewServer(server)
@@ -3673,6 +3837,63 @@ func TestNotificationsLifecycle(t *testing.T) {
 	if unreadCount.Count != 1 {
 		t.Fatalf("expected 1 unread notification for bob, got %d", unreadCount.Count)
 	}
+}
+
+func pushSimpleGoCommit(t *testing.T, baseURL, owner, repo string) string {
+	t.Helper()
+
+	blobData := []byte("package main\n\nfunc ProcessOrder() int { return 1 }\n")
+	blobHash := gitinterop.GitHashBytes(gitinterop.GitTypeBlob, blobData)
+
+	var treeBuf bytes.Buffer
+	fmt.Fprintf(&treeBuf, "100644 main.go\x00")
+	blobRaw, err := hex.DecodeString(string(blobHash))
+	if err != nil {
+		t.Fatal(err)
+	}
+	treeBuf.Write(blobRaw)
+	treeData := treeBuf.Bytes()
+	treeHash := gitinterop.GitHashBytes(gitinterop.GitTypeTree, treeData)
+
+	commitData := []byte(fmt.Sprintf(
+		"tree %s\nauthor Owner <owner@example.com> 1700000000 +0000\ncommitter Owner <owner@example.com> 1700000000 +0000\n\ninitial\n",
+		treeHash,
+	))
+	commitHash := gitinterop.GitHashBytes(gitinterop.GitTypeCommit, commitData)
+
+	packData, err := gitinterop.BuildPackfile([]gitinterop.PackfileObject{
+		{Type: gitinterop.OBJ_BLOB, Data: blobData},
+		{Type: gitinterop.OBJ_TREE, Data: treeData},
+		{Type: gitinterop.OBJ_COMMIT, Data: commitData},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	updateLine := fmt.Sprintf("%s %s refs/heads/main\x00report-status\n", strings.Repeat("0", 40), commitHash)
+	payload := append(pktLineForTest(updateLine), pktFlushForTest()...)
+	payload = append(payload, packData...)
+
+	req, _ := http.NewRequest("POST", fmt.Sprintf("%s/git/%s/%s/git-receive-pack", baseURL, owner, repo), bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/x-git-receive-pack-request")
+	req.SetBasicAuth(owner, "secret123")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("git receive-pack: expected 200, got %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "ok refs/heads/main\n") {
+		t.Fatalf("expected ok status for refs/heads/main, got body %q", string(body))
+	}
+
+	return string(commitHash)
 }
 
 func registerAndGetToken(t *testing.T, baseURL, username string) string {

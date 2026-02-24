@@ -231,6 +231,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("DELETE /api/v1/repos/{owner}/{repo}/branch-protection/{branch...}", s.requireAuth(s.handleDeleteBranchProtection))
 
 	// Code intelligence
+	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/index/status", s.handleGetIndexStatus)
 	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/symbols/{ref}", s.handleSearchSymbols)
 	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/references/{ref}", s.handleFindReferences)
 	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/callgraph/{ref}", s.handleCallGraph)
