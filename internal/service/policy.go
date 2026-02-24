@@ -117,6 +117,14 @@ func (s *PRService) EvaluateMergeGate(ctx context.Context, repoID int64, pr *mod
 		result.Reasons = append(result.Reasons, reasons...)
 	}
 
+	if rule.RequireSignedCommits {
+		reasons, evalErr := s.evaluateSignedCommits(ctx, repoID, pr)
+		if evalErr != nil {
+			result.Reasons = append(result.Reasons, fmt.Sprintf("unable to evaluate signed-commit gate: %v", evalErr))
+		}
+		result.Reasons = append(result.Reasons, reasons...)
+	}
+
 	if rule.RequireStatusChecks {
 		runs, err := s.db.ListPRCheckRuns(ctx, pr.ID)
 		if err != nil {
@@ -398,6 +406,115 @@ func (s *PRService) evaluateNoNewDeadCode(ctx context.Context, repoID int64, pr 
 	}
 	sort.Strings(reasons)
 	return reasons, nil
+}
+
+func (s *PRService) evaluateSignedCommits(ctx context.Context, repoID int64, pr *models.PullRequest) ([]string, error) {
+	store, err := s.repoSvc.OpenStoreByID(ctx, repoID)
+	if err != nil {
+		return nil, err
+	}
+
+	sourceHead, err := store.Refs.Get("heads/" + pr.SourceBranch)
+	if err != nil {
+		return nil, fmt.Errorf("resolve source branch %q: %w", pr.SourceBranch, err)
+	}
+	targetHead, err := store.Refs.Get("heads/" + pr.TargetBranch)
+	if err != nil {
+		return nil, fmt.Errorf("resolve target branch %q: %w", pr.TargetBranch, err)
+	}
+
+	commitHashes, err := sourceOnlyCommits(store.Objects, sourceHead, targetHead)
+	if err != nil {
+		return nil, err
+	}
+	if len(commitHashes) == 0 {
+		return nil, nil
+	}
+
+	reasons := make([]string, 0)
+	for _, h := range commitHashes {
+		commit, err := store.Objects.ReadCommit(h)
+		if err != nil {
+			return nil, fmt.Errorf("read commit %q: %w", string(h), err)
+		}
+		verified, _, err := verifyCommitSignature(ctx, s.db, commit)
+		if err != nil {
+			return nil, fmt.Errorf("verify commit %q signature: %w", string(h), err)
+		}
+		if verified {
+			continue
+		}
+		reasons = append(reasons, fmt.Sprintf("commit %s is not signed or signature is unverified", shortHash(h)))
+	}
+	sort.Strings(reasons)
+	return reasons, nil
+}
+
+func sourceOnlyCommits(store *object.Store, sourceHead, targetHead object.Hash) ([]object.Hash, error) {
+	targetReachable, err := collectReachableCommits(store, targetHead)
+	if err != nil {
+		return nil, err
+	}
+
+	queue := []object.Hash{sourceHead}
+	visited := make(map[object.Hash]bool)
+	out := make([]object.Hash, 0)
+	for len(queue) > 0 {
+		h := queue[0]
+		queue = queue[1:]
+		if h == "" || visited[h] {
+			continue
+		}
+		visited[h] = true
+		if targetReachable[h] {
+			continue
+		}
+
+		commit, err := store.ReadCommit(h)
+		if err != nil {
+			return nil, fmt.Errorf("read source commit %q: %w", string(h), err)
+		}
+		out = append(out, h)
+		for _, p := range commit.Parents {
+			if !visited[p] {
+				queue = append(queue, p)
+			}
+		}
+	}
+
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out, nil
+}
+
+func collectReachableCommits(store *object.Store, head object.Hash) (map[object.Hash]bool, error) {
+	reachable := make(map[object.Hash]bool)
+	queue := []object.Hash{head}
+	for len(queue) > 0 {
+		h := queue[0]
+		queue = queue[1:]
+		if h == "" || reachable[h] {
+			continue
+		}
+		reachable[h] = true
+		commit, err := store.ReadCommit(h)
+		if err != nil {
+			return nil, fmt.Errorf("read target commit %q: %w", string(h), err)
+		}
+		for _, p := range commit.Parents {
+			if !reachable[p] {
+				queue = append(queue, p)
+			}
+		}
+	}
+	return reachable, nil
+}
+
+func shortHash(h object.Hash) string {
+	s := string(h)
+	if len(s) <= 12 {
+		return s
+	}
+	return s[:12]
 }
 
 func loadGotOwnersForBranch(store *gotstore.RepoStore, branch string) (*gotOwnersConfig, error) {

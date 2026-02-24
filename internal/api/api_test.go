@@ -3,6 +3,10 @@ package api_test
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/md5"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -22,6 +26,7 @@ import (
 	"github.com/odvcencio/gothub/internal/gotstore"
 	"github.com/odvcencio/gothub/internal/models"
 	"github.com/odvcencio/gothub/internal/service"
+	"golang.org/x/crypto/ssh"
 )
 
 func setupTestServer(t *testing.T) (*api.Server, database.DB) {
@@ -2182,6 +2187,198 @@ func TestMergeGateRequiresNoNewDeadCode(t *testing.T) {
 	}
 }
 
+func TestMergeGateRequiresSignedCommits(t *testing.T) {
+	server, db := setupTestServer(t)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	token := registerAndGetToken(t, ts.URL, "alice")
+	createRepo(t, ts.URL, token, "repo", false)
+
+	ctx := context.Background()
+	user, err := db.GetUserByUsername(ctx, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, err := db.GetRepository(ctx, "alice", "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := gotstore.Open(repo.StoragePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	signer, pubKeyText, fp := newTestSSHSigner(t)
+	if err := db.CreateSSHKey(ctx, &models.SSHKey{
+		UserID:      user.ID,
+		Name:        "default",
+		Fingerprint: fp,
+		PublicKey:   pubKeyText,
+		KeyType:     signer.PublicKey().Type(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	baseBlobHash, err := store.Objects.WriteBlob(&object.Blob{Data: []byte("package main\n\nfunc ProcessOrder() int { return 1 }\n")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseTreeHash, err := store.Objects.WriteTree(&object.TreeObj{
+		Entries: []object.TreeEntry{{Name: "main.go", BlobHash: baseBlobHash}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseCommitHash, err := store.Objects.WriteCommit(&object.CommitObj{
+		TreeHash:  baseTreeHash,
+		Author:    "alice",
+		Timestamp: 1700004000,
+		Message:   "base",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	signedBlobHash, err := store.Objects.WriteBlob(&object.Blob{Data: []byte("package main\n\nfunc ProcessOrder() int { return 2 }\n")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	signedTreeHash, err := store.Objects.WriteTree(&object.TreeObj{
+		Entries: []object.TreeEntry{{Name: "main.go", BlobHash: signedBlobHash}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	signedCommit := &object.CommitObj{
+		TreeHash:  signedTreeHash,
+		Parents:   []object.Hash{baseCommitHash},
+		Author:    "alice",
+		Timestamp: 1700004100,
+		Message:   "signed feature",
+	}
+	signedCommit.Signature = signTestCommit(t, signer, signedCommit)
+	signedCommitHash, err := store.Objects.WriteCommit(signedCommit)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Refs.Set("heads/main", baseCommitHash); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Refs.Set("heads/feature", signedCommitHash); err != nil {
+		t.Fatal(err)
+	}
+
+	prNumber := createPRNumber(t, ts.URL, token, "alice", "repo", "feature", "main")
+
+	ruleBody := `{
+		"enabled": true,
+		"require_signed_commits": true
+	}`
+	req, _ := http.NewRequest("PUT", ts.URL+"/api/v1/repos/alice/repo/branch-protection/main", bytes.NewBufferString(ruleBody))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("set branch protection: expected 200, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	req, _ = http.NewRequest("GET", fmt.Sprintf("%s/api/v1/repos/alice/repo/pulls/%d/merge-gate", ts.URL, prNumber), nil)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("merge gate endpoint: expected 200, got %d", resp.StatusCode)
+	}
+	var signedGate struct {
+		Allowed bool     `json:"allowed"`
+		Reasons []string `json:"reasons"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&signedGate); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if !signedGate.Allowed {
+		t.Fatalf("expected merge gate to allow signed-commit PR, got %+v", signedGate)
+	}
+
+	unsignedBlobHash, err := store.Objects.WriteBlob(&object.Blob{Data: []byte("package main\n\nfunc ProcessOrder() int { return 3 }\n")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unsignedTreeHash, err := store.Objects.WriteTree(&object.TreeObj{
+		Entries: []object.TreeEntry{{Name: "main.go", BlobHash: unsignedBlobHash}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unsignedCommitHash, err := store.Objects.WriteCommit(&object.CommitObj{
+		TreeHash:  unsignedTreeHash,
+		Parents:   []object.Hash{signedCommitHash},
+		Author:    "alice",
+		Timestamp: 1700004200,
+		Message:   "unsigned feature",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Refs.Set("heads/feature", unsignedCommitHash); err != nil {
+		t.Fatal(err)
+	}
+
+	req, _ = http.NewRequest("GET", fmt.Sprintf("%s/api/v1/repos/alice/repo/pulls/%d/merge-gate", ts.URL, prNumber), nil)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("merge gate endpoint with unsigned commit: expected 200, got %d", resp.StatusCode)
+	}
+	var blockedGate struct {
+		Allowed bool     `json:"allowed"`
+		Reasons []string `json:"reasons"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&blockedGate); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if blockedGate.Allowed {
+		t.Fatalf("expected merge gate to block unsigned commit, got %+v", blockedGate)
+	}
+	if !strings.Contains(strings.Join(blockedGate.Reasons, " "), "not signed") {
+		t.Fatalf("expected unsigned-commit reason, got %+v", blockedGate.Reasons)
+	}
+
+	if err := store.Refs.Set("heads/feature", signedCommitHash); err != nil {
+		t.Fatal(err)
+	}
+	req, _ = http.NewRequest("GET", fmt.Sprintf("%s/api/v1/repos/alice/repo/pulls/%d/merge-gate", ts.URL, prNumber), nil)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("merge gate endpoint after signed reset: expected 200, got %d", resp.StatusCode)
+	}
+	var allowedAgain struct {
+		Allowed bool     `json:"allowed"`
+		Reasons []string `json:"reasons"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&allowedAgain); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if !allowedAgain.Allowed {
+		t.Fatalf("expected merge gate to allow after removing unsigned commit, got %+v", allowedAgain)
+	}
+}
+
 func TestMergeProducesEntityEnrichedTree(t *testing.T) {
 	server, db := setupTestServer(t)
 	ts := httptest.NewServer(server)
@@ -2806,6 +3003,35 @@ func createPRNumber(t *testing.T, baseURL, token, owner, repo, sourceBranch, tar
 		t.Fatal("create PR: missing number in response")
 	}
 	return pr.Number
+}
+
+func newTestSSHSigner(t *testing.T) (ssh.Signer, string, string) {
+	t.Helper()
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := ssh.NewSignerFromKey(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pubText := string(ssh.MarshalAuthorizedKey(signer.PublicKey()))
+	fingerprint := fmt.Sprintf("%x", md5.Sum(signer.PublicKey().Marshal()))
+	return signer, pubText, fingerprint
+}
+
+func signTestCommit(t *testing.T, signer ssh.Signer, commit *object.CommitObj) string {
+	t.Helper()
+	copyCommit := *commit
+	copyCommit.Signature = ""
+	payload := object.MarshalCommit(&copyCommit)
+	sig, err := signer.Sign(rand.Reader, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pubB64 := base64.StdEncoding.EncodeToString(signer.PublicKey().Marshal())
+	sigB64 := base64.StdEncoding.EncodeToString(sig.Blob)
+	return fmt.Sprintf("sshsig-v1:%s:%s:%s", sig.Format, pubB64, sigB64)
 }
 
 func pktLineForTest(payload string) []byte {
