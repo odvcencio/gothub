@@ -10,10 +10,10 @@ import (
 	"time"
 
 	"github.com/odvcencio/got/pkg/diff"
-	"github.com/odvcencio/got/pkg/entity"
 	"github.com/odvcencio/got/pkg/merge"
 	"github.com/odvcencio/got/pkg/object"
 	"github.com/odvcencio/gothub/internal/database"
+	"github.com/odvcencio/gothub/internal/entityutil"
 	"github.com/odvcencio/gothub/internal/gotstore"
 	"github.com/odvcencio/gothub/internal/models"
 )
@@ -752,39 +752,11 @@ func enrichTreeWithEntities(store *object.Store, treeHash object.Hash, prefix st
 				changed = true
 			}
 		} else if e.EntityListHash == "" {
-			blob, err := store.ReadBlob(e.BlobHash)
+			listHash, ok, err := entityutil.ExtractAndWriteEntityList(store, fullPath, e.BlobHash)
 			if err != nil {
 				return "", err
 			}
-			el, err := entity.Extract(fullPath, blob.Data)
-			if err == nil && len(el.Entities) > 0 {
-				refs := make([]object.Hash, 0, len(el.Entities))
-				for _, ent := range el.Entities {
-					kind := kindNames[ent.Kind]
-					if kind == "" {
-						kind = "unknown"
-					}
-					entHash, err := store.WriteEntity(&object.EntityObj{
-						Kind:     kind,
-						Name:     ent.Name,
-						DeclKind: ent.DeclKind,
-						Receiver: ent.Receiver,
-						Body:     ent.Body,
-						BodyHash: object.Hash(ent.BodyHash),
-					})
-					if err != nil {
-						return "", err
-					}
-					refs = append(refs, entHash)
-				}
-				listHash, err := store.WriteEntityList(&object.EntityListObj{
-					Language:   el.Language,
-					Path:       fullPath,
-					EntityRefs: refs,
-				})
-				if err != nil {
-					return "", err
-				}
+			if ok {
 				entry.EntityListHash = listHash
 				changed = true
 			}

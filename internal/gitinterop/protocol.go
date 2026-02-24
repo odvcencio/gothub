@@ -11,9 +11,9 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/odvcencio/got/pkg/entity"
 	"github.com/odvcencio/got/pkg/object"
 	"github.com/odvcencio/gothub/internal/database"
+	"github.com/odvcencio/gothub/internal/entityutil"
 	"github.com/odvcencio/gothub/internal/gotstore"
 	"github.com/odvcencio/gothub/internal/models"
 )
@@ -706,37 +706,11 @@ func (h *SmartHTTPHandler) rewriteTreeWithEntities(ctx context.Context, store *g
 				updatedEntries[i] = entry
 				continue
 			}
-			blob, err := store.Objects.ReadBlob(e.BlobHash)
+			entityListHash, ok, err := entityutil.ExtractAndWriteEntityList(store.Objects, fullPath, e.BlobHash)
 			if err != nil {
 				return "", false, err
 			}
-			el, err := entity.Extract(fullPath, blob.Data)
-			if err == nil && len(el.Entities) > 0 {
-				entityRefs := make([]object.Hash, 0, len(el.Entities))
-				for _, ent := range el.Entities {
-					entObj := &object.EntityObj{
-						Kind:     entityKindToString(ent.Kind),
-						Name:     ent.Name,
-						DeclKind: ent.DeclKind,
-						Receiver: ent.Receiver,
-						Body:     ent.Body,
-						BodyHash: object.Hash(ent.BodyHash),
-					}
-					entHash, err := store.Objects.WriteEntity(entObj)
-					if err != nil {
-						return "", false, err
-					}
-					entityRefs = append(entityRefs, entHash)
-				}
-				elObj := &object.EntityListObj{
-					Language:   el.Language,
-					Path:       fullPath,
-					EntityRefs: entityRefs,
-				}
-				entityListHash, err := store.Objects.WriteEntityList(elObj)
-				if err != nil {
-					return "", false, err
-				}
+			if ok {
 				entry.EntityListHash = entityListHash
 				changed = true
 			}
@@ -755,21 +729,6 @@ func (h *SmartHTTPHandler) rewriteTreeWithEntities(ctx context.Context, store *g
 		_ = h.db.SetGitTreeEntryModes(ctx, repoID, string(newTreeHash), modes)
 	}
 	return newTreeHash, true, nil
-}
-
-func entityKindToString(k entity.EntityKind) string {
-	switch k {
-	case entity.KindPreamble:
-		return "preamble"
-	case entity.KindImportBlock:
-		return "import"
-	case entity.KindDeclaration:
-		return "declaration"
-	case entity.KindInterstitial:
-		return "interstitial"
-	default:
-		return "unknown"
-	}
 }
 
 // --- conversion helpers ---

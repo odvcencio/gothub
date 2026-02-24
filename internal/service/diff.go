@@ -11,6 +11,7 @@ import (
 	"github.com/odvcencio/got/pkg/entity"
 	"github.com/odvcencio/got/pkg/object"
 	"github.com/odvcencio/gothub/internal/database"
+	"github.com/odvcencio/gothub/internal/entityutil"
 )
 
 // EntityInfo represents a single entity for API responses.
@@ -446,16 +447,9 @@ func entityListToResponse(el *entity.EntityList) *EntityListResponse {
 	}
 }
 
-var kindNames = map[entity.EntityKind]string{
-	entity.KindPreamble:     "preamble",
-	entity.KindImportBlock:  "import",
-	entity.KindDeclaration:  "declaration",
-	entity.KindInterstitial: "interstitial",
-}
-
 func entityToInfo(e *entity.Entity) EntityInfo {
 	return EntityInfo{
-		Kind:      kindNames[e.Kind],
+		Kind:      entityutil.KindName(e.Kind),
 		Name:      e.Name,
 		DeclKind:  e.DeclKind,
 		Receiver:  e.Receiver,

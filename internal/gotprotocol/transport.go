@@ -9,8 +9,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/odvcencio/got/pkg/entity"
 	"github.com/odvcencio/got/pkg/object"
+	"github.com/odvcencio/gothub/internal/entityutil"
 	"github.com/odvcencio/gothub/internal/gotstore"
 )
 
@@ -222,6 +222,7 @@ func (h *Handler) handlePushObjects(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type pushedObject struct {
+		Hash string `json:"hash,omitempty"`
 		Type string `json:"type"`
 		Data []byte `json:"data"`
 	}
@@ -257,6 +258,12 @@ func (h *Handler) handlePushObjects(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		hash := object.HashObject(objType, obj.Data)
+		if provided := strings.TrimSpace(obj.Hash); provided != "" {
+			if object.Hash(provided) != hash {
+				http.Error(w, fmt.Sprintf("object %d hash mismatch: computed %s, got %s", len(decoded), hash, provided), http.StatusBadRequest)
+				return
+			}
+		}
 		decoded = append(decoded, decodedPushObject{
 			objType: objType,
 			data:    obj.Data,
@@ -646,35 +653,11 @@ func rewriteTreeWithEntities(store *gotstore.RepoStore, treeHash object.Hash, pr
 				changed = true
 			}
 		} else if e.EntityListHash == "" {
-			blob, err := store.Objects.ReadBlob(e.BlobHash)
+			entityListHash, ok, err := entityutil.ExtractAndWriteEntityList(store.Objects, fullPath, e.BlobHash)
 			if err != nil {
 				return "", false, err
 			}
-			el, err := entity.Extract(fullPath, blob.Data)
-			if err == nil && len(el.Entities) > 0 {
-				entityRefs := make([]object.Hash, 0, len(el.Entities))
-				for _, ent := range el.Entities {
-					entHash, err := store.Objects.WriteEntity(&object.EntityObj{
-						Kind:     entityKindToString(ent.Kind),
-						Name:     ent.Name,
-						DeclKind: ent.DeclKind,
-						Receiver: ent.Receiver,
-						Body:     ent.Body,
-						BodyHash: object.Hash(ent.BodyHash),
-					})
-					if err != nil {
-						return "", false, err
-					}
-					entityRefs = append(entityRefs, entHash)
-				}
-				entityListHash, err := store.Objects.WriteEntityList(&object.EntityListObj{
-					Language:   el.Language,
-					Path:       fullPath,
-					EntityRefs: entityRefs,
-				})
-				if err != nil {
-					return "", false, err
-				}
+			if ok {
 				entry.EntityListHash = entityListHash
 				changed = true
 			}
@@ -689,21 +672,6 @@ func rewriteTreeWithEntities(store *gotstore.RepoStore, treeHash object.Hash, pr
 		return "", false, err
 	}
 	return newTreeHash, true, nil
-}
-
-func entityKindToString(k entity.EntityKind) string {
-	switch k {
-	case entity.KindPreamble:
-		return "preamble"
-	case entity.KindImportBlock:
-		return "import"
-	case entity.KindDeclaration:
-		return "declaration"
-	case entity.KindInterstitial:
-		return "interstitial"
-	default:
-		return "unknown"
-	}
 }
 
 // WalkObjects walks the object graph from a commit hash, calling fn for each

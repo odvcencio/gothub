@@ -56,6 +56,51 @@ func TestPushObjectsRejectsCommitWithMissingTree(t *testing.T) {
 	}
 }
 
+func TestPushObjectsRejectsProvidedHashMismatch(t *testing.T) {
+	store, err := gotstore.Open(filepath.Join(t.TempDir(), "repo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	h := NewHandler(func(owner, repo string) (*gotstore.RepoStore, error) { return store, nil }, nil, nil)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	blobData := object.MarshalBlob(&object.Blob{Data: []byte("hello\n")})
+	computed := object.HashObject(object.TypeBlob, blobData)
+
+	var body bytes.Buffer
+	if err := json.NewEncoder(&body).Encode(map[string]any{
+		"hash": strings.Repeat("a", 64),
+		"type": "blob",
+		"data": blobData,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/got/alice/repo/objects", &body)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var respBody bytes.Buffer
+	if _, err := respBody.ReadFrom(resp.Body); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for hash mismatch, got %d", resp.StatusCode)
+	}
+	if !strings.Contains(respBody.String(), "hash mismatch") {
+		t.Fatalf("expected hash mismatch error, got %q", respBody.String())
+	}
+	if store.Objects.Has(computed) {
+		t.Fatalf("mismatched object should not be persisted")
+	}
+}
+
 func TestUpdateRefsExtractsEntitiesForCommit(t *testing.T) {
 	store, err := gotstore.Open(filepath.Join(t.TempDir(), "repo"))
 	if err != nil {
