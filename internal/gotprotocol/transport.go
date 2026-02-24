@@ -422,11 +422,23 @@ func (h *Handler) authorizeRequest(w http.ResponseWriter, r *http.Request, write
 	if err == nil {
 		return true
 	}
+	if status == http.StatusNotFound && h.repoExists(owner, repo) {
+		status = http.StatusForbidden
+		err = errors.New(http.StatusText(http.StatusForbidden))
+	}
 	if status == http.StatusUnauthorized {
 		w.Header().Set("WWW-Authenticate", `Basic realm="gothub"`)
 	}
 	http.Error(w, err.Error(), status)
 	return false
+}
+
+func (h *Handler) repoExists(owner, repo string) bool {
+	if h.getStore == nil {
+		return false
+	}
+	store, err := h.getStore(owner, repo)
+	return err == nil && store != nil
 }
 
 func parseRefUpdates(w http.ResponseWriter, r *http.Request) ([]refUpdateItem, error) {

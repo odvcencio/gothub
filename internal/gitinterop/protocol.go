@@ -575,20 +575,20 @@ func (h *SmartHTTPHandler) handleUploadPack(w http.ResponseWriter, r *http.Reque
 			return haveSet[h]
 		})
 		if err != nil {
-			http.Error(w, fmt.Sprintf("invalid object graph: %v", err), http.StatusUnprocessableEntity)
+			h.sendUploadPackError(w, http.StatusUnprocessableEntity, fmt.Sprintf("invalid object graph: %v", err), useSideband)
 			return
 		}
 
 		for _, m := range missing {
 			objType, data, err := store.Objects.Read(m)
 			if err != nil {
-				http.Error(w, fmt.Sprintf("read object %s: %v", m, err), http.StatusInternalServerError)
+				h.sendUploadPackError(w, http.StatusUnprocessableEntity, fmt.Sprintf("read object %s: %v", m, err), useSideband)
 				return
 			}
 			gitType := gotTypeToPackType(objType)
 			gitData, err := convertGotToGitData(m, objType, data, store.Objects, r.Context(), h.db, repoID)
 			if err != nil {
-				http.Error(w, fmt.Sprintf("convert object %s to git: %v", m, err), http.StatusInternalServerError)
+				h.sendUploadPackError(w, http.StatusUnprocessableEntity, fmt.Sprintf("convert object %s to git: %v", m, err), useSideband)
 				return
 			}
 			packObjects = append(packObjects, PackfileObject{Type: gitType, Data: gitData})
@@ -599,7 +599,7 @@ func (h *SmartHTTPHandler) handleUploadPack(w http.ResponseWriter, r *http.Reque
 	if len(packObjects) > 0 {
 		packData, err = BuildPackfile(packObjects)
 		if err != nil {
-			http.Error(w, fmt.Sprintf("build packfile: %v", err), http.StatusInternalServerError)
+			h.sendUploadPackError(w, http.StatusInternalServerError, fmt.Sprintf("build packfile: %v", err), useSideband)
 			return
 		}
 	}
@@ -619,6 +619,18 @@ func (h *SmartHTTPHandler) handleUploadPack(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	w.Write(packData)
+}
+
+func (h *SmartHTTPHandler) sendUploadPackError(w http.ResponseWriter, status int, errMsg string, useSideband bool) {
+	w.Header().Set("Content-Type", "application/x-git-upload-pack-result")
+	w.WriteHeader(status)
+	if useSideband {
+		if err := writeSideband(w, 3, []byte(errMsg+"\n")); err == nil {
+			w.Write(pktFlush())
+			return
+		}
+	}
+	_, _ = w.Write(pktLine(fmt.Sprintf("ERR %s\n", errMsg)))
 }
 
 func (h *SmartHTTPHandler) sendReceivePackResult(w http.ResponseWriter, errMsg string, updates []refUpdate, refErrors map[string]string, useSideband bool) {

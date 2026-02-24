@@ -3,6 +3,7 @@ package gotprotocol
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -547,6 +548,59 @@ func TestUpdateRefsCASRejectsStaleOldHash(t *testing.T) {
 	}
 	if head != commitA {
 		t.Fatalf("expected heads/main to remain %s, got %s", commitA, head)
+	}
+}
+
+func TestAuthorizeRequestMapsMaskedNotFoundToForbidden(t *testing.T) {
+	store, err := gotstore.Open(filepath.Join(t.TempDir(), "repo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	h := NewHandler(
+		func(owner, repo string) (*gotstore.RepoStore, error) { return store, nil },
+		func(r *http.Request, owner, repo string, write bool) (int, error) {
+			return http.StatusNotFound, errors.New("repository not found")
+		},
+		nil,
+	)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/got/alice/repo/refs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected masked auth not-found to map to 403, got %d", resp.StatusCode)
+	}
+}
+
+func TestAuthorizeRequestKeepsNotFoundWhenRepoMissing(t *testing.T) {
+	h := NewHandler(
+		func(owner, repo string) (*gotstore.RepoStore, error) {
+			return nil, errors.New("repository not found")
+		},
+		func(r *http.Request, owner, repo string, write bool) (int, error) {
+			return http.StatusNotFound, errors.New("repository not found")
+		},
+		nil,
+	)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/got/alice/repo/refs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected true missing repo to remain 404, got %d", resp.StatusCode)
 	}
 }
 
