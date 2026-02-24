@@ -1,6 +1,7 @@
 # Platform Evolution: Fastest, Most Intelligent Code Awareness Platform
 
 **Date:** 2026-02-24
+**Revised:** 2026-02-24 (corrected against full codebase audit)
 **Status:** Approved
 **Scope:** Got (structural VCS engine) + GotHub (hosting platform)
 
@@ -10,25 +11,75 @@
 
 Transform Got + GotHub from a working prototype into the fastest, most intelligent code awareness platform — capable of serving solo developers, teams, and enterprises. Every phase delivers a complete, shippable product.
 
-## Current State
+---
 
-**Strengths:**
-- Entity lineage with stable IDs across commits (the crown jewel)
-- Structural three-way merge that eliminates trivial conflicts
-- Semantic versioning recommendations from structural change analysis
-- Entity-level ownership and merge gate policies
-- 205-language support via pure-Go tree-sitter
-- Git smart HTTP interop
+## Current State (Audited)
 
-**Weaknesses:**
-- One file per object, no compression, no delta encoding (100x storage penalty)
-- Synchronous entity extraction blocks pushes
-- In-memory-only cache, lost on restart
-- Naive O(n) merge base algorithm
-- Full tree re-parse on every code intelligence query
-- JSON wire protocol (50% bandwidth overhead)
-- No remotes, no pack files, no garbage collection in Got
-- Minimal frontend (no syntax highlighting, no real-time, no search)
+### Got — Structural VCS Engine
+
+**~11,500 LOC across 7 packages. 160+ tests. All passing.**
+
+**What works:**
+- Content-addressed object store (SHA-256, 2-char fan-out, atomic writes)
+- Entity extraction via pure-Go tree-sitter (205 grammars, tested: Go, Python, Rust, TypeScript, C, C++, Java, JavaScript)
+- Byte-for-byte reconstruction invariant (entity concatenation = original source)
+- Three-way structural merge: identity matching, anchor-based positioning, import set-union, diff3 fallback
+- Full CLI: init, add, status, commit, log, diff, branch, checkout, merge
+- Remote operations: clone, push, pull, fetch via Got protocol over HTTP
+- Batch object negotiation (wants/haves), graph closure guarantees
+- .gotignore support, config management, detached HEAD
+- Benchmarks for store, entity extraction, merge, diff3
+
+**What doesn't work / doesn't exist:**
+- No pack files — every object is a loose file (100x storage penalty at scale)
+- No compression — objects stored raw
+- No delta encoding — similar objects stored in full
+- No garbage collection — dead objects persist forever
+- No SSH transport — HTTP only
+- No rename detection, rebase, cherry-pick, stash, submodules, shallow clones
+- JSON wire protocol for Got-to-Got (50% bandwidth overhead vs binary)
+- No delta transfer — pushes send full objects, not diffs against known bases
+- Merge base uses naive two-queue BFS — O(n) in DAG depth
+
+### GotHub — Code Hosting Platform
+
+**~15,000 LOC backend + Preact/TypeScript frontend. Comprehensive API test suite.**
+
+**What works:**
+- Complete REST API: 70+ endpoints covering repos, PRs, issues, reviews, webhooks, notifications, orgs, code browsing, code intelligence, branch protection
+- Git smart HTTP protocol: git-receive-pack (push), git-upload-pack (fetch) with full Git↔Got object conversion
+- Got protocol: refs, objects, batch, push, with CAS ref updates
+- Entity extraction on push: tree rewriting to embed entity lists into Got trees
+- Entity lineage tracking: stable IDs assigned across commits, first/last seen tracking
+- Code intelligence via gts-suite: symbol search (query.ParseSelector), find references, call graph (xref.Build + Walk)
+- Persistent index storage: code intel indexes serialized as JSON blobs to object store, hash persisted in DB
+- In-memory LRU cache backed by persisted indexes (128 items, 15min TTL)
+- Proactive indexing: EnsureCommitIndexed called on push to pre-build indexes
+- Merge gates: required approvals, entity owner approval (.gotowners), lint pass, dead code detection, status checks
+- Semantic versioning recommendations from structural diff analysis
+- Webhook delivery with entity change tracking in payloads
+- Dual database: SQLite (WAL mode) + PostgreSQL, full schema with migrations
+- JWT auth with bcrypt passwords, SSH key management
+- Organizations with member roles, collaborator permissions
+- Rate limiting (10 req/sec per IP), CORS, request body limits (8MB)
+- Preact SPA with code browsing, PRs, issues, merge preview, entity diff views
+
+**What's broken / bottlenecked:**
+- **Push blocks on TWO synchronous operations:**
+  1. Entity extraction: `rewriteTreeWithEntities()` walks entire tree, calls `entity.Extract()` per file, writes entity objects, rewrites tree — all during git-receive-pack response
+  2. Code intel indexing: `EnsureCommitIndexed()` builds full gts-suite index (parses every file via `index.NewBuilder()`) during push callback
+- **Code intel index is monolithic:** entire index serialized/deserialized as single JSON blob (~MBs for large repos). No incremental updates — full rebuild per commit
+- **Symbol search is linear scan:** `SearchSymbols` iterates every symbol in every file in the index. No database-backed FTS or indexing
+- **FindReferences is linear scan:** same pattern — iterate all references in all files
+- **Call graph rebuilt on every query:** `xref.Build(idx)` constructs full call graph from scratch per request
+- **No background workers:** zero goroutines, channels, or job queues anywhere. Everything synchronous on request path
+- **Webhook delivery blocks request:** 5s timeout per webhook, delivered inline
+- **LRU eviction is O(n):** iterates all entries to find oldest on overflow
+- **No observability:** no metrics, no tracing, no profiling endpoints
+- **Frontend is basic:** no syntax highlighting, no real-time updates, no search
+- **No connection pool tuning:** PostgreSQL max 25 connections
+
+---
 
 ## Approach: Layered Cake
 
@@ -38,7 +89,7 @@ Four phases. Each delivers a complete vertical slice. No phase depends on "we'll
 
 ## Phase 1 — Fast & Smart Core
 
-**Goal:** Got becomes objectively faster than Git for common operations. GotHub stops choking on pushes. The foundation is production-grade.
+**Goal:** Got becomes objectively faster than Git for common operations. GotHub stops blocking on pushes. Foundation is production-grade with observability.
 
 ### 1.1 Git-Compatible Pack File Engine (Got)
 
@@ -63,197 +114,238 @@ Delta selection: sort objects by type+size, delta against nearest neighbor. Wind
 Got pack extension: optional entity index trailer appended after standard Git pack data. Maps `object_hash → [entity_stable_id, ...]`. Git clients ignore it. Got clients use it for O(1) entity lookups without unpacking.
 
 Object lifecycle:
-1. Loose objects written on commit (fast writes)
-2. Background `got gc` packs loose objects
+1. Loose objects written on commit (fast writes, existing behavior preserved)
+2. Background `got gc` packs loose objects into pack files
 3. Auto-pack threshold: 256 loose objects (configurable)
 4. Pack files are immutable — no concurrent mutation
 
 Delta chain depth limit: 50 (matches Git).
 
+Store integration: `Store.Read()` and `Store.Has()` check loose objects first, then pack files. Write path remains loose-only.
+
 New commands:
 - `got gc` — pack loose objects, prune unreachable
-- `got verify` — integrity check objects and packs
+- `got verify` — integrity check all objects (loose + packed)
 
 **Expected impact:**
 - 10-50x storage reduction
-- 10-100x faster sequential reads
+- 10-100x faster sequential reads (single file seek vs N filesystem lookups)
 - 1M+ objects feasible
 
 ### 1.2 Async Indexing Pipeline (GotHub)
 
-**Problem:** Entity extraction and lineage indexing block the push response.
+**Problem:** Push blocks on two synchronous operations: entity extraction (tree rewriting) and code intel indexing (full gts-suite parse of every file). Both happen during the HTTP response to git-receive-pack / Got ref update.
 
-**Design:**
+**Current push path:**
+```
+git push → receive packfile → convert objects → persist hash mappings
+→ extractEntitiesForCommits() [BLOCKS: walks tree, entity.Extract per file]
+→ lineageSvc.IndexCommit() [BLOCKS: walks commit ancestry]
+→ codeIntelSvc.EnsureCommitIndexed() [BLOCKS: parses every file via gts-suite]
+→ update refs → respond to client
+```
 
-Push path (fast):
-1. Receive objects → write to store
-2. Update refs (CAS)
-3. Enqueue indexing job
-4. Return success to client immediately
+**New push path:**
+```
+git push → receive packfile → convert objects → persist hash mappings
+→ update refs → enqueue indexing job → respond to client [FAST]
+
+[Background worker]:
+→ extract entities for changed files only (diff against parent)
+→ rewrite tree with entity lists
+→ update entity lineage
+→ build incremental code intel index
+→ mark job complete
+```
 
 Background indexing worker:
 - Goroutine pool (configurable, default 4 workers)
-- Job queue backed by database: `indexing_jobs(repo_id, commit_hash, status, created_at, started_at, completed_at)`
-- Each job: extract entities for changed files only (diff against parent), update lineage, update code intelligence index
-- Incremental: only changed files, not full tree
+- Job queue backed by database: `indexing_jobs(repo_id, commit_hash, job_type, status, error, created_at, started_at, completed_at)`
+- Job types: entity_extraction, lineage_indexing, codeintel_indexing (sequenced per commit)
+- Incremental: diff against parent commit, only process changed files
 - Idempotent: safe to retry on failure
+- Graceful shutdown: finish in-progress jobs on SIGINT
 
 Index status API:
-- `GET /api/repos/{owner}/{repo}/index/status` — indexing state per commit
+- `GET /api/v1/repos/{owner}/{repo}/index/status` — indexing state per commit
 - Frontend shows "indexing..." badge until complete
-- PRs show graceful degradation while indexing
+- PRs and code intel endpoints return partial results with `"indexed": false` flag while indexing
 
 **Expected impact:**
-- Push latency: seconds → milliseconds
-- Indexing throughput: 10-50x (incremental)
-- Concurrent pushes unblocked
+- Push latency: seconds → milliseconds (object write + ref update only)
+- Indexing throughput: 10-50x (incremental, not full tree)
+- Server handles concurrent pushes without serialization
 
-### 1.3 Full Code Intelligence Engine (GotHub)
+### 1.3 Code Intelligence Upgrades (GotHub)
 
-**Problem:** Every code intel request rebuilds the full index from scratch.
+**Problem:** Code intel indexes are monolithic JSON blobs. Symbol search and find-references do linear scans. Call graph rebuilt from scratch per query. No FTS. No incremental updates.
 
-**Layer 1 — Persistent Entity Index:**
-- Database table: `entity_index(repo_id, commit_hash, file_path, entity_hash, stable_id, kind, name, start_line, end_line)`
-- Populated by async indexing pipeline
-- Code intelligence reads from table, not re-parses
-- Composite indexes on `(repo_id, commit_hash)` and `(repo_id, stable_id)`
+**What exists today (preserve and build on):**
+- `CodeIntelService` with LRU cache (128 items, 15min TTL)
+- `BuildIndex()` → checks LRU → checks persisted index → builds from store
+- `persistIndex()` / `loadPersistedIndex()` — serialize full `model.Index` as JSON to object store
+- `SearchSymbols()` — query.ParseSelector + linear scan over idx.Files[].Symbols[]
+- `FindReferences()` — linear scan over idx.Files[].References[]
+- `GetCallGraph()` — xref.Build(idx) + graph.Walk()
+
+**Layer 1 — Persistent Entity Index (database-backed):**
+- New table: `entity_index(repo_id, commit_hash, file_path, entity_hash, stable_id, kind, name, signature, doc_comment, start_line, end_line)`
+- Populated by async indexing pipeline from Task 1.2
+- Composite indexes on `(repo_id, commit_hash)`, `(repo_id, stable_id)`, `(repo_id, commit_hash, kind)`
+- Incremental: new commit copies unchanged entries from parent, only re-indexes changed files
+- `CodeIntelService.SearchSymbols()` queries this table instead of linear scan
 
 **Layer 2 — Full-Text Symbol Search:**
 - SQLite: FTS5 virtual table over entity names, signatures, doc comments
 - PostgreSQL: tsvector/tsquery with GIN index
-- Fuzzy matching, prefix search, ranked results
-- Indexes: function names, type names, method signatures, parameter types, doc comments
-- API: `GET /api/repos/{owner}/{repo}/search?q=ProcessOrder&type=function&lang=go`
+- Supports prefix search, fuzzy matching, ranked results
+- Filter by kind (function/type/method), language, file path
+- New API: `GET /api/v1/repos/{owner}/{repo}/search?q=ProcessOrder&kind=function&lang=go`
 
-**Layer 3 — Bloom Filters:**
+**Layer 3 — Bloom Filters for Fast Negative Lookups:**
 - Per-commit bloom filter (~1KB per 1000 entities, <1% false positive rate)
-- Stored as binary blob: `commit_bloom(repo_id, commit_hash, bloom_data)`
+- Stored in `commit_bloom(repo_id, commit_hash, bloom_data)` table
 - O(1) "does commit X contain entity Y?" without DB round-trip
-- Short-circuits: lineage walks, merge base entity resolution, PR impact analysis
-- Hierarchical: repo-level bloom aggregates all commit blooms
+- Short-circuits lineage walks, merge base entity resolution, impact analysis
+- Built during async indexing
 
-**Layer 4 — Cross-Reference Graph:**
-- Persistent `xref(repo_id, commit_hash, source_entity_id, target_entity_id, kind)` where kind = call, type_ref, import
-- Precomputed call graph per commit (adjacency list as JSONB/JSON)
-- "Find all callers of X" = single indexed query
-- "Impact analysis: if I change X, what breaks?" = graph traversal
-- Transitive closure cache for hot paths
+**Layer 4 — Persistent Cross-Reference Graph:**
+- New table: `xref(repo_id, commit_hash, source_entity_id, target_entity_id, kind, source_file, source_line)`
+- Kinds: call, type_ref, import
+- Populated during async indexing (gts-suite already extracts references)
+- `FindReferences()` becomes a single indexed query instead of linear scan
+- `GetCallGraph()` reads from xref table instead of rebuilding from scratch
+- Impact analysis: "if I change X, what breaks?" = BFS over xref graph
+- New API: `GET /api/v1/repos/{owner}/{repo}/impact/{entity_id}?ref=main&depth=3`
 
 **Layer 5 — Semantic Diff Intelligence:**
-- Classify entity changes: signature, body, doc, visibility
-- Detect breaking changes (public signature modified, type changed, parameter removed)
-- Feed into semantic versioning recommendation (backed by real indexed data)
-- API: `GET /api/repos/{owner}/{repo}/diff/{base}...{head}/semantic`
-
-**Incremental updates:**
-- New commit → diff against parent → re-extract only changed files
-- Copy unchanged entity records from parent (pointer, not duplication)
-- Cost: O(changed files) not O(total files)
-
-**In-memory cache upgrade:**
-- Keep LRU, back with persistent store
-- Cache miss → database read (fast) not full re-parse (slow)
-- Warm on startup from most recent commits of active repos
+- Classify entity changes: signature change, body change, doc change, visibility change
+- Detect breaking changes: public signature modified, parameter removed, return type changed
+- Feed into existing `RecommendSemver()` endpoint (currently works, but backed by real indexed data instead of on-the-fly parsing)
+- New API: `GET /api/v1/repos/{owner}/{repo}/diff/{base}...{head}/semantic` — structured change classification
 
 ### 1.4 Merge Performance (Got + GotHub)
 
-**Problem:** Naive O(n) BFS for merge base. No caching. Full tree re-flatten on every preview.
+**Problem:** Merge base uses naive two-queue BFS (O(n) in DAG depth). No caching. Merge preview recomputes from scratch every time.
 
-**LCA with preprocessing:**
-- Compute generation numbers (topological depth) on push
-- Store: `commit_meta(repo_id, commit_hash, generation, timestamp)`
-- Prune BFS: never explore commits with generation > min(gen_a, gen_b)
-- O(n) → O(k) where k = branch distance, not history depth
+**LCA with generation number pruning:**
+- Compute generation numbers (topological depth) during async indexing
+- Store in `commit_meta(repo_id, commit_hash, generation, timestamp)` table
+- Prune BFS: skip commits with generation > min(gen_a, gen_b)
+- O(n) → O(k) where k = branch distance, not total history depth
 
 **Merge base cache:**
-- `merge_base_cache(repo_id, commit_a, commit_b, base_hash)`
+- `merge_base_cache(repo_id, commit_a, commit_b, base_hash, computed_at)` table
+- Normalize key order (lexicographic sort of commit hashes) for consistent cache hits
 - Populated on first computation, invalidated when refs update
 
-**Incremental merge preview:**
-- First request: compute full structural merge, cache result
-- Subsequent: if neither branch moved, return cached
-- If one moved: recompute only changed files
-- Store: `merge_preview_cache(pr_id, src_hash, tgt_hash, result_json, computed_at)`
+**Merge preview cache:**
+- `merge_preview_cache(pr_id, src_hash, tgt_hash, result_json, computed_at)` table
+- If neither branch moved since last computation, return cached result
+- If one branch moved, recompute only files that changed since cached preview
 
 **Parallel file merging:**
-- Three-way merge per file is embarrassingly parallel
-- Goroutine pool, bounded by worker count
-- Entity data read from persistent index (Section 1.3)
+- Three-way merge of individual files is embarrassingly parallel
+- Bounded goroutine pool (default: runtime.NumCPU())
+- Entity data read from persistent entity_index (Layer 1) when available
 
 ### 1.5 Observability & Benchmarking
 
 **OpenTelemetry Tracing:**
-- Instrument hot paths: push → object write → ref update → index enqueue
-- Code intelligence: query → bloom check → cache → DB → response
+- Instrument hot paths: push receive → object write → ref update → job enqueue
+- Background worker: job claim → entity extract → lineage index → codeintel build
+- Code intelligence: query → cache check → DB query → response
 - Merge: base find → tree diff → entity merge → reconstruct
-- Export: structured JSON (stdout), configurable OTLP endpoint (Jaeger/Grafana Tempo)
-- Every span: repo_id, commit_hash, operation, duration, object_count
+- Export: structured JSON (stdout default), configurable OTLP endpoint (Jaeger/Grafana Tempo)
+- Every span carries: repo_id, commit_hash, operation, duration_ms, object_count
 
 **Profiling (pprof):**
-- `/debug/pprof/` in dev/admin mode
+- `/debug/pprof/` endpoints enabled in dev/admin mode
 - CPU, heap, goroutine, mutex profiles
 - Continuous profiling integration point (Pyroscope-compatible)
 
 **Prometheus Metrics:**
-- `got_push_duration_seconds` (histogram)
-- `got_index_duration_seconds` (histogram, by phase)
-- `got_index_queue_depth` (gauge)
-- `got_pack_objects_total` (counter, by type)
-- `got_cache_hit_ratio` (gauge, by cache_name)
-- `got_merge_base_duration_seconds` (histogram)
-- `got_entity_parse_duration_seconds` (histogram, by language)
-- `got_xref_query_duration_seconds` (histogram, by query_type)
-- `/metrics` endpoint, Prometheus scrape format
+- `gothub_push_duration_seconds` (histogram, labels: protocol=git|got)
+- `gothub_index_duration_seconds` (histogram, labels: phase=entity|lineage|codeintel)
+- `gothub_index_queue_depth` (gauge)
+- `gothub_index_queue_oldest_seconds` (gauge)
+- `gothub_pack_objects_total` (counter, labels: type)
+- `gothub_cache_hit_ratio` (gauge, labels: cache=codeintel|merge_base|merge_preview)
+- `gothub_merge_base_duration_seconds` (histogram)
+- `gothub_entity_parse_duration_seconds` (histogram, labels: language)
+- `gothub_xref_query_duration_seconds` (histogram, labels: query_type)
+- `gothub_symbol_search_duration_seconds` (histogram)
+- `/metrics` endpoint, standard Prometheus scrape format
 
-**Benchmark Suites (Got):**
-- `BenchmarkPackWrite` — pack N objects, throughput (MB/s)
-- `BenchmarkPackRead` — random access from pack, latency
-- `BenchmarkDeltaCompress` — delta encode similar objects, ratio
-- `BenchmarkEntityExtract` — parse by language, tokens/sec
-- `BenchmarkMergeBase` — find base at depths 10, 100, 1K, 10K
-- `BenchmarkThreeWayMerge` — merge files of 100, 1K, 10K lines
-- `BenchmarkBloomFilter` — lookup throughput at various FPR
+**Benchmark Suites (Got — new benchmarks to ADD, existing preserved):**
+- Existing: store write/read, entity extraction per language, merge, diff3
+- New: `BenchmarkPackWrite`, `BenchmarkPackRead`, `BenchmarkDeltaCompress`, `BenchmarkDeltaApply`, `BenchmarkGC`, `BenchmarkMergeBase` at various DAG depths
 
-**Benchmark Suites (GotHub):**
-- `BenchmarkPushReceive` — end-to-end push, N objects
+**Benchmark Suites (GotHub — new):**
+- `BenchmarkPushReceive` — end-to-end push with N objects
 - `BenchmarkCodeIntelQuery` — symbol search at various repo sizes
-- `BenchmarkMergePreview` — PR preview cold + warm
-- `BenchmarkEntityLineage` — lineage walk at various depths
+- `BenchmarkMergePreview` — PR preview cold + warm cache
+- `BenchmarkEntityLineageWalk` — lineage walk at various depths
+- `BenchmarkBloomFilterLookup` — throughput at various FPR
+- `BenchmarkXRefQuery` — find references at various graph sizes
 
 **Health endpoint:**
-- `/admin/health` — queue depth, cache stats, active workers, pack stats (JSON)
+- `GET /admin/health` — JSON: queue depth, worker status, cache stats, pack stats, DB pool stats
 
 ---
 
-## Phase 2 — Connected
+## Phase 2 — Protocol & Ecosystem
 
-**Goal:** Got becomes usable in real workflows. Adoption path is clear.
+**Goal:** Got's network protocol becomes production-grade. IDE integration makes adoption seamless.
+
+**What already exists (preserve):**
+- `pkg/remote/`: Client with ListRefs, BatchObjects, GetObject, PushObjects, UpdateRefs
+- FetchIntoStore with multi-round batch negotiation and graph closure
+- CollectObjectsForPush with DFS reachability
+- Clone, pull, push, fetch CLI commands (all working)
+- Auth via GOT_TOKEN (Bearer) or GOT_USERNAME/GOT_PASSWORD (Basic)
+- Endpoint parsing for various URL formats
+
+**What's missing / needs upgrade:**
 
 | Component | Description |
 |-----------|-------------|
-| Remote protocol | `got clone`, `got push`, `got pull`, `got fetch` via Git-compatible smart HTTP + Got-native binary protocol |
-| Binary wire protocol | Replace JSON with protobuf/CBOR for Got-to-Got. 2-5x bandwidth reduction |
-| Delta transfer | Only send objects the other side lacks. Have/want negotiation |
-| LSP server | VS Code/Neovim — go-to-definition, find-references, rename, powered by entity index |
-| CI/CD hooks | First-class webhook events. Status check API for merge gates |
-| `got import` | Import existing Git repos with full history conversion, entity extraction, index build |
+| Delta transfer | Currently sends full objects. Add delta compression over the wire — only send diffs against objects the other side has. Massive bandwidth reduction for incremental pushes. |
+| Binary wire protocol | Replace JSON transport in Got protocol with protobuf or CBOR. 2-5x bandwidth reduction for metadata. |
+| Pack file transfer | Send pack files instead of individual objects for clone/fetch. Single HTTP response with streamed pack data. |
+| SSH transport | Add SSH-based push/pull alongside HTTP. Key-based auth using existing SSH key management in GotHub. |
+| LSP server | Language Server Protocol for VS Code/Neovim: go-to-definition, find-references, rename, hover — powered by entity index and xref graph from Phase 1. |
+| `got import` | Import existing Git repos: `got import https://github.com/org/repo` — converts history, extracts entities, builds index. |
+| CI/CD integration | First-class webhook events for CI systems. Status check reporting API (already exists as PRCheckRun, but needs CI-facing ergonomics). |
 
 ---
 
 ## Phase 3 — Intelligent Platform
 
-**Goal:** The intelligence showcase. The features that don't exist anywhere else.
+**Goal:** The intelligence showcase. Features that don't exist anywhere else.
+
+**What already exists (preserve and extend):**
+- Symbol search via gts-suite query selectors
+- Find references
+- Call graph building and traversal (xref.Build + Walk)
+- Entity-level diffs with structural change detection
+- Semantic versioning recommendations
+- Dead code detection in merge gates
+- Entity change tracking in webhook payloads
+- Entity-anchored PR comments (FilePath + EntityKey + EntityStableID)
+
+**What's new:**
 
 | Component | Description |
 |-----------|-------------|
-| Semantic code search | Cross-repo symbol search, natural language queries, "find all implementations of interface X" |
-| Call graph visualization | Interactive graph UI — click function, see callers/callees, impact radius |
-| AI-assisted review | LLM-powered PR summaries, breaking change explanations, suggested reviewers |
-| Real-time collaboration | WebSocket for live PR reviews, typing indicators, live diff updates |
-| Entity timeline | Visual history of a function/type across commits — who, when, why |
-| Dead code detection | Automated via xref graph (foundation in merge gates) |
-| Dependency graph | Package/module level visualization, circular dependency detection |
-| Rich diff UI | Side-by-side entity-aware diffs, syntax highlighting, entity-anchored comments |
+| Semantic code search | Cross-repo symbol search, natural language queries ("find all implementations of interface X"), powered by FTS from Phase 1 + cross-repo index federation |
+| Call graph visualization | Interactive graph UI — click a function, see callers/callees/impact radius. Uses xref graph from Phase 1. |
+| AI-assisted review | LLM-powered PR summaries, "this change breaks the contract of X because...", suggested reviewers based on entity ownership |
+| Real-time collaboration | WebSocket for live PR reviews, typing indicators, live diff updates, notification badges |
+| Entity timeline | Visual history of a single function/type across commits — who changed it, when, why. Uses entity lineage (already tracked). |
+| Dependency graph | Package/module level visualization, circular dependency detection, impact radius |
+| Rich diff UI | Side-by-side entity-aware diffs with syntax highlighting, inline comments anchored to entities (model exists, needs UI) |
+| Code health dashboard | Per-repo metrics: dead code ratio, API stability score, test coverage by entity, churn hotspots |
 
 ---
 
@@ -261,28 +353,36 @@ Index status API:
 
 **Goal:** Enterprise buyer's checklist. The monetization path.
 
+**What already exists (preserve):**
+- Organizations with member roles (owner/member)
+- Collaborator permissions (admin/write/read)
+- Branch protection rules with multiple policy types
+- Webhook system with delivery tracking and redelivery
+
+**What's new:**
+
 | Component | Description |
 |-----------|-------------|
-| SSO/SAML | OAuth2, SAML 2.0, OIDC |
-| Audit logs | Immutable log of all actions |
-| RBAC | Custom roles, org-level and repo-level |
-| Compliance policies | Configurable merge requirements, security review gates |
-| Horizontal scaling | Stateless API + shared storage (S3/GCS) + distributed index |
+| SSO/SAML | OAuth2, SAML 2.0, OIDC for enterprise identity providers |
+| Audit logs | Immutable log of all actions: pushes, merges, permission changes, policy overrides |
+| RBAC | Custom roles beyond admin/write/read, org-level and repo-level inheritance |
+| Compliance policies | "All public API changes require security review", "No merge without 2 CODEOWNERS approvals" (extend existing merge gates) |
+| Horizontal scaling | Stateless API servers + shared object storage (S3/GCS for packs) + distributed index |
 | On-prem deployment | Helm chart, Terraform module, air-gapped install |
 | Backup/restore | Point-in-time recovery, cross-region replication |
-| Admin console | Org management, usage analytics, health monitoring |
+| Admin console | Org management, usage analytics, health monitoring, license management |
 
 ---
 
 ## Success Metrics
 
-| Metric | Target |
-|--------|--------|
-| Push latency (10K file repo) | < 200ms (async indexing) |
-| Clone (1GB repo, Got-to-Got) | < 30s (pack + zstd + delta) |
-| Symbol search (100K entities) | < 50ms |
-| Merge base (10K commit depth) | < 10ms (generation numbers) |
-| Merge preview (cached) | < 100ms |
-| Entity extraction (1K files) | < 2s (incremental: < 100ms) |
-| Storage vs Git | Within 1.2x (pack compat) |
-| Network transfer vs Git | Within 1.5x (Got-native: 0.7x with zstd) |
+| Metric | Current (estimated) | Phase 1 Target |
+|--------|-------------------|----------------|
+| Push latency (10K file repo) | 5-30s (sync indexing) | < 200ms (async) |
+| Symbol search (100K entities) | 500ms+ (linear scan) | < 50ms (FTS + DB index) |
+| Find references | 500ms+ (linear scan) | < 50ms (xref table query) |
+| Call graph query | 2s+ (rebuild from scratch) | < 200ms (persistent xref) |
+| Merge base (10K commit depth) | O(n) seconds | < 10ms (generation pruning + cache) |
+| Merge preview (cached) | Full recompute | < 100ms |
+| Storage efficiency | 1 file per object (1x) | 10-50x reduction (pack + delta) |
+| Clone (1GB repo, Got-to-Got) | Minutes (individual objects) | < 30s (pack transfer + zstd) |
