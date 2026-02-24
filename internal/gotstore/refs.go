@@ -33,7 +33,25 @@ func (r *Refs) Set(name string, h object.Hash) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(path, []byte(string(h)+"\n"), 0o644)
+	lockPath := path + ".lock"
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		return fmt.Errorf("acquire ref lock %s: %w", lockPath, err)
+	}
+	if _, err := f.WriteString(string(h) + "\n"); err != nil {
+		f.Close()
+		os.Remove(lockPath)
+		return fmt.Errorf("write ref lock %s: %w", lockPath, err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(lockPath)
+		return fmt.Errorf("close ref lock %s: %w", lockPath, err)
+	}
+	if err := os.Rename(lockPath, path); err != nil {
+		os.Remove(lockPath)
+		return fmt.Errorf("rename ref lock %s: %w", lockPath, err)
+	}
+	return nil
 }
 
 // Delete removes a reference.

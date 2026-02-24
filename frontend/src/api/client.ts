@@ -35,6 +35,17 @@ export const register = (username: string, email: string, password: string) =>
 export const login = (username: string, password: string) =>
   request<{ token: string; user: any }>('POST', '/auth/login', { username, password });
 export const getUser = () => request<any>('GET', '/user');
+export const listNotifications = (unread?: boolean, page?: number, perPage?: number) => {
+  const query = new URLSearchParams();
+  if (unread) query.set('unread', 'true');
+  if (page && page > 0) query.set('page', String(page));
+  if (perPage && perPage > 0) query.set('per_page', String(perPage));
+  const suffix = query.toString();
+  return request<any[]>('GET', `/notifications${suffix ? '?' + suffix : ''}`);
+};
+export const getUnreadNotificationsCount = () => request<{ count: number }>('GET', '/notifications/unread-count');
+export const markNotificationRead = (id: number) => request<void>('POST', `/notifications/${id}/read`);
+export const markAllNotificationsRead = () => request<void>('POST', '/notifications/read-all');
 
 // Repos
 export const createRepo = (name: string, description: string, isPrivate: boolean) =>

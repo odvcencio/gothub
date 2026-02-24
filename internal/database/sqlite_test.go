@@ -2,7 +2,9 @@ package database
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -210,6 +212,61 @@ func TestSQLiteCreatePullRequestAssignsUniqueNumbersConcurrently(t *testing.T) {
 		if !seen[i] {
 			t.Fatalf("missing PR number %d", i)
 		}
+	}
+}
+
+func TestSQLiteSetHashMappingRemapsGitHash(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	user := &models.User{Username: "alice", Email: "alice@example.com", PasswordHash: "x"}
+	if err := db.CreateUser(ctx, user); err != nil {
+		t.Fatal(err)
+	}
+	repo := &models.Repository{
+		OwnerUserID:   &user.ID,
+		Name:          "repo",
+		DefaultBranch: "main",
+		StoragePath:   "pending",
+	}
+	if err := db.CreateRepository(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+
+	gitHash := strings.Repeat("a", 40)
+	first := &models.HashMapping{
+		RepoID: repo.ID, GitHash: gitHash, GotHash: strings.Repeat("b", 64), ObjectType: "commit",
+	}
+	if err := db.SetHashMapping(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+
+	second := &models.HashMapping{
+		RepoID: repo.ID, GitHash: gitHash, GotHash: strings.Repeat("c", 64), ObjectType: "commit",
+	}
+	if err := db.SetHashMapping(ctx, second); err != nil {
+		t.Fatal(err)
+	}
+
+	gotHash, err := db.GetGotHash(ctx, repo.ID, gitHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotHash != second.GotHash {
+		t.Fatalf("expected git hash to map to latest got hash %q, got %q", second.GotHash, gotHash)
+	}
+
+	if _, err := db.GetGitHash(ctx, repo.ID, first.GotHash); err != sql.ErrNoRows {
+		t.Fatalf("expected old got hash mapping to be removed, got err=%v", err)
 	}
 }
 

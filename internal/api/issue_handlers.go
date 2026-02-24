@@ -35,6 +35,7 @@ func (s *Server) handleCreateIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	issue.AuthorName = claims.Username
+	_ = s.notifySvc.NotifyIssueOpened(r.Context(), repo, issue, claims.UserID)
 
 	go func(repoID int64, createdIssueID int, issueTitle string, issueBody string) {
 		_ = s.webhookSvc.EmitIssueEvent(context.Background(), repoID, "opened", createdIssueID, issueTitle, issueBody, "open")
@@ -169,6 +170,7 @@ func (s *Server) handleCreateIssueComment(w http.ResponseWriter, r *http.Request
 		return
 	}
 	comment.AuthorName = claims.Username
+	_ = s.notifySvc.NotifyIssueComment(r.Context(), repo, issue, comment, claims.UserID)
 	jsonResponse(w, http.StatusCreated, comment)
 }
 

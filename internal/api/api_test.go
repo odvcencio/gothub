@@ -3,6 +3,7 @@ package api_test
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ import (
 	"github.com/odvcencio/gothub/internal/api"
 	"github.com/odvcencio/gothub/internal/auth"
 	"github.com/odvcencio/gothub/internal/database"
+	"github.com/odvcencio/gothub/internal/gitinterop"
 	"github.com/odvcencio/gothub/internal/service"
 )
 
@@ -868,6 +870,88 @@ func TestReceivePackReportsActualRefStatus(t *testing.T) {
 	}
 }
 
+func TestGitReceivePackPersistsEntityListHash(t *testing.T) {
+	server, _ := setupTestServer(t)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	token := registerAndGetToken(t, ts.URL, "owner")
+	createRepo(t, ts.URL, token, "repo", false)
+
+	blobData := []byte("package main\n\nfunc ProcessOrder() int { return 1 }\n")
+	blobHash := gitinterop.GitHashBytes(gitinterop.GitTypeBlob, blobData)
+
+	var treeBuf bytes.Buffer
+	fmt.Fprintf(&treeBuf, "100644 main.go\x00")
+	blobRaw, err := hex.DecodeString(string(blobHash))
+	if err != nil {
+		t.Fatal(err)
+	}
+	treeBuf.Write(blobRaw)
+	treeData := treeBuf.Bytes()
+	treeHash := gitinterop.GitHashBytes(gitinterop.GitTypeTree, treeData)
+
+	commitData := []byte(fmt.Sprintf(
+		"tree %s\nauthor Owner <owner@example.com> 1700000000 +0000\ncommitter Owner <owner@example.com> 1700000000 +0000\n\ninitial\n",
+		treeHash,
+	))
+	commitHash := gitinterop.GitHashBytes(gitinterop.GitTypeCommit, commitData)
+
+	packData, err := gitinterop.BuildPackfile([]gitinterop.PackfileObject{
+		{Type: gitinterop.OBJ_BLOB, Data: blobData},
+		{Type: gitinterop.OBJ_TREE, Data: treeData},
+		{Type: gitinterop.OBJ_COMMIT, Data: commitData},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	updateLine := fmt.Sprintf("%s %s refs/heads/main\x00report-status\n", strings.Repeat("0", 40), commitHash)
+	payload := append(pktLineForTest(updateLine), pktFlushForTest()...)
+	payload = append(payload, packData...)
+
+	req, _ := http.NewRequest("POST", ts.URL+"/git/owner/repo/git-receive-pack", bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/x-git-receive-pack-request")
+	req.SetBasicAuth("owner", "secret123")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("git receive-pack: expected 200, got %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "ok refs/heads/main\n") {
+		t.Fatalf("expected ok status for refs/heads/main, got body %q", string(body))
+	}
+
+	resp, err = http.Get(ts.URL + "/api/v1/repos/owner/repo/tree/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("list tree: expected 200, got %d", resp.StatusCode)
+	}
+	var entries []struct {
+		Name           string `json:"name"`
+		EntityListHash string `json:"entity_list_hash"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&entries); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if len(entries) != 1 || entries[0].Name != "main.go" {
+		t.Fatalf("expected single main.go entry, got %+v", entries)
+	}
+	if entries[0].EntityListHash == "" {
+		t.Fatalf("expected persisted entity_list_hash on main.go, got %+v", entries[0])
+	}
+}
+
 func TestMergeBlockedByBranchProtectionApprovalRequirement(t *testing.T) {
 	server, _ := setupTestServer(t)
 	ts := httptest.NewServer(server)
@@ -1232,6 +1316,149 @@ func TestWebhookPingRetriesAndRedelivery(t *testing.T) {
 	resp.Body.Close()
 	if len(deliveries) != 4 {
 		t.Fatalf("expected 4 delivery rows after redelivery, got %d", len(deliveries))
+	}
+}
+
+func TestNotificationsLifecycle(t *testing.T) {
+	server, _ := setupTestServer(t)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	aliceToken := registerAndGetToken(t, ts.URL, "alice")
+	bobToken := registerAndGetToken(t, ts.URL, "bob")
+	createRepo(t, ts.URL, aliceToken, "repo", false)
+
+	// Give bob write access so he can open PRs/issues.
+	addCollabBody := `{"username":"bob","role":"write"}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/repos/alice/repo/collaborators", bytes.NewBufferString(addCollabBody))
+	req.Header.Set("Authorization", "Bearer "+aliceToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("add collaborator: expected 201, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Bob opens PR -> Alice gets notification.
+	createPRReq := `{"title":"PR from bob","source_branch":"feature","target_branch":"main"}`
+	req, _ = http.NewRequest("POST", ts.URL+"/api/v1/repos/alice/repo/pulls", bytes.NewBufferString(createPRReq))
+	req.Header.Set("Authorization", "Bearer "+bobToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create PR: expected 201, got %d", resp.StatusCode)
+	}
+	var prResp struct {
+		Number int `json:"number"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&prResp); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	req, _ = http.NewRequest("GET", ts.URL+"/api/v1/notifications/unread-count", nil)
+	req.Header.Set("Authorization", "Bearer "+aliceToken)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("unread count: expected 200, got %d", resp.StatusCode)
+	}
+	var unreadCount struct {
+		Count int `json:"count"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&unreadCount); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if unreadCount.Count != 1 {
+		t.Fatalf("expected 1 unread notification for alice, got %d", unreadCount.Count)
+	}
+
+	req, _ = http.NewRequest("GET", ts.URL+"/api/v1/notifications?unread=true", nil)
+	req.Header.Set("Authorization", "Bearer "+aliceToken)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("list notifications: expected 200, got %d", resp.StatusCode)
+	}
+	var notifications []struct {
+		ID    int64  `json:"id"`
+		Type  string `json:"type"`
+		Title string `json:"title"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&notifications); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if len(notifications) != 1 {
+		t.Fatalf("expected 1 unread notification, got %d", len(notifications))
+	}
+	if notifications[0].Type != "pull_request.opened" {
+		t.Fatalf("unexpected notification type %q", notifications[0].Type)
+	}
+
+	// Mark one as read.
+	req, _ = http.NewRequest("POST", fmt.Sprintf("%s/api/v1/notifications/%d/read", ts.URL, notifications[0].ID), nil)
+	req.Header.Set("Authorization", "Bearer "+aliceToken)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("mark notification read: expected 204, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	req, _ = http.NewRequest("GET", ts.URL+"/api/v1/notifications/unread-count", nil)
+	req.Header.Set("Authorization", "Bearer "+aliceToken)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&unreadCount); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if unreadCount.Count != 0 {
+		t.Fatalf("expected 0 unread notifications after mark read, got %d", unreadCount.Count)
+	}
+
+	// Alice comments on bob's PR -> Bob gets notified.
+	commentReq := `{"body":"Looks good"}`
+	req, _ = http.NewRequest("POST", fmt.Sprintf("%s/api/v1/repos/alice/repo/pulls/%d/comments", ts.URL, prResp.Number), bytes.NewBufferString(commentReq))
+	req.Header.Set("Authorization", "Bearer "+aliceToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create PR comment: expected 201, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	req, _ = http.NewRequest("GET", ts.URL+"/api/v1/notifications/unread-count", nil)
+	req.Header.Set("Authorization", "Bearer "+bobToken)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&unreadCount); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if unreadCount.Count != 1 {
+		t.Fatalf("expected 1 unread notification for bob, got %d", unreadCount.Count)
 	}
 }
 

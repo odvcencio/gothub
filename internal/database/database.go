@@ -76,6 +76,13 @@ type DB interface {
 	CreateIssueComment(ctx context.Context, comment *models.IssueComment) error
 	ListIssueComments(ctx context.Context, issueID int64) ([]models.IssueComment, error)
 
+	// Notifications
+	CreateNotification(ctx context.Context, n *models.Notification) error
+	ListNotifications(ctx context.Context, userID int64, unreadOnly bool) ([]models.Notification, error)
+	CountUnreadNotifications(ctx context.Context, userID int64) (int, error)
+	MarkNotificationRead(ctx context.Context, id, userID int64) error
+	MarkAllNotificationsRead(ctx context.Context, userID int64) error
+
 	// Webhooks
 	CreateWebhook(ctx context.Context, hook *models.Webhook) error
 	GetWebhook(ctx context.Context, repoID, webhookID int64) (*models.Webhook, error)
@@ -87,6 +94,7 @@ type DB interface {
 
 	// Hash Mapping
 	SetHashMapping(ctx context.Context, m *models.HashMapping) error
+	SetHashMappings(ctx context.Context, mappings []models.HashMapping) error
 	GetGotHash(ctx context.Context, repoID int64, gitHash string) (string, error)
 	GetGitHash(ctx context.Context, repoID int64, gotHash string) (string, error)
 

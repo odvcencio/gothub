@@ -29,6 +29,7 @@ type SmartHTTPHandler struct {
 type refUpdate struct {
 	oldHash, newHash GitHash
 	refName          string
+	storageRef       string
 }
 
 func NewSmartHTTPHandler(
@@ -95,7 +96,7 @@ func (h *SmartHTTPHandler) handleInfoRefs(w http.ResponseWriter, r *http.Request
 			// If no mapping exists, the hash might not have been pushed via git
 			continue
 		}
-		refName := name
+		refName := advertiseGitRefName(name)
 		if first {
 			// First ref includes capabilities
 			w.Write(pktLine(fmt.Sprintf("%s %s\x00report-status delete-refs ofs-delta\n", gitHash, refName)))
@@ -157,9 +158,10 @@ func (h *SmartHTTPHandler) handleReceivePack(w http.ResponseWriter, r *http.Requ
 			continue
 		}
 		updates = append(updates, refUpdate{
-			oldHash: GitHash(parts[0]),
-			newHash: GitHash(parts[1]),
-			refName: parts[2],
+			oldHash:    GitHash(parts[0]),
+			newHash:    GitHash(parts[1]),
+			refName:    parts[2],
+			storageRef: normalizeGitRefName(parts[2]),
 		})
 	}
 
@@ -178,6 +180,20 @@ func (h *SmartHTTPHandler) handleReceivePack(w http.ResponseWriter, r *http.Requ
 			return
 		}
 
+		knownGotByGit := make(map[string]string, len(objects))
+		pendingMappings := make([]models.HashMapping, 0, len(objects))
+		resolveGotHash := func(gitHash string) (string, error) {
+			if gotHash, ok := knownGotByGit[gitHash]; ok {
+				return gotHash, nil
+			}
+			gotHash, err := h.db.GetGotHash(r.Context(), repoID, gitHash)
+			if err != nil {
+				return "", err
+			}
+			knownGotByGit[gitHash] = gotHash
+			return gotHash, nil
+		}
+
 		// Convert git objects to Got format.
 		// Blobs can be written immediately; trees/commits may depend on hash mappings.
 		var deferred []PackfileObject
@@ -191,12 +207,10 @@ func (h *SmartHTTPHandler) handleReceivePack(w http.ResponseWriter, r *http.Requ
 					h.sendReceivePackResult(w, fmt.Sprintf("unpack error: write blob: %v", err), nil, nil)
 					return
 				}
-				if err := h.db.SetHashMapping(r.Context(), &models.HashMapping{
+				knownGotByGit[string(gitHash)] = string(gotHash)
+				pendingMappings = append(pendingMappings, models.HashMapping{
 					RepoID: repoID, GotHash: string(gotHash), GitHash: string(gitHash), ObjectType: "blob",
-				}); err != nil {
-					h.sendReceivePackResult(w, fmt.Sprintf("unpack error: map blob hash: %v", err), nil, nil)
-					return
-				}
+				})
 			case OBJ_TREE, OBJ_COMMIT:
 				deferred = append(deferred, obj)
 			}
@@ -211,7 +225,7 @@ func (h *SmartHTTPHandler) handleReceivePack(w http.ResponseWriter, r *http.Requ
 
 				switch obj.Type {
 				case OBJ_TREE:
-					gotTree, err := parseGitTree(obj.Data, r.Context(), h.db, repoID)
+					gotTree, err := parseGitTree(obj.Data, resolveGotHash)
 					if err != nil {
 						if errors.Is(err, sql.ErrNoRows) {
 							nextDeferred = append(nextDeferred, obj)
@@ -225,16 +239,14 @@ func (h *SmartHTTPHandler) handleReceivePack(w http.ResponseWriter, r *http.Requ
 						h.sendReceivePackResult(w, fmt.Sprintf("unpack error: write tree: %v", err), nil, nil)
 						return
 					}
-					if err := h.db.SetHashMapping(r.Context(), &models.HashMapping{
+					knownGotByGit[string(gitHash)] = string(gotHash)
+					pendingMappings = append(pendingMappings, models.HashMapping{
 						RepoID: repoID, GotHash: string(gotHash), GitHash: string(gitHash), ObjectType: "tree",
-					}); err != nil {
-						h.sendReceivePackResult(w, fmt.Sprintf("unpack error: map tree hash: %v", err), nil, nil)
-						return
-					}
+					})
 					progress = true
 
 				case OBJ_COMMIT:
-					gotCommit, err := parseGitCommit(obj.Data, r.Context(), h.db, repoID)
+					gotCommit, err := parseGitCommit(obj.Data, resolveGotHash)
 					if err != nil {
 						if errors.Is(err, sql.ErrNoRows) {
 							nextDeferred = append(nextDeferred, obj)
@@ -248,12 +260,10 @@ func (h *SmartHTTPHandler) handleReceivePack(w http.ResponseWriter, r *http.Requ
 						h.sendReceivePackResult(w, fmt.Sprintf("unpack error: write commit: %v", err), nil, nil)
 						return
 					}
-					if err := h.db.SetHashMapping(r.Context(), &models.HashMapping{
+					knownGotByGit[string(gitHash)] = string(gotHash)
+					pendingMappings = append(pendingMappings, models.HashMapping{
 						RepoID: repoID, GotHash: string(gotHash), GitHash: string(gitHash), ObjectType: "commit",
-					}); err != nil {
-						h.sendReceivePackResult(w, fmt.Sprintf("unpack error: map commit hash: %v", err), nil, nil)
-						return
-					}
+					})
 					progress = true
 				}
 			}
@@ -265,15 +275,30 @@ func (h *SmartHTTPHandler) handleReceivePack(w http.ResponseWriter, r *http.Requ
 			deferred = nextDeferred
 		}
 
-		// Run entity extraction on blobs with known filenames
-		h.extractEntitiesForCommits(r.Context(), store, repoID, updates)
+		if err := h.db.SetHashMappings(r.Context(), pendingMappings); err != nil {
+			h.sendReceivePackResult(w, fmt.Sprintf("unpack error: persist hash mappings: %v", err), nil, nil)
+			return
+		}
+
+		// Run entity extraction and rewrite trees/commits so entity lists are reachable.
+		entityCommitMappings, err := h.extractEntitiesForCommits(r.Context(), store, repoID, updates)
+		if err != nil {
+			h.sendReceivePackResult(w, fmt.Sprintf("unpack error: entity extraction: %v", err), nil, nil)
+			return
+		}
+		if len(entityCommitMappings) > 0 {
+			if err := h.db.SetHashMappings(r.Context(), entityCommitMappings); err != nil {
+				h.sendReceivePackResult(w, fmt.Sprintf("unpack error: persist entity commit mappings: %v", err), nil, nil)
+				return
+			}
+		}
 	}
 
 	// Update refs
 	refErrors := make(map[string]string, len(updates))
 	for _, u := range updates {
 		if string(u.newHash) == strings.Repeat("0", 40) {
-			if err := store.Refs.Delete(u.refName); err != nil {
+			if err := store.Refs.Delete(u.storageRef); err != nil {
 				refErrors[u.refName] = err.Error()
 			}
 			continue
@@ -283,7 +308,7 @@ func (h *SmartHTTPHandler) handleReceivePack(w http.ResponseWriter, r *http.Requ
 			refErrors[u.refName] = "missing object mapping"
 			continue
 		}
-		if err := store.Refs.Set(u.refName, object.Hash(gotHash)); err != nil {
+		if err := store.Refs.Set(u.storageRef, object.Hash(gotHash)); err != nil {
 			refErrors[u.refName] = err.Error()
 		}
 	}
@@ -422,8 +447,10 @@ func (h *SmartHTTPHandler) sendReceivePackResult(w http.ResponseWriter, errMsg s
 	w.Write(pktFlush())
 }
 
-// extractEntitiesForCommits runs entity extraction on blobs referenced by new commits.
-func (h *SmartHTTPHandler) extractEntitiesForCommits(ctx context.Context, store *gotstore.RepoStore, repoID int64, updates []refUpdate) {
+// extractEntitiesForCommits rewrites pushed commits with trees that reference entity lists.
+// Returns commit hash-mapping overrides for the original git commit hashes.
+func (h *SmartHTTPHandler) extractEntitiesForCommits(ctx context.Context, store *gotstore.RepoStore, repoID int64, updates []refUpdate) ([]models.HashMapping, error) {
+	overrides := make([]models.HashMapping, 0, len(updates))
 	for _, u := range updates {
 		if string(u.newHash) == strings.Repeat("0", 40) {
 			continue
@@ -432,63 +459,114 @@ func (h *SmartHTTPHandler) extractEntitiesForCommits(ctx context.Context, store 
 		if err != nil {
 			continue
 		}
-		commit, err := store.Objects.ReadCommit(object.Hash(gotHash))
+		newCommitHash, changed, err := h.rewriteCommitWithEntities(ctx, store, object.Hash(gotHash))
 		if err != nil {
+			return nil, err
+		}
+		if !changed {
 			continue
 		}
-		h.extractEntitiesForTree(ctx, store, commit.TreeHash, "")
+		overrides = append(overrides, models.HashMapping{
+			RepoID:     repoID,
+			GotHash:    string(newCommitHash),
+			GitHash:    string(u.newHash),
+			ObjectType: "commit",
+		})
 	}
+	return overrides, nil
 }
 
-func (h *SmartHTTPHandler) extractEntitiesForTree(ctx context.Context, store *gotstore.RepoStore, treeHash object.Hash, prefix string) {
+func (h *SmartHTTPHandler) rewriteCommitWithEntities(ctx context.Context, store *gotstore.RepoStore, commitHash object.Hash) (object.Hash, bool, error) {
+	commit, err := store.Objects.ReadCommit(commitHash)
+	if err != nil {
+		return "", false, err
+	}
+	newTreeHash, changed, err := h.rewriteTreeWithEntities(ctx, store, commit.TreeHash, "")
+	if err != nil {
+		return "", false, err
+	}
+	if !changed {
+		return commitHash, false, nil
+	}
+	updatedCommit := *commit
+	updatedCommit.TreeHash = newTreeHash
+	newCommitHash, err := store.Objects.WriteCommit(&updatedCommit)
+	if err != nil {
+		return "", false, err
+	}
+	return newCommitHash, true, nil
+}
+
+func (h *SmartHTTPHandler) rewriteTreeWithEntities(ctx context.Context, store *gotstore.RepoStore, treeHash object.Hash, prefix string) (object.Hash, bool, error) {
 	tree, err := store.Objects.ReadTree(treeHash)
 	if err != nil {
-		return
+		return "", false, err
 	}
-	for _, e := range tree.Entries {
+
+	changed := false
+	updatedEntries := make([]object.TreeEntry, len(tree.Entries))
+	for i, e := range tree.Entries {
+		entry := e
 		fullPath := e.Name
 		if prefix != "" {
 			fullPath = prefix + "/" + e.Name
 		}
 		if e.IsDir {
-			h.extractEntitiesForTree(ctx, store, e.SubtreeHash, fullPath)
+			newSubtreeHash, subtreeChanged, err := h.rewriteTreeWithEntities(ctx, store, e.SubtreeHash, fullPath)
+			if err != nil {
+				return "", false, err
+			}
+			if subtreeChanged {
+				entry.SubtreeHash = newSubtreeHash
+				changed = true
+			}
 		} else if e.EntityListHash == "" {
-			// No entity list yet — extract entities
 			blob, err := store.Objects.ReadBlob(e.BlobHash)
 			if err != nil {
-				continue
+				return "", false, err
 			}
 			el, err := entity.Extract(fullPath, blob.Data)
-			if err != nil || len(el.Entities) == 0 {
-				continue
-			}
-			// Write entity objects and entity list
-			var entityRefs []object.Hash
-			for _, ent := range el.Entities {
-				entObj := &object.EntityObj{
-					Kind:     entityKindToString(ent.Kind),
-					Name:     ent.Name,
-					DeclKind: ent.DeclKind,
-					Receiver: ent.Receiver,
-					Body:     ent.Body,
-					BodyHash: object.Hash(ent.BodyHash),
+			if err == nil && len(el.Entities) > 0 {
+				entityRefs := make([]object.Hash, 0, len(el.Entities))
+				for _, ent := range el.Entities {
+					entObj := &object.EntityObj{
+						Kind:     entityKindToString(ent.Kind),
+						Name:     ent.Name,
+						DeclKind: ent.DeclKind,
+						Receiver: ent.Receiver,
+						Body:     ent.Body,
+						BodyHash: object.Hash(ent.BodyHash),
+					}
+					entHash, err := store.Objects.WriteEntity(entObj)
+					if err != nil {
+						return "", false, err
+					}
+					entityRefs = append(entityRefs, entHash)
 				}
-				entHash, err := store.Objects.WriteEntity(entObj)
-				if err != nil {
-					continue
-				}
-				entityRefs = append(entityRefs, entHash)
-			}
-			if len(entityRefs) > 0 {
 				elObj := &object.EntityListObj{
 					Language:   el.Language,
 					Path:       fullPath,
 					EntityRefs: entityRefs,
 				}
-				store.Objects.WriteEntityList(elObj)
+				entityListHash, err := store.Objects.WriteEntityList(elObj)
+				if err != nil {
+					return "", false, err
+				}
+				entry.EntityListHash = entityListHash
+				changed = true
 			}
 		}
+		updatedEntries[i] = entry
 	}
+
+	if !changed {
+		return treeHash, false, nil
+	}
+	newTreeHash, err := store.Objects.WriteTree(&object.TreeObj{Entries: updatedEntries})
+	if err != nil {
+		return "", false, err
+	}
+	return newTreeHash, true, nil
 }
 
 func entityKindToString(k entity.EntityKind) string {
@@ -509,7 +587,7 @@ func entityKindToString(k entity.EntityKind) string {
 // --- conversion helpers ---
 
 // parseGitTree converts git tree binary data to a Got TreeObj.
-func parseGitTree(data []byte, ctx context.Context, db database.DB, repoID int64) (*object.TreeObj, error) {
+func parseGitTree(data []byte, resolveGotHash func(gitHash string) (string, error)) (*object.TreeObj, error) {
 	var entries []object.TreeEntry
 	buf := bytes.NewReader(data)
 	for buf.Len() > 0 {
@@ -545,7 +623,7 @@ func parseGitTree(data []byte, ctx context.Context, db database.DB, repoID int64
 		gitHash := bytesToHex(hashBytes[:])
 
 		isDir := string(mode) == "40000"
-		gotHash, err := db.GetGotHash(ctx, repoID, gitHash)
+		gotHash, err := resolveGotHash(gitHash)
 		if err != nil {
 			return nil, fmt.Errorf("missing hash mapping for tree entry %s: %w", gitHash, err)
 		}
@@ -565,7 +643,7 @@ func parseGitTree(data []byte, ctx context.Context, db database.DB, repoID int64
 }
 
 // parseGitCommit converts git commit text to a Got CommitObj.
-func parseGitCommit(data []byte, ctx context.Context, db database.DB, repoID int64) (*object.CommitObj, error) {
+func parseGitCommit(data []byte, resolveGotHash func(gitHash string) (string, error)) (*object.CommitObj, error) {
 	lines := strings.Split(string(data), "\n")
 	c := &object.CommitObj{}
 	inBody := false
@@ -586,13 +664,13 @@ func parseGitCommit(data []byte, ctx context.Context, db database.DB, repoID int
 		}
 		switch parts[0] {
 		case "tree":
-			gotHash, err := db.GetGotHash(ctx, repoID, parts[1])
+			gotHash, err := resolveGotHash(parts[1])
 			if err != nil {
 				return nil, fmt.Errorf("missing tree hash mapping %s: %w", parts[1], err)
 			}
 			c.TreeHash = object.Hash(gotHash)
 		case "parent":
-			gotHash, err := db.GetGotHash(ctx, repoID, parts[1])
+			gotHash, err := resolveGotHash(parts[1])
 			if err != nil {
 				return nil, fmt.Errorf("missing parent hash mapping %s: %w", parts[1], err)
 			}
@@ -759,4 +837,20 @@ func (h *SmartHTTPHandler) authorizeRequest(w http.ResponseWriter, r *http.Reque
 	}
 	http.Error(w, err.Error(), status)
 	return false
+}
+
+func normalizeGitRefName(refName string) string {
+	refName = strings.TrimSpace(refName)
+	return strings.TrimPrefix(refName, "refs/")
+}
+
+func advertiseGitRefName(storageRef string) string {
+	storageRef = strings.TrimSpace(storageRef)
+	if storageRef == "" {
+		return storageRef
+	}
+	if strings.HasPrefix(storageRef, "refs/") {
+		return storageRef
+	}
+	return "refs/" + storageRef
 }

@@ -45,6 +45,7 @@ func (s *Server) handleCreatePR(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	_ = s.notifySvc.NotifyPullRequestOpened(r.Context(), repo, pr, claims.UserID)
 
 	// Best-effort webhook emission; does not block PR creation success.
 	go func(repoID int64, createdPR *models.PullRequest) {
@@ -263,6 +264,8 @@ func (s *Server) handleCreatePRComment(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	comment.AuthorName = claims.Username
+	_ = s.notifySvc.NotifyPullRequestComment(r.Context(), repo, pr, comment, claims.UserID)
 	jsonResponse(w, http.StatusCreated, comment)
 }
 
@@ -329,6 +332,7 @@ func (s *Server) handleCreatePRReview(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	_ = s.notifySvc.NotifyPullRequestReview(r.Context(), repo, pr, review, claims.UserID)
 	jsonResponse(w, http.StatusCreated, review)
 }
 

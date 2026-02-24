@@ -24,6 +24,7 @@ type Server struct {
 	prSvc        *service.PRService
 	issueSvc     *service.IssueService
 	webhookSvc   *service.WebhookService
+	notifySvc    *service.NotificationService
 	codeIntelSvc *service.CodeIntelService
 	mux          *http.ServeMux
 }
@@ -34,6 +35,7 @@ func NewServer(db database.DB, authSvc *auth.Service, repoSvc *service.RepoServi
 	prSvc := service.NewPRService(db, repoSvc, browseSvc)
 	issueSvc := service.NewIssueService(db)
 	webhookSvc := service.NewWebhookService(db)
+	notifySvc := service.NewNotificationService(db)
 	codeIntelSvc := service.NewCodeIntelService(repoSvc, browseSvc)
 	s := &Server{
 		db:           db,
@@ -44,6 +46,7 @@ func NewServer(db database.DB, authSvc *auth.Service, repoSvc *service.RepoServi
 		prSvc:        prSvc,
 		issueSvc:     issueSvc,
 		webhookSvc:   webhookSvc,
+		notifySvc:    notifySvc,
 		codeIntelSvc: codeIntelSvc,
 		mux:          http.NewServeMux(),
 	}
@@ -67,6 +70,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/user/ssh-keys", s.requireAuth(s.handleCreateSSHKey))
 	s.mux.HandleFunc("DELETE /api/v1/user/ssh-keys/{id}", s.requireAuth(s.handleDeleteSSHKey))
 	s.mux.HandleFunc("GET /api/v1/user/starred", s.requireAuth(s.handleListUserStarredRepos))
+	s.mux.HandleFunc("GET /api/v1/notifications", s.requireAuth(s.handleListNotifications))
+	s.mux.HandleFunc("GET /api/v1/notifications/unread-count", s.requireAuth(s.handleUnreadNotificationsCount))
+	s.mux.HandleFunc("POST /api/v1/notifications/read-all", s.requireAuth(s.handleMarkAllNotificationsRead))
+	s.mux.HandleFunc("POST /api/v1/notifications/{id}/read", s.requireAuth(s.handleMarkNotificationRead))
 
 	// Repositories
 	s.mux.HandleFunc("POST /api/v1/repos", s.requireAuth(s.handleCreateRepo))

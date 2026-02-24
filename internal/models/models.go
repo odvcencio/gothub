@@ -75,6 +75,7 @@ type PRComment struct {
 	ID         int64     `json:"id"`
 	PRID       int64     `json:"pr_id"`
 	AuthorID   int64     `json:"author_id"`
+	AuthorName string    `json:"author_name,omitempty"`
 	Body       string    `json:"body"`
 	FilePath   string    `json:"file_path,omitempty"`
 	EntityKey  string    `json:"entity_key,omitempty"`
@@ -87,6 +88,7 @@ type PRReview struct {
 	ID         int64     `json:"id"`
 	PRID       int64     `json:"pr_id"`
 	AuthorID   int64     `json:"author_id"`
+	AuthorName string    `json:"author_name,omitempty"`
 	State      string    `json:"state"` // "approved", "changes_requested", "commented"
 	Body       string    `json:"body"`
 	CommitHash string    `json:"commit_hash"`
@@ -169,6 +171,22 @@ type IssueComment struct {
 	AuthorName string    `json:"author_name,omitempty"`
 	Body       string    `json:"body"`
 	CreatedAt  time.Time `json:"created_at"`
+}
+
+type Notification struct {
+	ID           int64      `json:"id"`
+	UserID       int64      `json:"user_id"`
+	ActorID      int64      `json:"actor_id"`
+	ActorName    string     `json:"actor_name,omitempty"`
+	Type         string     `json:"type"`
+	Title        string     `json:"title"`
+	Body         string     `json:"body"`
+	ResourcePath string     `json:"resource_path,omitempty"`
+	RepoID       *int64     `json:"repo_id,omitempty"`
+	PRID         *int64     `json:"pr_id,omitempty"`
+	IssueID      *int64     `json:"issue_id,omitempty"`
+	ReadAt       *time.Time `json:"read_at,omitempty"`
+	CreatedAt    time.Time  `json:"created_at"`
 }
 
 type HashMapping struct {

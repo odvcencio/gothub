@@ -164,6 +164,21 @@ CREATE TABLE IF NOT EXISTS issue_comments (
 	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS notifications (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	actor_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	type TEXT NOT NULL,
+	title TEXT NOT NULL,
+	body TEXT NOT NULL DEFAULT '',
+	resource_path TEXT NOT NULL DEFAULT '',
+	repo_id INTEGER REFERENCES repositories(id) ON DELETE CASCADE,
+	pr_id INTEGER REFERENCES pull_requests(id) ON DELETE CASCADE,
+	issue_id INTEGER REFERENCES issues(id) ON DELETE CASCADE,
+	read_at DATETIME,
+	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS branch_protection_rules (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	repo_id INTEGER NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
@@ -222,17 +237,21 @@ CREATE TABLE IF NOT EXISTS webhook_deliveries (
 
 CREATE TABLE IF NOT EXISTS hash_mapping (
 	repo_id INTEGER NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
-	got_hash TEXT NOT NULL,
 	git_hash TEXT NOT NULL,
+	got_hash TEXT NOT NULL,
 	object_type TEXT NOT NULL,
-	PRIMARY KEY (repo_id, got_hash)
+	PRIMARY KEY (repo_id, git_hash),
+	UNIQUE (repo_id, got_hash)
 );
 
 CREATE INDEX IF NOT EXISTS idx_hash_mapping_git ON hash_mapping(repo_id, git_hash);
+CREATE INDEX IF NOT EXISTS idx_hash_mapping_got ON hash_mapping(repo_id, got_hash);
 CREATE INDEX IF NOT EXISTS idx_branch_protection_repo_branch ON branch_protection_rules(repo_id, branch);
 CREATE INDEX IF NOT EXISTS idx_pr_check_runs_pr ON pr_check_runs(pr_id, updated_at);
 CREATE INDEX IF NOT EXISTS idx_issues_repo_number ON issues(repo_id, number DESC);
 CREATE INDEX IF NOT EXISTS idx_issue_comments_issue ON issue_comments(issue_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_notifications_user_created ON notifications(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_notifications_user_unread ON notifications(user_id, read_at, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_repo_webhooks_repo ON repo_webhooks(repo_id);
 CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_webhook_time ON webhook_deliveries(webhook_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_repo_stars_repo ON repo_stars(repo_id, created_at DESC);
@@ -684,8 +703,11 @@ func (s *SQLiteDB) CreatePRComment(ctx context.Context, c *models.PRComment) err
 
 func (s *SQLiteDB) ListPRComments(ctx context.Context, prID int64) ([]models.PRComment, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, pr_id, author_id, body, file_path, entity_key, line_number, commit_hash, created_at
-		 FROM pr_comments WHERE pr_id = ? ORDER BY created_at`, prID)
+		`SELECT c.id, c.pr_id, c.author_id, u.username, c.body, c.file_path, c.entity_key, c.line_number, c.commit_hash, c.created_at
+		 FROM pr_comments c
+		 JOIN users u ON u.id = c.author_id
+		 WHERE c.pr_id = ?
+		 ORDER BY c.created_at`, prID)
 	if err != nil {
 		return nil, err
 	}
@@ -693,7 +715,7 @@ func (s *SQLiteDB) ListPRComments(ctx context.Context, prID int64) ([]models.PRC
 	var comments []models.PRComment
 	for rows.Next() {
 		var c models.PRComment
-		if err := rows.Scan(&c.ID, &c.PRID, &c.AuthorID, &c.Body, &c.FilePath, &c.EntityKey, &c.LineNumber, &c.CommitHash, &c.CreatedAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.PRID, &c.AuthorID, &c.AuthorName, &c.Body, &c.FilePath, &c.EntityKey, &c.LineNumber, &c.CommitHash, &c.CreatedAt); err != nil {
 			return nil, err
 		}
 		comments = append(comments, c)
@@ -716,8 +738,11 @@ func (s *SQLiteDB) CreatePRReview(ctx context.Context, r *models.PRReview) error
 
 func (s *SQLiteDB) ListPRReviews(ctx context.Context, prID int64) ([]models.PRReview, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, pr_id, author_id, state, body, commit_hash, created_at
-		 FROM pr_reviews WHERE pr_id = ? ORDER BY created_at`, prID)
+		`SELECT r.id, r.pr_id, r.author_id, u.username, r.state, r.body, r.commit_hash, r.created_at
+		 FROM pr_reviews r
+		 JOIN users u ON u.id = r.author_id
+		 WHERE r.pr_id = ?
+		 ORDER BY r.created_at`, prID)
 	if err != nil {
 		return nil, err
 	}
@@ -725,7 +750,7 @@ func (s *SQLiteDB) ListPRReviews(ctx context.Context, prID int64) ([]models.PRRe
 	var reviews []models.PRReview
 	for rows.Next() {
 		var r models.PRReview
-		if err := rows.Scan(&r.ID, &r.PRID, &r.AuthorID, &r.State, &r.Body, &r.CommitHash, &r.CreatedAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.PRID, &r.AuthorID, &r.AuthorName, &r.State, &r.Body, &r.CommitHash, &r.CreatedAt); err != nil {
 			return nil, err
 		}
 		reviews = append(reviews, r)
@@ -865,6 +890,91 @@ func (s *SQLiteDB) ListIssueComments(ctx context.Context, issueID int64) ([]mode
 		comments = append(comments, c)
 	}
 	return comments, rows.Err()
+}
+
+// --- Notifications ---
+
+func (s *SQLiteDB) CreateNotification(ctx context.Context, n *models.Notification) error {
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO notifications (
+			 user_id, actor_id, type, title, body, resource_path, repo_id, pr_id, issue_id, read_at
+		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		n.UserID, n.ActorID, n.Type, n.Title, n.Body, n.ResourcePath, n.RepoID, n.PRID, n.IssueID, n.ReadAt)
+	if err != nil {
+		return err
+	}
+	n.ID, _ = res.LastInsertId()
+	return s.db.QueryRowContext(ctx, `SELECT created_at FROM notifications WHERE id = ?`, n.ID).Scan(&n.CreatedAt)
+}
+
+func (s *SQLiteDB) ListNotifications(ctx context.Context, userID int64, unreadOnly bool) ([]models.Notification, error) {
+	query := `SELECT n.id, n.user_id, n.actor_id, a.username, n.type, n.title, n.body, n.resource_path, n.repo_id, n.pr_id, n.issue_id, n.read_at, n.created_at
+		 FROM notifications n
+		 JOIN users a ON a.id = n.actor_id
+		 WHERE n.user_id = ?`
+	args := []any{userID}
+	if unreadOnly {
+		query += ` AND n.read_at IS NULL`
+	}
+	query += ` ORDER BY n.created_at DESC, n.id DESC`
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var notifications []models.Notification
+	for rows.Next() {
+		var n models.Notification
+		var repoID, prID, issueID sql.NullInt64
+		var readAt sql.NullTime
+		if err := rows.Scan(&n.ID, &n.UserID, &n.ActorID, &n.ActorName, &n.Type, &n.Title, &n.Body, &n.ResourcePath, &repoID, &prID, &issueID, &readAt, &n.CreatedAt); err != nil {
+			return nil, err
+		}
+		if repoID.Valid {
+			v := repoID.Int64
+			n.RepoID = &v
+		}
+		if prID.Valid {
+			v := prID.Int64
+			n.PRID = &v
+		}
+		if issueID.Valid {
+			v := issueID.Int64
+			n.IssueID = &v
+		}
+		if readAt.Valid {
+			t := readAt.Time
+			n.ReadAt = &t
+		}
+		notifications = append(notifications, n)
+	}
+	return notifications, rows.Err()
+}
+
+func (s *SQLiteDB) CountUnreadNotifications(ctx context.Context, userID int64) (int, error) {
+	var count int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM notifications WHERE user_id = ? AND read_at IS NULL`,
+		userID).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+func (s *SQLiteDB) MarkNotificationRead(ctx context.Context, id, userID int64) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE notifications SET read_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ? AND read_at IS NULL`,
+		id, userID)
+	return err
+}
+
+func (s *SQLiteDB) MarkAllNotificationsRead(ctx context.Context, userID int64) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE notifications SET read_at = CURRENT_TIMESTAMP WHERE user_id = ? AND read_at IS NULL`,
+		userID)
+	return err
 }
 
 // --- Branch Protection ---
@@ -1076,10 +1186,36 @@ func (s *SQLiteDB) ListWebhookDeliveries(ctx context.Context, repoID, webhookID 
 // --- Hash Mapping ---
 
 func (s *SQLiteDB) SetHashMapping(ctx context.Context, m *models.HashMapping) error {
-	_, err := s.db.ExecContext(ctx,
-		`INSERT OR REPLACE INTO hash_mapping (repo_id, got_hash, git_hash, object_type) VALUES (?, ?, ?, ?)`,
-		m.RepoID, m.GotHash, m.GitHash, m.ObjectType)
-	return err
+	return s.SetHashMappings(ctx, []models.HashMapping{*m})
+}
+
+func (s *SQLiteDB) SetHashMappings(ctx context.Context, mappings []models.HashMapping) error {
+	if len(mappings) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	stmt, err := tx.PrepareContext(ctx,
+		`INSERT INTO hash_mapping (repo_id, got_hash, git_hash, object_type) VALUES (?, ?, ?, ?)
+		 ON CONFLICT(repo_id, git_hash) DO UPDATE SET
+			 got_hash = excluded.got_hash,
+			 object_type = excluded.object_type`)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	defer stmt.Close()
+
+	for i := range mappings {
+		m := mappings[i]
+		if _, err := stmt.ExecContext(ctx, m.RepoID, m.GotHash, m.GitHash, m.ObjectType); err != nil {
+			tx.Rollback()
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *SQLiteDB) GetGotHash(ctx context.Context, repoID int64, gitHash string) (string, error) {
