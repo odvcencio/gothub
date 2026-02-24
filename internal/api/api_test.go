@@ -952,6 +952,76 @@ func TestGitReceivePackPersistsEntityListHash(t *testing.T) {
 	}
 }
 
+func TestGitReceivePackSupportsSubmoduleTreeEntries(t *testing.T) {
+	server, db := setupTestServer(t)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	token := registerAndGetToken(t, ts.URL, "owner")
+	createRepo(t, ts.URL, token, "repo", false)
+
+	submoduleGitHash := strings.Repeat("2", 40)
+	submoduleRaw, err := hex.DecodeString(submoduleGitHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var treeBuf bytes.Buffer
+	fmt.Fprintf(&treeBuf, "160000 module\x00")
+	treeBuf.Write(submoduleRaw)
+	treeData := treeBuf.Bytes()
+	treeHash := gitinterop.GitHashBytes(gitinterop.GitTypeTree, treeData)
+
+	commitData := []byte(fmt.Sprintf(
+		"tree %s\nauthor Owner <owner@example.com> 1700000000 +0000\ncommitter Owner <owner@example.com> 1700000000 +0000\n\ninitial\n",
+		treeHash,
+	))
+	commitHash := gitinterop.GitHashBytes(gitinterop.GitTypeCommit, commitData)
+
+	packData, err := gitinterop.BuildPackfile([]gitinterop.PackfileObject{
+		{Type: gitinterop.OBJ_TREE, Data: treeData},
+		{Type: gitinterop.OBJ_COMMIT, Data: commitData},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	updateLine := fmt.Sprintf("%s %s refs/heads/main\x00report-status\n", strings.Repeat("0", 40), commitHash)
+	payload := append(pktLineForTest(updateLine), pktFlushForTest()...)
+	payload = append(payload, packData...)
+
+	req, _ := http.NewRequest("POST", ts.URL+"/git/owner/repo/git-receive-pack", bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/x-git-receive-pack-request")
+	req.SetBasicAuth("owner", "secret123")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("git receive-pack: expected 200, got %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "ok refs/heads/main\n") {
+		t.Fatalf("expected ok status for refs/heads/main, got body %q", string(body))
+	}
+
+	repo, err := db.GetRepository(context.Background(), "owner", "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotHash, err := db.GetGotHash(context.Background(), repo.ID, submoduleGitHash)
+	if err != nil {
+		t.Fatalf("expected synthetic mapping for submodule git hash, got error: %v", err)
+	}
+	if strings.TrimSpace(gotHash) == "" {
+		t.Fatal("expected non-empty got hash for submodule mapping")
+	}
+}
+
 func TestCodeIntelPersistsCommitIndex(t *testing.T) {
 	server, db := setupTestServer(t)
 	ts := httptest.NewServer(server)

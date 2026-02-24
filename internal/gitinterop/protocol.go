@@ -200,16 +200,31 @@ func (h *SmartHTTPHandler) handleReceivePack(w http.ResponseWriter, r *http.Requ
 			modes       map[string]string
 		}
 		pendingTreeModes := make([]treeModeRecord, 0, len(objects))
-		resolveGotHash := func(gitHash string) (string, error) {
+		resolveGotHash := func(gitHash, mode string) (string, error) {
 			if gotHash, ok := knownGotByGit[gitHash]; ok {
 				return gotHash, nil
 			}
 			gotHash, err := h.db.GetGotHash(r.Context(), repoID, gitHash)
-			if err != nil {
-				return "", err
+			if err == nil {
+				knownGotByGit[gitHash] = gotHash
+				return gotHash, nil
 			}
-			knownGotByGit[gitHash] = gotHash
-			return gotHash, nil
+			// Submodules (mode 160000) point at external git commits that may not
+			// exist in this repo's object graph. Persist a synthetic blob mapping so
+			// the tree entry can round-trip through Got and back to git unchanged.
+			if mode == "160000" && errors.Is(err, sql.ErrNoRows) {
+				submoduleBlobHash, writeErr := store.Objects.WriteBlob(&object.Blob{Data: []byte("submodule " + gitHash + "\n")})
+				if writeErr != nil {
+					return "", writeErr
+				}
+				gotHash = string(submoduleBlobHash)
+				knownGotByGit[gitHash] = gotHash
+				pendingMappings = append(pendingMappings, models.HashMapping{
+					RepoID: repoID, GotHash: gotHash, GitHash: gitHash, ObjectType: "blob",
+				})
+				return gotHash, nil
+			}
+			return "", err
 		}
 
 		// Convert git objects to Got format.
@@ -268,7 +283,9 @@ func (h *SmartHTTPHandler) handleReceivePack(w http.ResponseWriter, r *http.Requ
 					progress = true
 
 				case OBJ_COMMIT:
-					gotCommit, err := parseGitCommit(obj.Data, resolveGotHash)
+					gotCommit, err := parseGitCommit(obj.Data, func(gitHash string) (string, error) {
+						return resolveGotHash(gitHash, "")
+					})
 					if err != nil {
 						if errors.Is(err, sql.ErrNoRows) {
 							nextDeferred = append(nextDeferred, obj)
@@ -541,6 +558,7 @@ func (h *SmartHTTPHandler) rewriteTreeWithEntities(ctx context.Context, store *g
 	if err != nil {
 		return "", false, err
 	}
+	modeMap, _ := h.db.GetGitTreeEntryModes(ctx, repoID, string(treeHash))
 
 	changed := false
 	updatedEntries := make([]object.TreeEntry, len(tree.Entries))
@@ -560,6 +578,11 @@ func (h *SmartHTTPHandler) rewriteTreeWithEntities(ctx context.Context, store *g
 				changed = true
 			}
 		} else if e.EntityListHash == "" {
+			mode := modeMap[e.Name]
+			if mode != "" && mode != "100644" && mode != "100755" {
+				updatedEntries[i] = entry
+				continue
+			}
 			blob, err := store.Objects.ReadBlob(e.BlobHash)
 			if err != nil {
 				return "", false, err
@@ -629,7 +652,7 @@ func entityKindToString(k entity.EntityKind) string {
 // --- conversion helpers ---
 
 // parseGitTree converts git tree binary data to a Got TreeObj and returns git modes by entry name.
-func parseGitTree(data []byte, resolveGotHash func(gitHash string) (string, error)) (*object.TreeObj, map[string]string, error) {
+func parseGitTree(data []byte, resolveGotHash func(gitHash, mode string) (string, error)) (*object.TreeObj, map[string]string, error) {
 	var entries []object.TreeEntry
 	modes := make(map[string]string)
 	buf := bytes.NewReader(data)
@@ -667,7 +690,7 @@ func parseGitTree(data []byte, resolveGotHash func(gitHash string) (string, erro
 
 		modeStr := string(mode)
 		isDir := modeStr == "40000"
-		gotHash, err := resolveGotHash(gitHash)
+		gotHash, err := resolveGotHash(gitHash, modeStr)
 		if err != nil {
 			return nil, nil, fmt.Errorf("missing hash mapping for tree entry %s: %w", gitHash, err)
 		}

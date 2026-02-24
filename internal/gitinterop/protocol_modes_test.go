@@ -68,7 +68,7 @@ func TestGitTreeModeRoundTripPreservesExecutableBit(t *testing.T) {
 	gitTreeBuf.Write(blobRaw)
 	gitTreeData := gitTreeBuf.Bytes()
 
-	gotTree, modes, err := parseGitTree(gitTreeData, func(gitHash string) (string, error) {
+	gotTree, modes, err := parseGitTree(gitTreeData, func(gitHash, _ string) (string, error) {
 		if gitHash == string(blobGitHash) {
 			return string(blobGotHash), nil
 		}
