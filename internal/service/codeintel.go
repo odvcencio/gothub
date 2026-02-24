@@ -2,58 +2,82 @@ package service
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
 
 	"github.com/odvcencio/got/pkg/object"
+	"github.com/odvcencio/gothub/internal/database"
+	"github.com/odvcencio/gothub/internal/gotstore"
 	"github.com/odvcencio/gts-suite/pkg/index"
 	"github.com/odvcencio/gts-suite/pkg/model"
 	"github.com/odvcencio/gts-suite/pkg/query"
 	"github.com/odvcencio/gts-suite/pkg/xref"
 )
 
+const repoIndexObjectType object.ObjectType = "repoindex"
+
 // CodeIntelService provides code intelligence powered by gts-suite.
 type CodeIntelService struct {
+	db       database.DB
 	repoSvc  *RepoService
 	browsSvc *BrowseService
 
 	mu      sync.RWMutex
-	indexes map[string]*model.Index // cache: "owner/repo@ref" -> index
+	indexes map[string]*model.Index // cache: "owner/repo@commitHash" -> index
 }
 
-func NewCodeIntelService(repoSvc *RepoService, browseSvc *BrowseService) *CodeIntelService {
+func NewCodeIntelService(db database.DB, repoSvc *RepoService, browseSvc *BrowseService) *CodeIntelService {
 	return &CodeIntelService{
+		db:       db,
 		repoSvc:  repoSvc,
 		browsSvc: browseSvc,
 		indexes:  make(map[string]*model.Index),
 	}
 }
 
-// BuildIndex builds or returns cached index for a repo at a given ref.
-// For now, this materializes the tree to a temp dir and indexes it.
+// BuildIndex returns a semantic index for a repository at a ref.
+// It first checks in-memory cache, then persisted store-backed index, then falls back to on-demand build.
 func (s *CodeIntelService) BuildIndex(ctx context.Context, owner, repo, ref string) (*model.Index, error) {
-	key := fmt.Sprintf("%s/%s@%s", owner, repo, ref)
-
-	s.mu.RLock()
-	if idx, ok := s.indexes[key]; ok {
-		s.mu.RUnlock()
+	commitHash, err := s.browsSvc.ResolveRef(ctx, owner, repo, ref)
+	if err != nil {
+		return nil, fmt.Errorf("resolve ref: %w", err)
+	}
+	key := fmt.Sprintf("%s/%s@%s", owner, repo, commitHash)
+	if idx, ok := s.getCachedIndex(key); ok {
 		return idx, nil
 	}
-	s.mu.RUnlock()
-
-	// Materialize tree to temp dir
-	files, err := s.browsSvc.FlattenTree(ctx, owner, repo, ref)
+	repoModel, err := s.repoSvc.Get(ctx, owner, repo)
 	if err != nil {
-		return nil, fmt.Errorf("flatten tree: %w", err)
+		return nil, err
 	}
-
 	store, err := s.repoSvc.OpenStore(ctx, owner, repo)
 	if err != nil {
 		return nil, err
 	}
+	if idx, ok, err := s.loadPersistedIndex(ctx, store, repoModel.ID, string(commitHash)); err == nil && ok {
+		s.setCachedIndex(key, idx)
+		return idx, nil
+	}
 
+	idx, err := s.buildIndexViaTempDir(ctx, owner, repo, ref, store)
+	if err != nil {
+		return nil, err
+	}
+	_ = s.persistIndex(ctx, store, repoModel.ID, string(commitHash), idx)
+	s.setCachedIndex(key, idx)
+	return idx, nil
+}
+
+func (s *CodeIntelService) buildIndexViaTempDir(ctx context.Context, owner, repo, ref string, store *gotstore.RepoStore) (*model.Index, error) {
+	// Materialize tree to temp dir for compatibility with gts-suite v0.3.0.
+	files, err := s.browsSvc.FlattenTree(ctx, owner, repo, ref)
+	if err != nil {
+		return nil, fmt.Errorf("flatten tree: %w", err)
+	}
 	tmpDir, err := os.MkdirTemp("", "gothub-index-*")
 	if err != nil {
 		return nil, err
@@ -81,12 +105,57 @@ func (s *CodeIntelService) BuildIndex(ctx context.Context, owner, repo, ref stri
 	if err != nil {
 		return nil, fmt.Errorf("build index: %w", err)
 	}
+	return idx, nil
+}
 
+func (s *CodeIntelService) loadPersistedIndex(ctx context.Context, store *gotstore.RepoStore, repoID int64, commitHash string) (*model.Index, bool, error) {
+	indexHash, err := s.db.GetCommitIndex(ctx, repoID, commitHash)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	objType, raw, err := store.Objects.Read(object.Hash(indexHash))
+	if err != nil {
+		return nil, false, nil
+	}
+	if objType != repoIndexObjectType {
+		return nil, false, nil
+	}
+	var idx model.Index
+	if err := json.Unmarshal(raw, &idx); err != nil {
+		return nil, false, nil
+	}
+	return &idx, true, nil
+}
+
+func (s *CodeIntelService) persistIndex(ctx context.Context, store *gotstore.RepoStore, repoID int64, commitHash string, idx *model.Index) error {
+	if idx == nil {
+		return nil
+	}
+	raw, err := json.Marshal(idx)
+	if err != nil {
+		return err
+	}
+	indexHash, err := store.Objects.Write(repoIndexObjectType, raw)
+	if err != nil {
+		return err
+	}
+	return s.db.SetCommitIndex(ctx, repoID, commitHash, string(indexHash))
+}
+
+func (s *CodeIntelService) getCachedIndex(key string) (*model.Index, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	idx, ok := s.indexes[key]
+	return idx, ok
+}
+
+func (s *CodeIntelService) setCachedIndex(key string, idx *model.Index) {
 	s.mu.Lock()
 	s.indexes[key] = idx
 	s.mu.Unlock()
-
-	return idx, nil
 }
 
 // SymbolResult is a symbol with its file path.

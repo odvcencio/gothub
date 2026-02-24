@@ -36,7 +36,7 @@ func NewServer(db database.DB, authSvc *auth.Service, repoSvc *service.RepoServi
 	issueSvc := service.NewIssueService(db)
 	webhookSvc := service.NewWebhookService(db)
 	notifySvc := service.NewNotificationService(db)
-	codeIntelSvc := service.NewCodeIntelService(repoSvc, browseSvc)
+	codeIntelSvc := service.NewCodeIntelService(db, repoSvc, browseSvc)
 	s := &Server{
 		db:           db,
 		authSvc:      authSvc,

@@ -270,6 +270,59 @@ func TestSQLiteSetHashMappingRemapsGitHash(t *testing.T) {
 	}
 }
 
+func TestSQLiteCommitIndexUpsertAndGet(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	user := &models.User{Username: "alice", Email: "alice@example.com", PasswordHash: "x"}
+	if err := db.CreateUser(ctx, user); err != nil {
+		t.Fatal(err)
+	}
+	repo := &models.Repository{
+		OwnerUserID:   &user.ID,
+		Name:          "repo",
+		DefaultBranch: "main",
+		StoragePath:   "pending",
+	}
+	if err := db.CreateRepository(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+
+	commitHash := strings.Repeat("a", 64)
+	firstIndex := strings.Repeat("b", 64)
+	if err := db.SetCommitIndex(ctx, repo.ID, commitHash, firstIndex); err != nil {
+		t.Fatal(err)
+	}
+	gotIndex, err := db.GetCommitIndex(ctx, repo.ID, commitHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotIndex != firstIndex {
+		t.Fatalf("expected index hash %q, got %q", firstIndex, gotIndex)
+	}
+
+	secondIndex := strings.Repeat("c", 64)
+	if err := db.SetCommitIndex(ctx, repo.ID, commitHash, secondIndex); err != nil {
+		t.Fatal(err)
+	}
+	gotIndex, err = db.GetCommitIndex(ctx, repo.ID, commitHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotIndex != secondIndex {
+		t.Fatalf("expected upserted index hash %q, got %q", secondIndex, gotIndex)
+	}
+}
+
 func TestSQLiteRepoStarsLifecycle(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	db, err := OpenSQLite(dbPath)

@@ -244,8 +244,17 @@ CREATE TABLE IF NOT EXISTS hash_mapping (
 	UNIQUE (repo_id, got_hash)
 );
 
+CREATE TABLE IF NOT EXISTS commit_indexes (
+	repo_id INTEGER NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+	commit_hash TEXT NOT NULL,
+	index_hash TEXT NOT NULL,
+	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (repo_id, commit_hash)
+);
+
 CREATE INDEX IF NOT EXISTS idx_hash_mapping_git ON hash_mapping(repo_id, git_hash);
 CREATE INDEX IF NOT EXISTS idx_hash_mapping_got ON hash_mapping(repo_id, got_hash);
+CREATE INDEX IF NOT EXISTS idx_commit_indexes_repo ON commit_indexes(repo_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_branch_protection_repo_branch ON branch_protection_rules(repo_id, branch);
 CREATE INDEX IF NOT EXISTS idx_pr_check_runs_pr ON pr_check_runs(pr_id, updated_at);
 CREATE INDEX IF NOT EXISTS idx_issues_repo_number ON issues(repo_id, number DESC);
@@ -1229,6 +1238,23 @@ func (s *SQLiteDB) GetGitHash(ctx context.Context, repoID int64, gotHash string)
 	var h string
 	err := s.db.QueryRowContext(ctx,
 		`SELECT git_hash FROM hash_mapping WHERE repo_id = ? AND got_hash = ?`, repoID, gotHash).Scan(&h)
+	return h, err
+}
+
+func (s *SQLiteDB) SetCommitIndex(ctx context.Context, repoID int64, commitHash, indexHash string) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO commit_indexes (repo_id, commit_hash, index_hash) VALUES (?, ?, ?)
+		 ON CONFLICT(repo_id, commit_hash) DO UPDATE SET
+			 index_hash = excluded.index_hash`,
+		repoID, commitHash, indexHash)
+	return err
+}
+
+func (s *SQLiteDB) GetCommitIndex(ctx context.Context, repoID int64, commitHash string) (string, error) {
+	var h string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT index_hash FROM commit_indexes WHERE repo_id = ? AND commit_hash = ?`,
+		repoID, commitHash).Scan(&h)
 	return h, err
 }
 

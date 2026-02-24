@@ -97,6 +97,8 @@ type DB interface {
 	SetHashMappings(ctx context.Context, mappings []models.HashMapping) error
 	GetGotHash(ctx context.Context, repoID int64, gitHash string) (string, error)
 	GetGitHash(ctx context.Context, repoID int64, gotHash string) (string, error)
+	SetCommitIndex(ctx context.Context, repoID int64, commitHash, indexHash string) error
+	GetCommitIndex(ctx context.Context, repoID int64, commitHash string) (string, error)
 
 	// Organizations
 	CreateOrg(ctx context.Context, o *models.Org) error

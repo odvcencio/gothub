@@ -237,8 +237,17 @@ CREATE TABLE IF NOT EXISTS hash_mapping (
 	UNIQUE (repo_id, got_hash)
 );
 
+CREATE TABLE IF NOT EXISTS commit_indexes (
+	repo_id BIGINT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+	commit_hash TEXT NOT NULL,
+	index_hash TEXT NOT NULL,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	PRIMARY KEY (repo_id, commit_hash)
+);
+
 CREATE INDEX IF NOT EXISTS idx_hash_mapping_git ON hash_mapping(repo_id, git_hash);
 CREATE INDEX IF NOT EXISTS idx_hash_mapping_got ON hash_mapping(repo_id, got_hash);
+CREATE INDEX IF NOT EXISTS idx_commit_indexes_repo ON commit_indexes(repo_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_branch_protection_repo_branch ON branch_protection_rules(repo_id, branch);
 CREATE INDEX IF NOT EXISTS idx_pr_check_runs_pr ON pr_check_runs(pr_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_issues_repo_number ON issues(repo_id, number DESC);
@@ -1120,6 +1129,23 @@ func (p *PostgresDB) GetGitHash(ctx context.Context, repoID int64, gotHash strin
 	var h string
 	err := p.db.QueryRowContext(ctx,
 		`SELECT git_hash FROM hash_mapping WHERE repo_id = $1 AND got_hash = $2`, repoID, gotHash).Scan(&h)
+	return h, err
+}
+
+func (p *PostgresDB) SetCommitIndex(ctx context.Context, repoID int64, commitHash, indexHash string) error {
+	_, err := p.db.ExecContext(ctx,
+		`INSERT INTO commit_indexes (repo_id, commit_hash, index_hash) VALUES ($1, $2, $3)
+		 ON CONFLICT (repo_id, commit_hash) DO UPDATE SET
+			 index_hash = EXCLUDED.index_hash`,
+		repoID, commitHash, indexHash)
+	return err
+}
+
+func (p *PostgresDB) GetCommitIndex(ctx context.Context, repoID int64, commitHash string) (string, error) {
+	var h string
+	err := p.db.QueryRowContext(ctx,
+		`SELECT index_hash FROM commit_indexes WHERE repo_id = $1 AND commit_hash = $2`,
+		repoID, commitHash).Scan(&h)
 	return h, err
 }
 

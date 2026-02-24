@@ -952,6 +952,91 @@ func TestGitReceivePackPersistsEntityListHash(t *testing.T) {
 	}
 }
 
+func TestCodeIntelPersistsCommitIndex(t *testing.T) {
+	server, db := setupTestServer(t)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	token := registerAndGetToken(t, ts.URL, "owner")
+	createRepo(t, ts.URL, token, "repo", false)
+
+	blobData := []byte("package main\n\nfunc ProcessOrder() int { return 1 }\n")
+	blobHash := gitinterop.GitHashBytes(gitinterop.GitTypeBlob, blobData)
+
+	var treeBuf bytes.Buffer
+	fmt.Fprintf(&treeBuf, "100644 main.go\x00")
+	blobRaw, err := hex.DecodeString(string(blobHash))
+	if err != nil {
+		t.Fatal(err)
+	}
+	treeBuf.Write(blobRaw)
+	treeData := treeBuf.Bytes()
+	treeHash := gitinterop.GitHashBytes(gitinterop.GitTypeTree, treeData)
+
+	commitData := []byte(fmt.Sprintf(
+		"tree %s\nauthor Owner <owner@example.com> 1700000000 +0000\ncommitter Owner <owner@example.com> 1700000000 +0000\n\ninitial\n",
+		treeHash,
+	))
+	commitHash := gitinterop.GitHashBytes(gitinterop.GitTypeCommit, commitData)
+
+	packData, err := gitinterop.BuildPackfile([]gitinterop.PackfileObject{
+		{Type: gitinterop.OBJ_BLOB, Data: blobData},
+		{Type: gitinterop.OBJ_TREE, Data: treeData},
+		{Type: gitinterop.OBJ_COMMIT, Data: commitData},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	updateLine := fmt.Sprintf("%s %s refs/heads/main\x00report-status\n", strings.Repeat("0", 40), commitHash)
+	payload := append(pktLineForTest(updateLine), pktFlushForTest()...)
+	payload = append(payload, packData...)
+
+	req, _ := http.NewRequest("POST", ts.URL+"/git/owner/repo/git-receive-pack", bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/x-git-receive-pack-request")
+	req.SetBasicAuth("owner", "secret123")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("git receive-pack: expected 200, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	resp, err = http.Get(ts.URL + "/api/v1/repos/owner/repo/symbols/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("symbols endpoint: expected 200, got %d", resp.StatusCode)
+	}
+	var symbols []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&symbols); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if len(symbols) == 0 {
+		t.Fatal("expected at least one symbol from indexed go file")
+	}
+
+	repo, err := db.GetRepository(context.Background(), "owner", "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotCommitHash, err := db.GetGotHash(context.Background(), repo.ID, string(commitHash))
+	if err != nil {
+		t.Fatal(err)
+	}
+	indexHash, err := db.GetCommitIndex(context.Background(), repo.ID, gotCommitHash)
+	if err != nil {
+		t.Fatalf("expected persisted commit index mapping, got error: %v", err)
+	}
+	if strings.TrimSpace(indexHash) == "" {
+		t.Fatal("expected non-empty persisted index hash")
+	}
+}
+
 func TestMergeBlockedByBranchProtectionApprovalRequirement(t *testing.T) {
 	server, _ := setupTestServer(t)
 	ts := httptest.NewServer(server)
