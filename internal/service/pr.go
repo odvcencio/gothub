@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/odvcencio/got/pkg/diff"
@@ -71,16 +72,35 @@ func (e *TargetBranchMovedError) Error() string {
 	)
 }
 
+const (
+	mergePreviewCacheTTL        = 30 * time.Second
+	mergePreviewCacheMaxEntries = 256
+)
+
+type mergePreviewCacheEntry struct {
+	resp     *MergePreviewResponse
+	cachedAt time.Time
+	expires  time.Time
+}
+
 type PRService struct {
 	db           database.DB
 	repoSvc      *RepoService
 	browseSvc    *BrowseService
 	codeIntelSvc *CodeIntelService
 	lineageSvc   *EntityLineageService
+
+	mergePreviewMu    sync.Mutex
+	mergePreviewCache map[string]mergePreviewCacheEntry
 }
 
 func NewPRService(db database.DB, repoSvc *RepoService, browseSvc *BrowseService) *PRService {
-	return &PRService{db: db, repoSvc: repoSvc, browseSvc: browseSvc}
+	return &PRService{
+		db:                db,
+		repoSvc:           repoSvc,
+		browseSvc:         browseSvc,
+		mergePreviewCache: make(map[string]mergePreviewCacheEntry),
+	}
 }
 
 func (s *PRService) SetCodeIntelService(codeIntelSvc *CodeIntelService) {
@@ -204,6 +224,10 @@ func (s *PRService) MergePreview(ctx context.Context, owner, repo string, pr *mo
 	tgtHash, err := store.Refs.Get("heads/" + pr.TargetBranch)
 	if err != nil {
 		return nil, fmt.Errorf("target branch: %w", err)
+	}
+	cacheKey := fmt.Sprintf("%d:%s:%s", pr.RepoID, tgtHash, srcHash)
+	if cached, ok := s.getCachedMergePreview(cacheKey); ok {
+		return cached, nil
 	}
 
 	// Find merge base
@@ -342,6 +366,7 @@ func (s *PRService) MergePreview(ctx context.Context, owner, repo string, pr *mo
 		Deleted:        totalStats.Deleted,
 		Conflicts:      totalStats.Conflicts,
 	}
+	s.setCachedMergePreview(cacheKey, resp)
 	return resp, nil
 }
 
@@ -539,6 +564,76 @@ func updateTargetBranchRef(store *gotstore.RepoStore, branch string, expectedOld
 		return fmt.Errorf("update ref: %w", err)
 	}
 	return nil
+}
+
+func (s *PRService) getCachedMergePreview(key string) (*MergePreviewResponse, bool) {
+	s.mergePreviewMu.Lock()
+	defer s.mergePreviewMu.Unlock()
+
+	now := time.Now()
+	s.pruneExpiredMergePreviewCache(now)
+	entry, ok := s.mergePreviewCache[key]
+	if !ok || now.After(entry.expires) {
+		if ok {
+			delete(s.mergePreviewCache, key)
+		}
+		return nil, false
+	}
+	return cloneMergePreviewResponse(entry.resp), true
+}
+
+func (s *PRService) setCachedMergePreview(key string, resp *MergePreviewResponse) {
+	s.mergePreviewMu.Lock()
+	defer s.mergePreviewMu.Unlock()
+
+	now := time.Now()
+	s.pruneExpiredMergePreviewCache(now)
+	if len(s.mergePreviewCache) >= mergePreviewCacheMaxEntries {
+		s.evictOldestMergePreviewEntry()
+	}
+	s.mergePreviewCache[key] = mergePreviewCacheEntry{
+		resp:     cloneMergePreviewResponse(resp),
+		cachedAt: now,
+		expires:  now.Add(mergePreviewCacheTTL),
+	}
+}
+
+func (s *PRService) pruneExpiredMergePreviewCache(now time.Time) {
+	for key, entry := range s.mergePreviewCache {
+		if now.After(entry.expires) {
+			delete(s.mergePreviewCache, key)
+		}
+	}
+}
+
+func (s *PRService) evictOldestMergePreviewEntry() {
+	var (
+		oldestKey string
+		oldest    time.Time
+		set       bool
+	)
+	for key, entry := range s.mergePreviewCache {
+		if !set || entry.cachedAt.Before(oldest) {
+			set = true
+			oldest = entry.cachedAt
+			oldestKey = key
+		}
+	}
+	if set {
+		delete(s.mergePreviewCache, oldestKey)
+	}
+}
+
+func cloneMergePreviewResponse(in *MergePreviewResponse) *MergePreviewResponse {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	if len(in.Files) > 0 {
+		out.Files = make([]FileMergeInfo, len(in.Files))
+		copy(out.Files, in.Files)
+	}
+	return &out
 }
 
 // Comments

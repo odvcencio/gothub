@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/odvcencio/got/pkg/object"
 	"github.com/odvcencio/gothub/internal/database"
@@ -91,6 +92,52 @@ func TestUpdateTargetBranchRefReportsCASMismatch(t *testing.T) {
 	}
 	if headAfter != current {
 		t.Fatalf("main ref should remain unchanged after CAS mismatch: got %s want %s", headAfter, current)
+	}
+}
+
+func TestMergePreviewCacheClonesResponses(t *testing.T) {
+	svc := &PRService{mergePreviewCache: make(map[string]mergePreviewCacheEntry)}
+	original := &MergePreviewResponse{
+		HasConflicts: false,
+		Files:        []FileMergeInfo{{Path: "main.go", Status: "clean"}},
+	}
+
+	svc.setCachedMergePreview("k", original)
+	original.Files[0].Path = "mutated.go"
+
+	got1, ok := svc.getCachedMergePreview("k")
+	if !ok {
+		t.Fatal("expected cached preview entry")
+	}
+	if got1.Files[0].Path != "main.go" {
+		t.Fatalf("expected cached copy to preserve original path, got %q", got1.Files[0].Path)
+	}
+
+	got1.Files[0].Path = "changed-again.go"
+	got2, ok := svc.getCachedMergePreview("k")
+	if !ok {
+		t.Fatal("expected cached preview entry on second read")
+	}
+	if got2.Files[0].Path != "main.go" {
+		t.Fatalf("expected cached value to be isolated from caller mutation, got %q", got2.Files[0].Path)
+	}
+}
+
+func TestMergePreviewCacheExpiresEntries(t *testing.T) {
+	svc := &PRService{
+		mergePreviewCache: map[string]mergePreviewCacheEntry{
+			"k": {
+				resp:    &MergePreviewResponse{Files: []FileMergeInfo{{Path: "main.go"}}},
+				expires: time.Now().Add(-time.Second),
+			},
+		},
+	}
+
+	if _, ok := svc.getCachedMergePreview("k"); ok {
+		t.Fatal("expected expired cache entry to be treated as miss")
+	}
+	if len(svc.mergePreviewCache) != 0 {
+		t.Fatalf("expected expired cache entry to be pruned, got %d entries", len(svc.mergePreviewCache))
 	}
 }
 
