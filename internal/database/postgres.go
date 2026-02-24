@@ -363,6 +363,65 @@ CREATE TABLE IF NOT EXISTS entity_versions (
 	FOREIGN KEY (repo_id, stable_id) REFERENCES entity_identities(repo_id, stable_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS entity_index_commits (
+	repo_id BIGINT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+	commit_hash TEXT NOT NULL,
+	symbol_count INTEGER NOT NULL DEFAULT 0,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	PRIMARY KEY (repo_id, commit_hash)
+);
+
+CREATE TABLE IF NOT EXISTS entity_index (
+	id BIGSERIAL PRIMARY KEY,
+	repo_id BIGINT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+	commit_hash TEXT NOT NULL,
+	file_path TEXT NOT NULL,
+	symbol_key TEXT NOT NULL,
+	stable_id TEXT NOT NULL DEFAULT '',
+	kind TEXT NOT NULL DEFAULT '',
+	name TEXT NOT NULL,
+	signature TEXT NOT NULL DEFAULT '',
+	receiver TEXT NOT NULL DEFAULT '',
+	language TEXT NOT NULL DEFAULT '',
+	doc_comment TEXT NOT NULL DEFAULT '',
+	start_line INTEGER NOT NULL DEFAULT 0,
+	end_line INTEGER NOT NULL DEFAULT 0,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	UNIQUE (repo_id, commit_hash, symbol_key)
+);
+
+CREATE TABLE IF NOT EXISTS xref_definitions (
+	repo_id BIGINT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+	commit_hash TEXT NOT NULL,
+	entity_id TEXT NOT NULL,
+	file TEXT NOT NULL,
+	package_name TEXT NOT NULL DEFAULT '',
+	kind TEXT NOT NULL,
+	name TEXT NOT NULL,
+	signature TEXT NOT NULL DEFAULT '',
+	receiver TEXT NOT NULL DEFAULT '',
+	start_line INTEGER NOT NULL DEFAULT 0,
+	end_line INTEGER NOT NULL DEFAULT 0,
+	callable BOOLEAN NOT NULL DEFAULT FALSE,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	PRIMARY KEY (repo_id, commit_hash, entity_id)
+);
+
+CREATE TABLE IF NOT EXISTS xref_edges (
+	repo_id BIGINT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+	commit_hash TEXT NOT NULL,
+	source_entity_id TEXT NOT NULL,
+	target_entity_id TEXT NOT NULL,
+	kind TEXT NOT NULL DEFAULT 'call',
+	source_file TEXT NOT NULL DEFAULT '',
+	source_line INTEGER NOT NULL DEFAULT 0,
+	resolution TEXT NOT NULL DEFAULT '',
+	count INTEGER NOT NULL DEFAULT 1,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	PRIMARY KEY (repo_id, commit_hash, source_entity_id, target_entity_id, kind)
+);
+
 CREATE INDEX IF NOT EXISTS idx_hash_mapping_git ON hash_mapping(repo_id, git_hash);
 CREATE INDEX IF NOT EXISTS idx_hash_mapping_got ON hash_mapping(repo_id, got_hash);
 CREATE INDEX IF NOT EXISTS idx_magic_link_tokens_hash ON magic_link_tokens(token_hash);
@@ -377,6 +436,15 @@ CREATE INDEX IF NOT EXISTS idx_tree_modes_repo_tree ON git_tree_entry_modes(repo
 CREATE INDEX IF NOT EXISTS idx_entity_versions_repo_commit ON entity_versions(repo_id, commit_hash);
 CREATE INDEX IF NOT EXISTS idx_entity_versions_repo_stable ON entity_versions(repo_id, stable_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_entity_versions_repo_bodyhash ON entity_versions(repo_id, body_hash);
+CREATE INDEX IF NOT EXISTS idx_entity_index_commits_repo ON entity_index_commits(repo_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_entity_index_repo_commit ON entity_index(repo_id, commit_hash, file_path, start_line);
+CREATE INDEX IF NOT EXISTS idx_entity_index_repo_kind ON entity_index(repo_id, commit_hash, kind);
+CREATE INDEX IF NOT EXISTS idx_entity_index_repo_name ON entity_index(repo_id, commit_hash, name);
+CREATE INDEX IF NOT EXISTS idx_entity_index_search ON entity_index
+	USING GIN (to_tsvector('simple', coalesce(name, '') || ' ' || coalesce(signature, '') || ' ' || coalesce(doc_comment, '')));
+CREATE INDEX IF NOT EXISTS idx_xref_definitions_repo_commit_name ON xref_definitions(repo_id, commit_hash, name);
+CREATE INDEX IF NOT EXISTS idx_xref_edges_repo_commit_source ON xref_edges(repo_id, commit_hash, source_entity_id, kind);
+CREATE INDEX IF NOT EXISTS idx_xref_edges_repo_commit_target ON xref_edges(repo_id, commit_hash, target_entity_id, kind);
 CREATE INDEX IF NOT EXISTS idx_branch_protection_repo_branch ON branch_protection_rules(repo_id, branch);
 CREATE INDEX IF NOT EXISTS idx_pr_check_runs_pr ON pr_check_runs(pr_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_issues_repo_number ON issues(repo_id, number DESC);
@@ -677,6 +745,35 @@ func (p *PostgresDB) CloneRepoMetadata(ctx context.Context, sourceRepoID, target
 			query: `INSERT INTO entity_versions (repo_id, stable_id, commit_hash, path, entity_hash, body_hash, name, decl_kind, receiver, created_at)
 					SELECT $1, stable_id, commit_hash, path, entity_hash, body_hash, name, decl_kind, receiver, created_at
 					FROM entity_versions
+					WHERE repo_id = $2`,
+			args: []any{targetRepoID, sourceRepoID},
+		},
+		{
+			query: `INSERT INTO entity_index_commits (repo_id, commit_hash, symbol_count, created_at, updated_at)
+					SELECT $1, commit_hash, symbol_count, created_at, updated_at
+					FROM entity_index_commits
+					WHERE repo_id = $2`,
+			args: []any{targetRepoID, sourceRepoID},
+		},
+		{
+			query: `INSERT INTO entity_index
+						(repo_id, commit_hash, file_path, symbol_key, stable_id, kind, name, signature, receiver, language, doc_comment, start_line, end_line, created_at)
+					SELECT $1, commit_hash, file_path, symbol_key, stable_id, kind, name, signature, receiver, language, doc_comment, start_line, end_line, created_at
+					FROM entity_index
+					WHERE repo_id = $2`,
+			args: []any{targetRepoID, sourceRepoID},
+		},
+		{
+			query: `INSERT INTO xref_definitions (repo_id, commit_hash, entity_id, file, package_name, kind, name, signature, receiver, start_line, end_line, callable, created_at)
+					SELECT $1, commit_hash, entity_id, file, package_name, kind, name, signature, receiver, start_line, end_line, callable, created_at
+					FROM xref_definitions
+					WHERE repo_id = $2`,
+			args: []any{targetRepoID, sourceRepoID},
+		},
+		{
+			query: `INSERT INTO xref_edges (repo_id, commit_hash, source_entity_id, target_entity_id, kind, source_file, source_line, resolution, count, created_at)
+					SELECT $1, commit_hash, source_entity_id, target_entity_id, kind, source_file, source_line, resolution, count, created_at
+					FROM xref_edges
 					WHERE repo_id = $2`,
 			args: []any{targetRepoID, sourceRepoID},
 		},
@@ -2037,6 +2134,470 @@ func (p *PostgresDB) HasEntityVersionsForCommit(ctx context.Context, repoID int6
 		return false, err
 	}
 	return true, nil
+}
+
+func (p *PostgresDB) SetEntityIndexEntries(ctx context.Context, repoID int64, commitHash string, entries []models.EntityIndexEntry) error {
+	if strings.TrimSpace(commitHash) == "" {
+		return nil
+	}
+
+	tx, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM entity_index WHERE repo_id = $1 AND commit_hash = $2`,
+		repoID, commitHash); err != nil {
+		return err
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO entity_index_commits (repo_id, commit_hash, symbol_count, updated_at)
+		 VALUES ($1, $2, $3, NOW())
+		 ON CONFLICT (repo_id, commit_hash) DO UPDATE SET
+			 symbol_count = EXCLUDED.symbol_count,
+			 updated_at = NOW()`,
+		repoID, commitHash, len(entries)); err != nil {
+		return err
+	}
+
+	if len(entries) == 0 {
+		return tx.Commit()
+	}
+
+	stmt, err := tx.PrepareContext(ctx,
+		`INSERT INTO entity_index
+			(repo_id, commit_hash, file_path, symbol_key, stable_id, kind, name, signature, receiver, language, doc_comment, start_line, end_line)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+		 ON CONFLICT (repo_id, commit_hash, symbol_key) DO UPDATE SET
+			 file_path = EXCLUDED.file_path,
+			 stable_id = EXCLUDED.stable_id,
+			 kind = EXCLUDED.kind,
+			 name = EXCLUDED.name,
+			 signature = EXCLUDED.signature,
+			 receiver = EXCLUDED.receiver,
+			 language = EXCLUDED.language,
+			 doc_comment = EXCLUDED.doc_comment,
+			 start_line = EXCLUDED.start_line,
+			 end_line = EXCLUDED.end_line`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, entry := range entries {
+		if strings.TrimSpace(entry.SymbolKey) == "" {
+			continue
+		}
+		if _, err := stmt.ExecContext(ctx,
+			repoID,
+			commitHash,
+			entry.FilePath,
+			entry.SymbolKey,
+			entry.StableID,
+			entry.Kind,
+			entry.Name,
+			entry.Signature,
+			entry.Receiver,
+			entry.Language,
+			entry.DocComment,
+			entry.StartLine,
+			entry.EndLine,
+		); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+func (p *PostgresDB) ListEntityIndexEntriesByCommit(ctx context.Context, repoID int64, commitHash, kind string, limit int) ([]models.EntityIndexEntry, error) {
+	query := `SELECT repo_id, commit_hash, file_path, symbol_key, stable_id, kind, name, signature, receiver, language, doc_comment, start_line, end_line, created_at
+		FROM entity_index
+		WHERE repo_id = $1 AND commit_hash = $2`
+	args := []any{repoID, commitHash}
+	if strings.TrimSpace(kind) != "" {
+		args = append(args, kind)
+		query += fmt.Sprintf(` AND kind = $%d`, len(args))
+	}
+	query += ` ORDER BY file_path, start_line, name`
+	if limit > 0 {
+		args = append(args, limit)
+		query += fmt.Sprintf(` LIMIT $%d`, len(args))
+	}
+
+	rows, err := p.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanPostgresEntityIndexEntries(rows)
+}
+
+func (p *PostgresDB) SearchEntityIndexEntries(ctx context.Context, repoID int64, commitHash, textQuery, kind string, limit int) ([]models.EntityIndexEntry, error) {
+	queryText := strings.TrimSpace(textQuery)
+	if queryText == "" {
+		return p.ListEntityIndexEntriesByCommit(ctx, repoID, commitHash, kind, limit)
+	}
+
+	vectorExpr := `to_tsvector('simple', coalesce(name, '') || ' ' || coalesce(signature, '') || ' ' || coalesce(doc_comment, ''))`
+	query := `SELECT repo_id, commit_hash, file_path, symbol_key, stable_id, kind, name, signature, receiver, language, doc_comment, start_line, end_line, created_at
+		FROM entity_index
+		WHERE repo_id = $1 AND commit_hash = $2`
+	args := []any{repoID, commitHash}
+	if strings.TrimSpace(kind) != "" {
+		args = append(args, kind)
+		query += fmt.Sprintf(` AND kind = $%d`, len(args))
+	}
+
+	args = append(args, queryText)
+	searchArgPos := len(args)
+	query += fmt.Sprintf(` AND (
+		%s @@ plainto_tsquery('simple', $%d)
+		OR name ILIKE '%%' || $%d || '%%'
+		OR signature ILIKE '%%' || $%d || '%%'
+		OR doc_comment ILIKE '%%' || $%d || '%%'
+	)`, vectorExpr, searchArgPos, searchArgPos, searchArgPos, searchArgPos)
+	query += fmt.Sprintf(` ORDER BY
+		CASE WHEN %s @@ plainto_tsquery('simple', $%d) THEN 0 ELSE 1 END,
+		ts_rank_cd(%s, plainto_tsquery('simple', $%d)) DESC,
+		name, file_path, start_line`, vectorExpr, searchArgPos, vectorExpr, searchArgPos)
+	if limit > 0 {
+		args = append(args, limit)
+		query += fmt.Sprintf(` LIMIT $%d`, len(args))
+	}
+
+	rows, err := p.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanPostgresEntityIndexEntries(rows)
+}
+
+func (p *PostgresDB) HasEntityIndexForCommit(ctx context.Context, repoID int64, commitHash string) (bool, error) {
+	var one int
+	err := p.db.QueryRowContext(ctx,
+		`SELECT 1 FROM entity_index_commits WHERE repo_id = $1 AND commit_hash = $2 LIMIT 1`,
+		repoID, commitHash).Scan(&one)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func scanPostgresEntityIndexEntries(rows *sql.Rows) ([]models.EntityIndexEntry, error) {
+	entries := make([]models.EntityIndexEntry, 0)
+	for rows.Next() {
+		var entry models.EntityIndexEntry
+		if err := rows.Scan(
+			&entry.RepoID,
+			&entry.CommitHash,
+			&entry.FilePath,
+			&entry.SymbolKey,
+			&entry.StableID,
+			&entry.Kind,
+			&entry.Name,
+			&entry.Signature,
+			&entry.Receiver,
+			&entry.Language,
+			&entry.DocComment,
+			&entry.StartLine,
+			&entry.EndLine,
+			&entry.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		entries = append(entries, entry)
+	}
+	return entries, rows.Err()
+}
+
+func (p *PostgresDB) SetCommitXRefGraph(ctx context.Context, repoID int64, commitHash string, defs []models.XRefDefinition, edges []models.XRefEdge) error {
+	if strings.TrimSpace(commitHash) == "" {
+		return nil
+	}
+
+	tx, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM xref_edges WHERE repo_id = $1 AND commit_hash = $2`,
+		repoID, commitHash); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM xref_definitions WHERE repo_id = $1 AND commit_hash = $2`,
+		repoID, commitHash); err != nil {
+		return err
+	}
+
+	if len(defs) > 0 {
+		stmt, err := tx.PrepareContext(ctx,
+			`INSERT INTO xref_definitions
+				(repo_id, commit_hash, entity_id, file, package_name, kind, name, signature, receiver, start_line, end_line, callable)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+			 ON CONFLICT (repo_id, commit_hash, entity_id) DO UPDATE SET
+				 file = EXCLUDED.file,
+				 package_name = EXCLUDED.package_name,
+				 kind = EXCLUDED.kind,
+				 name = EXCLUDED.name,
+				 signature = EXCLUDED.signature,
+				 receiver = EXCLUDED.receiver,
+				 start_line = EXCLUDED.start_line,
+				 end_line = EXCLUDED.end_line,
+				 callable = EXCLUDED.callable`)
+		if err != nil {
+			return err
+		}
+		defer stmt.Close()
+
+		for i := range defs {
+			d := defs[i]
+			entityID := strings.TrimSpace(d.EntityID)
+			if entityID == "" {
+				continue
+			}
+			if _, err := stmt.ExecContext(ctx,
+				repoID,
+				commitHash,
+				entityID,
+				d.File,
+				d.PackageName,
+				d.Kind,
+				d.Name,
+				d.Signature,
+				d.Receiver,
+				d.StartLine,
+				d.EndLine,
+				d.Callable,
+			); err != nil {
+				return err
+			}
+		}
+	}
+
+	if len(edges) > 0 {
+		stmt, err := tx.PrepareContext(ctx,
+			`INSERT INTO xref_edges
+				(repo_id, commit_hash, source_entity_id, target_entity_id, kind, source_file, source_line, resolution, count)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			 ON CONFLICT (repo_id, commit_hash, source_entity_id, target_entity_id, kind) DO UPDATE SET
+				 source_file = EXCLUDED.source_file,
+				 source_line = EXCLUDED.source_line,
+				 resolution = EXCLUDED.resolution,
+				 count = EXCLUDED.count`)
+		if err != nil {
+			return err
+		}
+		defer stmt.Close()
+
+		for i := range edges {
+			e := edges[i]
+			sourceID := strings.TrimSpace(e.SourceEntityID)
+			targetID := strings.TrimSpace(e.TargetEntityID)
+			if sourceID == "" || targetID == "" {
+				continue
+			}
+			kind := strings.TrimSpace(e.Kind)
+			if kind == "" {
+				kind = "call"
+			}
+			count := e.Count
+			if count <= 0 {
+				count = 1
+			}
+			if _, err := stmt.ExecContext(ctx,
+				repoID,
+				commitHash,
+				sourceID,
+				targetID,
+				kind,
+				e.SourceFile,
+				e.SourceLine,
+				e.Resolution,
+				count,
+			); err != nil {
+				return err
+			}
+		}
+	}
+
+	return tx.Commit()
+}
+
+func (p *PostgresDB) HasXRefGraphForCommit(ctx context.Context, repoID int64, commitHash string) (bool, error) {
+	var one int
+	err := p.db.QueryRowContext(ctx,
+		`SELECT 1 FROM xref_definitions WHERE repo_id = $1 AND commit_hash = $2 LIMIT 1`,
+		repoID, commitHash).Scan(&one)
+	if err == nil {
+		return true, nil
+	}
+	if err != sql.ErrNoRows {
+		return false, err
+	}
+
+	err = p.db.QueryRowContext(ctx,
+		`SELECT 1 FROM xref_edges WHERE repo_id = $1 AND commit_hash = $2 LIMIT 1`,
+		repoID, commitHash).Scan(&one)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (p *PostgresDB) FindXRefDefinitionsByName(ctx context.Context, repoID int64, commitHash, name string) ([]models.XRefDefinition, error) {
+	rows, err := p.db.QueryContext(ctx,
+		`SELECT repo_id, commit_hash, entity_id, file, package_name, kind, name, signature, receiver, start_line, end_line, callable, created_at
+		 FROM xref_definitions
+		 WHERE repo_id = $1 AND commit_hash = $2 AND name = $3
+		 ORDER BY file, start_line, entity_id`,
+		repoID, commitHash, name)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	defs := make([]models.XRefDefinition, 0)
+	for rows.Next() {
+		var d models.XRefDefinition
+		if err := rows.Scan(
+			&d.RepoID,
+			&d.CommitHash,
+			&d.EntityID,
+			&d.File,
+			&d.PackageName,
+			&d.Kind,
+			&d.Name,
+			&d.Signature,
+			&d.Receiver,
+			&d.StartLine,
+			&d.EndLine,
+			&d.Callable,
+			&d.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		defs = append(defs, d)
+	}
+	return defs, rows.Err()
+}
+
+func (p *PostgresDB) GetXRefDefinition(ctx context.Context, repoID int64, commitHash, entityID string) (*models.XRefDefinition, error) {
+	var d models.XRefDefinition
+	err := p.db.QueryRowContext(ctx,
+		`SELECT repo_id, commit_hash, entity_id, file, package_name, kind, name, signature, receiver, start_line, end_line, callable, created_at
+		 FROM xref_definitions
+		 WHERE repo_id = $1 AND commit_hash = $2 AND entity_id = $3`,
+		repoID, commitHash, entityID).Scan(
+		&d.RepoID,
+		&d.CommitHash,
+		&d.EntityID,
+		&d.File,
+		&d.PackageName,
+		&d.Kind,
+		&d.Name,
+		&d.Signature,
+		&d.Receiver,
+		&d.StartLine,
+		&d.EndLine,
+		&d.Callable,
+		&d.CreatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &d, nil
+}
+
+func (p *PostgresDB) ListXRefEdgesFrom(ctx context.Context, repoID int64, commitHash, sourceEntityID, kind string) ([]models.XRefEdge, error) {
+	query := `SELECT repo_id, commit_hash, source_entity_id, target_entity_id, kind, source_file, source_line, resolution, count, created_at
+		FROM xref_edges
+		WHERE repo_id = $1 AND commit_hash = $2 AND source_entity_id = $3`
+	args := []any{repoID, commitHash, sourceEntityID}
+	if strings.TrimSpace(kind) != "" {
+		query += ` AND kind = $4`
+		args = append(args, kind)
+	}
+	query += ` ORDER BY target_entity_id, kind`
+
+	rows, err := p.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	edges := make([]models.XRefEdge, 0)
+	for rows.Next() {
+		var e models.XRefEdge
+		if err := rows.Scan(
+			&e.RepoID,
+			&e.CommitHash,
+			&e.SourceEntityID,
+			&e.TargetEntityID,
+			&e.Kind,
+			&e.SourceFile,
+			&e.SourceLine,
+			&e.Resolution,
+			&e.Count,
+			&e.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		edges = append(edges, e)
+	}
+	return edges, rows.Err()
+}
+
+func (p *PostgresDB) ListXRefEdgesTo(ctx context.Context, repoID int64, commitHash, targetEntityID, kind string) ([]models.XRefEdge, error) {
+	query := `SELECT repo_id, commit_hash, source_entity_id, target_entity_id, kind, source_file, source_line, resolution, count, created_at
+		FROM xref_edges
+		WHERE repo_id = $1 AND commit_hash = $2 AND target_entity_id = $3`
+	args := []any{repoID, commitHash, targetEntityID}
+	if strings.TrimSpace(kind) != "" {
+		query += ` AND kind = $4`
+		args = append(args, kind)
+	}
+	query += ` ORDER BY source_entity_id, kind`
+
+	rows, err := p.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	edges := make([]models.XRefEdge, 0)
+	for rows.Next() {
+		var e models.XRefEdge
+		if err := rows.Scan(
+			&e.RepoID,
+			&e.CommitHash,
+			&e.SourceEntityID,
+			&e.TargetEntityID,
+			&e.Kind,
+			&e.SourceFile,
+			&e.SourceLine,
+			&e.Resolution,
+			&e.Count,
+			&e.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		edges = append(edges, e)
+	}
+	return edges, rows.Err()
 }
 
 // --- Organizations ---

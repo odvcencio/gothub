@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 
@@ -22,6 +23,10 @@ func (s *Server) handleSearchSymbols(w http.ResponseWriter, r *http.Request) {
 
 	results, err := s.codeIntelSvc.SearchSymbols(r.Context(), owner, repo, ref, selector)
 	if err != nil {
+		if errors.Is(err, service.ErrInvalidSymbolSelector) {
+			jsonError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		jsonError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

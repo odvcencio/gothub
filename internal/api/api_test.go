@@ -481,6 +481,22 @@ func TestForkRepoCopiesStoreAndMetadata(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if err := db.SetEntityIndexEntries(ctx, sourceRepo.ID, string(commitHash), []models.EntityIndexEntry{
+		{
+			RepoID:     sourceRepo.ID,
+			CommitHash: string(commitHash),
+			FilePath:   "README.md",
+			SymbolKey:  "sym-readme",
+			StableID:   "ent-readme",
+			Kind:       "constant",
+			Name:       "README",
+			Signature:  "const README = \"hello fork\"",
+			StartLine:  1,
+			EndLine:    1,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/repos/alice/repo/forks", bytes.NewBufferString(`{}`))
 	req.Header.Set("Authorization", "Bearer "+forkerToken)
@@ -555,6 +571,13 @@ func TestForkRepoCopiesStoreAndMetadata(t *testing.T) {
 	}
 	if len(versions) != 1 || versions[0].StableID != "ent-readme" {
 		t.Fatalf("expected copied entity versions, got %+v", versions)
+	}
+	entries, err := db.ListEntityIndexEntriesByCommit(ctx, forkRepo.ID, string(commitHash), "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name != "README" {
+		t.Fatalf("expected copied entity index entries, got %+v", entries)
 	}
 
 	// A second fork by the same user should auto-suffix to avoid name collisions.
@@ -1938,6 +1961,31 @@ func TestCodeIntelPersistsCommitIndex(t *testing.T) {
 	if len(symbols) == 0 {
 		t.Fatal("expected at least one symbol from indexed go file")
 	}
+
+	resp, err = http.Get(ts.URL + "/api/v1/repos/owner/repo/symbols/main?q=ProcessOrder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("symbols plain-text query: expected 200, got %d", resp.StatusCode)
+	}
+	var filtered []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&filtered); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if len(filtered) == 0 {
+		t.Fatal("expected plain-text symbol search to return at least one result")
+	}
+
+	resp, err = http.Get(ts.URL + "/api/v1/repos/owner/repo/symbols/main?q=%2A%5Bname%3D%2FProcessOrder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("symbols invalid selector: expected 400, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
 
 	repo, err := db.GetRepository(context.Background(), "owner", "repo")
 	if err != nil {

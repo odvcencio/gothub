@@ -2,8 +2,11 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -13,6 +16,7 @@ import (
 	"github.com/odvcencio/got/pkg/object"
 	"github.com/odvcencio/gothub/internal/database"
 	"github.com/odvcencio/gothub/internal/gotstore"
+	"github.com/odvcencio/gothub/internal/models"
 	"github.com/odvcencio/gts-suite/pkg/index"
 	"github.com/odvcencio/gts-suite/pkg/model"
 	"github.com/odvcencio/gts-suite/pkg/query"
@@ -24,7 +28,10 @@ const (
 	repoIndexSchemaVersion                          = "0.1.0"
 	defaultCodeIntelCacheMaxItems                   = 128
 	defaultCodeIntelCacheTTL                        = 15 * time.Minute
+	defaultSymbolSearchLimit                        = 500
 )
+
+var ErrInvalidSymbolSelector = errors.New("invalid symbol selector")
 
 type codeIntelCacheEntry struct {
 	index      *model.Index
@@ -99,12 +106,15 @@ func (s *CodeIntelService) EnsureCommitIndexed(ctx context.Context, repoID int64
 	key := ""
 	if strings.TrimSpace(cacheKey) != "" {
 		key = fmt.Sprintf("%s@%s", cacheKey, commitHash)
-		if _, ok := s.getCachedIndex(key); ok {
-			return nil
+		if idx, ok := s.getCachedIndex(key); ok {
+			return s.persistEntityIndexIfNeeded(ctx, repoID, string(commitHash), idx)
 		}
 	}
 
 	if idx, ok, err := s.loadPersistedIndex(ctx, store, repoID, string(commitHash)); err == nil && ok {
+		if err := s.persistEntityIndexIfNeeded(ctx, repoID, string(commitHash), idx); err != nil {
+			return err
+		}
 		if key != "" {
 			s.setCachedIndex(key, idx)
 		}
@@ -116,6 +126,9 @@ func (s *CodeIntelService) EnsureCommitIndexed(ctx context.Context, repoID int64
 		return err
 	}
 	if err := s.persistIndex(ctx, store, repoID, string(commitHash), idx); err != nil {
+		return err
+	}
+	if err := s.persistEntityIndex(ctx, repoID, string(commitHash), idx); err != nil {
 		return err
 	}
 	if key != "" {
@@ -224,6 +237,65 @@ func (s *CodeIntelService) persistIndex(ctx context.Context, store *gotstore.Rep
 	return s.db.SetCommitIndex(ctx, repoID, commitHash, string(indexHash))
 }
 
+func (s *CodeIntelService) persistEntityIndexIfNeeded(ctx context.Context, repoID int64, commitHash string, idx *model.Index) error {
+	ok, err := s.db.HasEntityIndexForCommit(ctx, repoID, commitHash)
+	if err == nil && ok {
+		return nil
+	}
+	return s.persistEntityIndex(ctx, repoID, commitHash, idx)
+}
+
+func (s *CodeIntelService) persistEntityIndex(ctx context.Context, repoID int64, commitHash string, idx *model.Index) error {
+	entries := make([]models.EntityIndexEntry, 0)
+	if idx != nil {
+		entries = buildEntityIndexEntries(repoID, commitHash, idx)
+	}
+	return s.db.SetEntityIndexEntries(ctx, repoID, commitHash, entries)
+}
+
+func buildEntityIndexEntries(repoID int64, commitHash string, idx *model.Index) []models.EntityIndexEntry {
+	if idx == nil {
+		return nil
+	}
+	entries := make([]models.EntityIndexEntry, 0, idx.SymbolCount())
+	for _, file := range idx.Files {
+		for _, sym := range file.Symbols {
+			key := symbolIndexKey(file.Path, sym)
+			if strings.TrimSpace(key) == "" {
+				continue
+			}
+			entries = append(entries, models.EntityIndexEntry{
+				RepoID:     repoID,
+				CommitHash: commitHash,
+				FilePath:   file.Path,
+				SymbolKey:  key,
+				Kind:       sym.Kind,
+				Name:       sym.Name,
+				Signature:  sym.Signature,
+				Receiver:   sym.Receiver,
+				Language:   file.Language,
+				StartLine:  sym.StartLine,
+				EndLine:    sym.EndLine,
+			})
+		}
+	}
+	return entries
+}
+
+func symbolIndexKey(filePath string, sym model.Symbol) string {
+	seed := strings.Join([]string{
+		filePath,
+		sym.Kind,
+		sym.Name,
+		sym.Signature,
+		sym.Receiver,
+		fmt.Sprintf("%d", sym.StartLine),
+		fmt.Sprintf("%d", sym.EndLine),
+	}, "\x00")
+	sum := sha256.Sum256([]byte(seed))
+	return hex.EncodeToString(sum[:])
+}
+
 func (s *CodeIntelService) getCachedIndex(key string) (*model.Index, bool) {
 	now := time.Now()
 	s.mu.Lock()
@@ -280,16 +352,132 @@ type SymbolResult struct {
 
 // SearchSymbols finds symbols matching a selector or name pattern.
 func (s *CodeIntelService) SearchSymbols(ctx context.Context, owner, repo, ref, selectorStr string) ([]SymbolResult, error) {
-	idx, err := s.BuildIndex(ctx, owner, repo, ref)
+	selectorText := strings.TrimSpace(selectorStr)
+	if selectorText == "" {
+		selectorText = "*"
+	}
+
+	commitHash, err := s.browseSvc.ResolveRef(ctx, owner, repo, ref)
+	if err != nil {
+		return nil, fmt.Errorf("resolve ref: %w", err)
+	}
+	repoModel, err := s.repoSvc.Get(ctx, owner, repo)
 	if err != nil {
 		return nil, err
 	}
 
-	sel, err := query.ParseSelector(selectorStr)
-	if err != nil {
-		return nil, fmt.Errorf("parse selector: %w", err)
+	sel, selErr := query.ParseSelector(selectorText)
+	if selErr != nil && selectorContainsFilterSyntax(selectorText) {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidSymbolSelector, selErr)
 	}
 
+	if err := s.ensureEntityIndexForCommit(ctx, owner, repo, ref, repoModel.ID, commitHash); err == nil {
+		if selErr == nil {
+			results, err := s.searchSymbolsFromEntityIndexSelector(ctx, repoModel.ID, string(commitHash), sel)
+			if err == nil {
+				return results, nil
+			}
+		} else {
+			entries, err := s.db.SearchEntityIndexEntries(ctx, repoModel.ID, string(commitHash), selectorText, "", defaultSymbolSearchLimit)
+			if err == nil {
+				return symbolResultsFromEntityIndexEntries(entries), nil
+			}
+		}
+	}
+
+	// Fallback: use semantic index in memory/object-store when DB-backed symbol rows are unavailable.
+	idx, err := s.BuildIndex(ctx, owner, repo, ref)
+	if err != nil {
+		return nil, err
+	}
+	if selErr == nil {
+		return searchSymbolsFromIndexWithSelector(idx, sel), nil
+	}
+	return searchSymbolsFromIndexWithContains(idx, selectorText), nil
+}
+
+func (s *CodeIntelService) ensureEntityIndexForCommit(ctx context.Context, owner, repo, ref string, repoID int64, commitHash object.Hash) error {
+	ok, err := s.db.HasEntityIndexForCommit(ctx, repoID, string(commitHash))
+	if err == nil && ok {
+		return nil
+	}
+
+	idx, err := s.BuildIndex(ctx, owner, repo, ref)
+	if err != nil {
+		return err
+	}
+	return s.persistEntityIndex(ctx, repoID, string(commitHash), idx)
+}
+
+func (s *CodeIntelService) searchSymbolsFromEntityIndexSelector(ctx context.Context, repoID int64, commitHash string, sel query.Selector) ([]SymbolResult, error) {
+	kind := ""
+	if sel.Kind != "*" {
+		kind = sel.Kind
+	}
+
+	entries, err := s.db.ListEntityIndexEntriesByCommit(ctx, repoID, commitHash, kind, 0)
+	if err != nil {
+		return nil, err
+	}
+	if !selectorNeedsSymbolMatch(sel) {
+		return symbolResultsFromEntityIndexEntries(entries), nil
+	}
+
+	var results []SymbolResult
+	for _, entry := range entries {
+		sym := model.Symbol{
+			File:      entry.FilePath,
+			Kind:      entry.Kind,
+			Name:      entry.Name,
+			Signature: entry.Signature,
+			Receiver:  entry.Receiver,
+			StartLine: entry.StartLine,
+			EndLine:   entry.EndLine,
+		}
+		if sel.Match(sym) {
+			results = append(results, symbolResultFromEntityIndexEntry(entry))
+		}
+	}
+	return results, nil
+}
+
+func selectorContainsFilterSyntax(raw string) bool {
+	return strings.Contains(raw, "[") || strings.Contains(raw, "]")
+}
+
+func selectorNeedsSymbolMatch(sel query.Selector) bool {
+	return sel.NameRE != nil ||
+		sel.SignatureRE != nil ||
+		sel.ReceiverRE != nil ||
+		sel.FileRE != nil ||
+		sel.StartMin != nil ||
+		sel.StartMax != nil ||
+		sel.EndMin != nil ||
+		sel.EndMax != nil ||
+		sel.Line != nil
+}
+
+func symbolResultsFromEntityIndexEntries(entries []models.EntityIndexEntry) []SymbolResult {
+	results := make([]SymbolResult, 0, len(entries))
+	for _, entry := range entries {
+		results = append(results, symbolResultFromEntityIndexEntry(entry))
+	}
+	return results
+}
+
+func symbolResultFromEntityIndexEntry(entry models.EntityIndexEntry) SymbolResult {
+	return SymbolResult{
+		File:      entry.FilePath,
+		Kind:      entry.Kind,
+		Name:      entry.Name,
+		Signature: entry.Signature,
+		Receiver:  entry.Receiver,
+		StartLine: entry.StartLine,
+		EndLine:   entry.EndLine,
+	}
+}
+
+func searchSymbolsFromIndexWithSelector(idx *model.Index, sel query.Selector) []SymbolResult {
 	var results []SymbolResult
 	for _, f := range idx.Files {
 		for _, sym := range f.Symbols {
@@ -306,7 +494,33 @@ func (s *CodeIntelService) SearchSymbols(ctx context.Context, owner, repo, ref, 
 			}
 		}
 	}
-	return results, nil
+	return results
+}
+
+func searchSymbolsFromIndexWithContains(idx *model.Index, rawQuery string) []SymbolResult {
+	needle := strings.ToLower(strings.TrimSpace(rawQuery))
+	if needle == "" {
+		return nil
+	}
+	var results []SymbolResult
+	for _, f := range idx.Files {
+		for _, sym := range f.Symbols {
+			if strings.Contains(strings.ToLower(sym.Name), needle) ||
+				strings.Contains(strings.ToLower(sym.Signature), needle) ||
+				strings.Contains(strings.ToLower(sym.Receiver), needle) {
+				results = append(results, SymbolResult{
+					File:      f.Path,
+					Kind:      sym.Kind,
+					Name:      sym.Name,
+					Signature: sym.Signature,
+					Receiver:  sym.Receiver,
+					StartLine: sym.StartLine,
+					EndLine:   sym.EndLine,
+				})
+			}
+		}
+	}
+	return results
 }
 
 // ReferenceResult is a reference to a symbol.

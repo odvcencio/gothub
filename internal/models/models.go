@@ -297,3 +297,49 @@ type EntityVersion struct {
 	Receiver   string    `json:"receiver,omitempty"`
 	CreatedAt  time.Time `json:"created_at"`
 }
+
+type EntityIndexEntry struct {
+	RepoID     int64     `json:"repo_id"`
+	CommitHash string    `json:"commit_hash"`
+	FilePath   string    `json:"file_path"`
+	SymbolKey  string    `json:"symbol_key"`
+	StableID   string    `json:"stable_id,omitempty"`
+	Kind       string    `json:"kind"`
+	Name       string    `json:"name"`
+	Signature  string    `json:"signature,omitempty"`
+	Receiver   string    `json:"receiver,omitempty"`
+	Language   string    `json:"language,omitempty"`
+	DocComment string    `json:"doc_comment,omitempty"`
+	StartLine  int       `json:"start_line"`
+	EndLine    int       `json:"end_line"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+type XRefDefinition struct {
+	RepoID      int64     `json:"repo_id"`
+	CommitHash  string    `json:"commit_hash"`
+	EntityID    string    `json:"entity_id"`
+	File        string    `json:"file"`
+	PackageName string    `json:"package_name"`
+	Kind        string    `json:"kind"`
+	Name        string    `json:"name"`
+	Signature   string    `json:"signature,omitempty"`
+	Receiver    string    `json:"receiver,omitempty"`
+	StartLine   int       `json:"start_line"`
+	EndLine     int       `json:"end_line"`
+	Callable    bool      `json:"callable"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+type XRefEdge struct {
+	RepoID         int64     `json:"repo_id"`
+	CommitHash     string    `json:"commit_hash"`
+	SourceEntityID string    `json:"source_entity_id"`
+	TargetEntityID string    `json:"target_entity_id"`
+	Kind           string    `json:"kind"` // "call", "type_ref", "import"
+	SourceFile     string    `json:"source_file"`
+	SourceLine     int       `json:"source_line"`
+	Resolution     string    `json:"resolution,omitempty"`
+	Count          int       `json:"count"`
+	CreatedAt      time.Time `json:"created_at"`
+}

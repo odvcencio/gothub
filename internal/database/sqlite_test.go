@@ -259,6 +259,59 @@ func TestSQLiteCloneRepoMetadataCopiesRecords(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if err := db.SetEntityIndexEntries(ctx, src.ID, commitHash, []models.EntityIndexEntry{
+		{
+			RepoID:     src.ID,
+			CommitHash: commitHash,
+			FilePath:   "main.go",
+			SymbolKey:  "sym-1",
+			StableID:   "ent-1",
+			Kind:       "function",
+			Name:       "Process",
+			Signature:  "func Process()",
+			StartLine:  20,
+			EndLine:    23,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetCommitXRefGraph(ctx, src.ID, commitHash,
+		[]models.XRefDefinition{
+			{
+				EntityID:    "main.go\x00function\x00Caller\x0010",
+				File:        "main.go",
+				PackageName: "main",
+				Kind:        "function",
+				Name:        "Caller",
+				StartLine:   10,
+				EndLine:     12,
+				Callable:    true,
+			},
+			{
+				EntityID:    "main.go\x00function\x00Process\x0020",
+				File:        "main.go",
+				PackageName: "main",
+				Kind:        "function",
+				Name:        "Process",
+				StartLine:   20,
+				EndLine:     23,
+				Callable:    true,
+			},
+		},
+		[]models.XRefEdge{
+			{
+				SourceEntityID: "main.go\x00function\x00Caller\x0010",
+				TargetEntityID: "main.go\x00function\x00Process\x0020",
+				Kind:           "call",
+				SourceFile:     "main.go",
+				SourceLine:     11,
+				Resolution:     "file",
+				Count:          2,
+			},
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := db.CloneRepoMetadata(ctx, src.ID, dst.ID); err != nil {
 		t.Fatal(err)
@@ -294,6 +347,36 @@ func TestSQLiteCloneRepoMetadataCopiesRecords(t *testing.T) {
 	}
 	if len(versions) != 1 || versions[0].StableID != "ent-1" {
 		t.Fatalf("expected copied entity versions, got %+v", versions)
+	}
+	hasEntityIndex, err := db.HasEntityIndexForCommit(ctx, dst.ID, commitHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasEntityIndex {
+		t.Fatalf("expected copied entity index commit marker for commit %s", commitHash)
+	}
+	entries, err := db.ListEntityIndexEntriesByCommit(ctx, dst.ID, commitHash, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name != "Process" {
+		t.Fatalf("expected copied entity index entries, got %+v", entries)
+	}
+
+	hasXRef, err := db.HasXRefGraphForCommit(ctx, dst.ID, commitHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasXRef {
+		t.Fatalf("expected copied xref graph for commit %s", commitHash)
+	}
+
+	callers, err := db.ListXRefEdgesTo(ctx, dst.ID, commitHash, "main.go\x00function\x00Process\x0020", "call")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(callers) != 1 || callers[0].SourceEntityID != "main.go\x00function\x00Caller\x0010" {
+		t.Fatalf("expected copied xref edge, got %+v", callers)
 	}
 }
 
@@ -698,6 +781,274 @@ func TestSQLiteEntityLineageStorage(t *testing.T) {
 	}
 	if versions[0].StableID != id.StableID {
 		t.Fatalf("expected stable id %q, got %q", id.StableID, versions[0].StableID)
+	}
+}
+
+func TestSQLiteXRefGraphStorageAndQueries(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	user := &models.User{Username: "alice", Email: "alice@example.com", PasswordHash: "x"}
+	if err := db.CreateUser(ctx, user); err != nil {
+		t.Fatal(err)
+	}
+	repo := &models.Repository{
+		OwnerUserID:   &user.ID,
+		Name:          "repo",
+		DefaultBranch: "main",
+		StoragePath:   "pending",
+	}
+	if err := db.CreateRepository(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+
+	commitHash := strings.Repeat("a", 64)
+	callerID := "main.go\x00function\x00Caller\x0010"
+	calleeID := "main.go\x00function\x00ProcessOrder\x0020"
+
+	err = db.SetCommitXRefGraph(ctx, repo.ID, commitHash,
+		[]models.XRefDefinition{
+			{
+				EntityID:    callerID,
+				File:        "main.go",
+				PackageName: "main",
+				Kind:        "function",
+				Name:        "Caller",
+				StartLine:   10,
+				EndLine:     13,
+				Callable:    true,
+			},
+			{
+				EntityID:    calleeID,
+				File:        "main.go",
+				PackageName: "main",
+				Kind:        "function",
+				Name:        "ProcessOrder",
+				StartLine:   20,
+				EndLine:     24,
+				Callable:    true,
+			},
+		},
+		[]models.XRefEdge{
+			{
+				SourceEntityID: callerID,
+				TargetEntityID: calleeID,
+				Kind:           "call",
+				SourceFile:     "main.go",
+				SourceLine:     12,
+				Resolution:     "file",
+				Count:          3,
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	has, err := db.HasXRefGraphForCommit(ctx, repo.ID, commitHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !has {
+		t.Fatalf("expected xref graph for commit %s", commitHash)
+	}
+
+	defs, err := db.FindXRefDefinitionsByName(ctx, repo.ID, commitHash, "ProcessOrder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(defs) != 1 || defs[0].EntityID != calleeID {
+		t.Fatalf("expected ProcessOrder definition, got %+v", defs)
+	}
+
+	def, err := db.GetXRefDefinition(ctx, repo.ID, commitHash, callerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if def.Name != "Caller" {
+		t.Fatalf("expected caller definition, got %+v", def)
+	}
+
+	outgoing, err := db.ListXRefEdgesFrom(ctx, repo.ID, commitHash, callerID, "call")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(outgoing) != 1 || outgoing[0].TargetEntityID != calleeID {
+		t.Fatalf("expected outgoing call edge, got %+v", outgoing)
+	}
+
+	incoming, err := db.ListXRefEdgesTo(ctx, repo.ID, commitHash, calleeID, "call")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(incoming) != 1 || incoming[0].SourceEntityID != callerID {
+		t.Fatalf("expected incoming call edge, got %+v", incoming)
+	}
+
+	err = db.SetCommitXRefGraph(ctx, repo.ID, commitHash,
+		[]models.XRefDefinition{
+			{
+				EntityID:    calleeID,
+				File:        "main.go",
+				PackageName: "main",
+				Kind:        "function",
+				Name:        "ProcessOrder",
+				StartLine:   20,
+				EndLine:     24,
+				Callable:    true,
+			},
+		},
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	outgoing, err = db.ListXRefEdgesFrom(ctx, repo.ID, commitHash, callerID, "call")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(outgoing) != 0 {
+		t.Fatalf("expected replaced graph to clear outgoing edges, got %+v", outgoing)
+	}
+}
+
+func TestSQLiteEntityIndexStorageAndSearch(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	user := &models.User{Username: "alice", Email: "alice@example.com", PasswordHash: "x"}
+	if err := db.CreateUser(ctx, user); err != nil {
+		t.Fatal(err)
+	}
+	repo := &models.Repository{
+		OwnerUserID:   &user.ID,
+		Name:          "repo",
+		DefaultBranch: "main",
+		StoragePath:   "pending",
+	}
+	if err := db.CreateRepository(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+
+	commitHash := strings.Repeat("a", 64)
+	entries := []models.EntityIndexEntry{
+		{
+			RepoID:     repo.ID,
+			CommitHash: commitHash,
+			FilePath:   "main.go",
+			SymbolKey:  "sym-1",
+			Kind:       "function",
+			Name:       "ProcessOrder",
+			Signature:  "func ProcessOrder()",
+			StartLine:  10,
+			EndLine:    14,
+		},
+		{
+			RepoID:     repo.ID,
+			CommitHash: commitHash,
+			FilePath:   "main.go",
+			SymbolKey:  "sym-2",
+			Kind:       "function",
+			Name:       "ValidateOrder",
+			Signature:  "func ValidateOrder()",
+			StartLine:  16,
+			EndLine:    18,
+		},
+		{
+			RepoID:     repo.ID,
+			CommitHash: commitHash,
+			FilePath:   "service.go",
+			SymbolKey:  "sym-3",
+			Kind:       "type",
+			Name:       "OrderService",
+			Signature:  "type OrderService struct{}",
+			StartLine:  2,
+			EndLine:    5,
+		},
+		{
+			RepoID:     repo.ID,
+			CommitHash: commitHash,
+			FilePath:   "http.go",
+			SymbolKey:  "sym-4",
+			Kind:       "type",
+			Name:       "HttpClient",
+			Signature:  "type HttpClient struct{}",
+			StartLine:  3,
+			EndLine:    6,
+		},
+	}
+	if err := db.SetEntityIndexEntries(ctx, repo.ID, commitHash, entries); err != nil {
+		t.Fatal(err)
+	}
+
+	has, err := db.HasEntityIndexForCommit(ctx, repo.ID, commitHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !has {
+		t.Fatalf("expected commit %s to have entity index marker", commitHash)
+	}
+
+	listed, err := db.ListEntityIndexEntriesByCommit(ctx, repo.ID, commitHash, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != len(entries) {
+		t.Fatalf("expected %d listed entries, got %d", len(entries), len(listed))
+	}
+
+	results, err := db.SearchEntityIndexEntries(ctx, repo.ID, commitHash, "Order", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 3 {
+		t.Fatalf("expected 3 results for Order, got %+v", results)
+	}
+
+	functions, err := db.SearchEntityIndexEntries(ctx, repo.ID, commitHash, "Order", "function", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(functions) != 2 {
+		t.Fatalf("expected 2 function results for Order, got %+v", functions)
+	}
+
+	if err := db.SetEntityIndexEntries(ctx, repo.ID, commitHash, nil); err != nil {
+		t.Fatal(err)
+	}
+	afterReplace, err := db.ListEntityIndexEntriesByCommit(ctx, repo.ID, commitHash, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(afterReplace) != 0 {
+		t.Fatalf("expected replacement with nil entries to clear rows, got %+v", afterReplace)
+	}
+
+	has, err = db.HasEntityIndexForCommit(ctx, repo.ID, commitHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !has {
+		t.Fatalf("expected commit marker to remain after empty replacement for %s", commitHash)
 	}
 }
 

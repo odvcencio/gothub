@@ -139,6 +139,16 @@ type DB interface {
 	SetEntityVersion(ctx context.Context, version *models.EntityVersion) error
 	ListEntityVersionsByCommit(ctx context.Context, repoID int64, commitHash string) ([]models.EntityVersion, error)
 	HasEntityVersionsForCommit(ctx context.Context, repoID int64, commitHash string) (bool, error)
+	SetEntityIndexEntries(ctx context.Context, repoID int64, commitHash string, entries []models.EntityIndexEntry) error
+	ListEntityIndexEntriesByCommit(ctx context.Context, repoID int64, commitHash, kind string, limit int) ([]models.EntityIndexEntry, error)
+	SearchEntityIndexEntries(ctx context.Context, repoID int64, commitHash, textQuery, kind string, limit int) ([]models.EntityIndexEntry, error)
+	HasEntityIndexForCommit(ctx context.Context, repoID int64, commitHash string) (bool, error)
+	SetCommitXRefGraph(ctx context.Context, repoID int64, commitHash string, defs []models.XRefDefinition, edges []models.XRefEdge) error
+	HasXRefGraphForCommit(ctx context.Context, repoID int64, commitHash string) (bool, error)
+	FindXRefDefinitionsByName(ctx context.Context, repoID int64, commitHash, name string) ([]models.XRefDefinition, error)
+	GetXRefDefinition(ctx context.Context, repoID int64, commitHash, entityID string) (*models.XRefDefinition, error)
+	ListXRefEdgesFrom(ctx context.Context, repoID int64, commitHash, sourceEntityID, kind string) ([]models.XRefEdge, error)
+	ListXRefEdgesTo(ctx context.Context, repoID int64, commitHash, targetEntityID, kind string) ([]models.XRefEdge, error)
 
 	// Organizations
 	CreateOrg(ctx context.Context, o *models.Org) error
