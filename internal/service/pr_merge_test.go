@@ -1,0 +1,160 @@
+package service
+
+import (
+	"context"
+	"errors"
+	"path/filepath"
+	"testing"
+
+	"github.com/odvcencio/got/pkg/object"
+	"github.com/odvcencio/gothub/internal/database"
+	"github.com/odvcencio/gothub/internal/gotstore"
+	"github.com/odvcencio/gothub/internal/models"
+)
+
+func TestPRMergeReturnsStructuredConflictAndPreservesTargetRef(t *testing.T) {
+	ctx, prSvc, store, repo := setupPRMergeTestService(t)
+
+	base := writeMainCommit(t, store, "package main\n\nfunc A() int { return 0 }\n", nil, "base", 1700000000)
+	mainHead := writeMainCommit(t, store, "package main\n\nfunc A() int { return 1 }\n", []object.Hash{base}, "main", 1700000010)
+	featureHead := writeMainCommit(t, store, "package main\n\nfunc A() int { return 2 }\n", []object.Hash{base}, "feature", 1700000020)
+
+	if err := store.Refs.Set("heads/main", mainHead); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Refs.Set("heads/feature", featureHead); err != nil {
+		t.Fatal(err)
+	}
+
+	pr := &models.PullRequest{
+		RepoID:       repo.ID,
+		Number:       1,
+		Title:        "conflict",
+		SourceBranch: "feature",
+		TargetBranch: "main",
+	}
+
+	_, err := prSvc.Merge(ctx, "alice", "repo", pr, "alice")
+	if err == nil {
+		t.Fatal("expected merge conflict error")
+	}
+
+	var mergeConflict *MergeConflictError
+	if !errors.As(err, &mergeConflict) {
+		t.Fatalf("expected MergeConflictError, got %T: %v", err, err)
+	}
+	if len(mergeConflict.Paths) != 1 || mergeConflict.Paths[0] != "main.go" {
+		t.Fatalf("unexpected conflict paths: %+v", mergeConflict.Paths)
+	}
+
+	headAfter, err := store.Refs.Get("heads/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if headAfter != mainHead {
+		t.Fatalf("target branch should remain unchanged on conflict: got %s want %s", headAfter, mainHead)
+	}
+}
+
+func TestUpdateTargetBranchRefReportsCASMismatch(t *testing.T) {
+	_, _, store, _ := setupPRMergeTestService(t)
+
+	current := writeMainCommit(t, store, "package main\n\nfunc A() int { return 1 }\n", nil, "current", 1700000100)
+	next := writeMainCommit(t, store, "package main\n\nfunc A() int { return 2 }\n", []object.Hash{current}, "next", 1700000200)
+
+	if err := store.Refs.Set("heads/main", current); err != nil {
+		t.Fatal(err)
+	}
+
+	err := updateTargetBranchRef(store, "main", next, next)
+	if err == nil {
+		t.Fatal("expected CAS mismatch error")
+	}
+
+	var moved *TargetBranchMovedError
+	if !errors.As(err, &moved) {
+		t.Fatalf("expected TargetBranchMovedError, got %T: %v", err, err)
+	}
+	if moved.Branch != "main" {
+		t.Fatalf("unexpected branch in moved error: %q", moved.Branch)
+	}
+	if moved.Expected != next {
+		t.Fatalf("unexpected expected hash: got %s want %s", moved.Expected, next)
+	}
+	if moved.Actual != current {
+		t.Fatalf("unexpected actual hash: got %s want %s", moved.Actual, current)
+	}
+
+	headAfter, err := store.Refs.Get("heads/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if headAfter != current {
+		t.Fatalf("main ref should remain unchanged after CAS mismatch: got %s want %s", headAfter, current)
+	}
+}
+
+func setupPRMergeTestService(t *testing.T) (context.Context, *PRService, *gotstore.RepoStore, *models.Repository) {
+	t.Helper()
+
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	db, err := database.OpenSQLite(filepath.Join(tmpDir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	user := &models.User{Username: "alice", Email: "alice@example.com", PasswordHash: "x"}
+	if err := db.CreateUser(ctx, user); err != nil {
+		t.Fatal(err)
+	}
+
+	repoSvc := NewRepoService(db, filepath.Join(tmpDir, "repos"))
+	repo, err := repoSvc.Create(ctx, user.ID, "repo", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := repoSvc.OpenStore(ctx, "alice", "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	prSvc := NewPRService(db, repoSvc, nil)
+	return ctx, prSvc, store, repo
+}
+
+func writeMainCommit(t *testing.T, store *gotstore.RepoStore, content string, parents []object.Hash, message string, ts int64) object.Hash {
+	t.Helper()
+
+	blobHash, err := store.Objects.WriteBlob(&object.Blob{Data: []byte(content)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	treeHash, err := store.Objects.WriteTree(&object.TreeObj{
+		Entries: []object.TreeEntry{
+			{
+				Name:     "main.go",
+				BlobHash: blobHash,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitHash, err := store.Objects.WriteCommit(&object.CommitObj{
+		TreeHash:  treeHash,
+		Parents:   parents,
+		Author:    "alice",
+		Timestamp: ts,
+		Message:   message,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return commitHash
+}

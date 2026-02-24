@@ -2,8 +2,10 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/odvcencio/got/pkg/diff"
@@ -11,6 +13,7 @@ import (
 	"github.com/odvcencio/got/pkg/merge"
 	"github.com/odvcencio/got/pkg/object"
 	"github.com/odvcencio/gothub/internal/database"
+	"github.com/odvcencio/gothub/internal/gotstore"
 	"github.com/odvcencio/gothub/internal/models"
 )
 
@@ -37,6 +40,35 @@ type FileMergeInfo struct {
 	Path          string `json:"path"`
 	Status        string `json:"status"` // "clean", "conflict", "added", "deleted"
 	ConflictCount int    `json:"conflict_count"`
+}
+
+// MergeConflictError reports file paths that have unresolved merge conflicts.
+type MergeConflictError struct {
+	Paths []string
+}
+
+func (e *MergeConflictError) Error() string {
+	if len(e.Paths) == 0 {
+		return "merge has conflicts"
+	}
+	if len(e.Paths) == 1 {
+		return fmt.Sprintf("merge conflict in %s", e.Paths[0])
+	}
+	return fmt.Sprintf("merge conflicts in %d files: %s", len(e.Paths), strings.Join(e.Paths, ", "))
+}
+
+// TargetBranchMovedError indicates the target branch changed during merge.
+type TargetBranchMovedError struct {
+	Branch   string
+	Expected object.Hash
+	Actual   object.Hash
+}
+
+func (e *TargetBranchMovedError) Error() string {
+	return fmt.Sprintf(
+		"target branch %s moved during merge (expected %s, got %s); refresh and retry",
+		e.Branch, e.Expected, e.Actual,
+	)
 }
 
 type PRService struct {
@@ -377,6 +409,7 @@ func (s *PRService) Merge(ctx context.Context, owner, repo string, pr *models.Pu
 
 	// Build merged tree entries
 	mergedEntries := map[string]object.Hash{} // path -> blob hash
+	conflictedPaths := make([]string, 0, 4)
 
 	for path := range allPaths {
 		baseEntry := baseMap[path]
@@ -424,7 +457,8 @@ func (s *PRService) Merge(ctx context.Context, owner, repo string, pr *models.Pu
 
 		result, err := merge.MergeFiles(path, baseData, tgtData, srcData)
 		if err != nil || result.HasConflicts {
-			return "", fmt.Errorf("merge conflict in %s", path)
+			conflictedPaths = append(conflictedPaths, path)
+			continue
 		}
 
 		blobHash, err := store.Objects.WriteBlob(&object.Blob{Data: result.Merged})
@@ -432,6 +466,10 @@ func (s *PRService) Merge(ctx context.Context, owner, repo string, pr *models.Pu
 			return "", fmt.Errorf("write merged blob: %w", err)
 		}
 		mergedEntries[path] = blobHash
+	}
+	if len(conflictedPaths) > 0 {
+		sort.Strings(conflictedPaths)
+		return "", &MergeConflictError{Paths: conflictedPaths}
 	}
 
 	// Build tree from merged entries
@@ -457,9 +495,9 @@ func (s *PRService) Merge(ctx context.Context, owner, repo string, pr *models.Pu
 		return "", fmt.Errorf("write merge commit: %w", err)
 	}
 
-	// Update target branch ref
-	if err := store.Refs.Set("heads/"+pr.TargetBranch, mergeCommitHash); err != nil {
-		return "", fmt.Errorf("update ref: %w", err)
+	// Update target branch ref with CAS to avoid clobbering concurrent pushes.
+	if err := updateTargetBranchRef(store, pr.TargetBranch, tgtHash, mergeCommitHash); err != nil {
+		return "", err
 	}
 
 	// Update PR state
@@ -485,6 +523,22 @@ func (s *PRService) Merge(ctx context.Context, owner, repo string, pr *models.Pu
 	}
 
 	return mergeCommitHash, nil
+}
+
+func updateTargetBranchRef(store *gotstore.RepoStore, branch string, expectedOld, newHash object.Hash) error {
+	refName := "heads/" + branch
+	if err := store.Refs.Update(refName, &expectedOld, &newHash); err != nil {
+		var mismatch *gotstore.RefCASMismatchError
+		if errors.As(err, &mismatch) {
+			return &TargetBranchMovedError{
+				Branch:   branch,
+				Expected: expectedOld,
+				Actual:   mismatch.Actual,
+			}
+		}
+		return fmt.Errorf("update ref: %w", err)
+	}
+	return nil
 }
 
 // Comments
