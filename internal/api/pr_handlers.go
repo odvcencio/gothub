@@ -1,0 +1,330 @@
+package api
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"strconv"
+
+	"github.com/odvcencio/gothub/internal/auth"
+	"github.com/odvcencio/gothub/internal/models"
+)
+
+type createPRRequest struct {
+	Title        string `json:"title"`
+	Body         string `json:"body"`
+	SourceBranch string `json:"source_branch"`
+	TargetBranch string `json:"target_branch"`
+}
+
+func (s *Server) handleCreatePR(w http.ResponseWriter, r *http.Request) {
+	claims := auth.GetClaims(r.Context())
+	owner := r.PathValue("owner")
+	repoName := r.PathValue("repo")
+
+	repo, err := s.repoSvc.Get(r.Context(), owner, repoName)
+	if err != nil {
+		jsonError(w, "repository not found", http.StatusNotFound)
+		return
+	}
+
+	var req createPRRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.Title == "" || req.SourceBranch == "" {
+		jsonError(w, "title and source_branch are required", http.StatusBadRequest)
+		return
+	}
+	if req.TargetBranch == "" {
+		req.TargetBranch = repo.DefaultBranch
+	}
+
+	pr, err := s.prSvc.Create(r.Context(), repo.ID, claims.UserID, req.Title, req.Body, req.SourceBranch, req.TargetBranch)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	jsonResponse(w, http.StatusCreated, pr)
+}
+
+func (s *Server) handleListPRs(w http.ResponseWriter, r *http.Request) {
+	owner := r.PathValue("owner")
+	repoName := r.PathValue("repo")
+
+	repo, err := s.repoSvc.Get(r.Context(), owner, repoName)
+	if err != nil {
+		jsonError(w, "repository not found", http.StatusNotFound)
+		return
+	}
+
+	state := r.URL.Query().Get("state")
+	prs, err := s.prSvc.List(r.Context(), repo.ID, state)
+	if err != nil {
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	jsonResponse(w, http.StatusOK, prs)
+}
+
+func (s *Server) handleGetPR(w http.ResponseWriter, r *http.Request) {
+	owner := r.PathValue("owner")
+	repoName := r.PathValue("repo")
+	number, _ := strconv.Atoi(r.PathValue("number"))
+
+	repo, err := s.repoSvc.Get(r.Context(), owner, repoName)
+	if err != nil {
+		jsonError(w, "repository not found", http.StatusNotFound)
+		return
+	}
+
+	pr, err := s.prSvc.Get(r.Context(), repo.ID, number)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			jsonError(w, "pull request not found", http.StatusNotFound)
+			return
+		}
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	jsonResponse(w, http.StatusOK, pr)
+}
+
+func (s *Server) handlePRDiff(w http.ResponseWriter, r *http.Request) {
+	owner := r.PathValue("owner")
+	repoName := r.PathValue("repo")
+	number, _ := strconv.Atoi(r.PathValue("number"))
+
+	repo, err := s.repoSvc.Get(r.Context(), owner, repoName)
+	if err != nil {
+		jsonError(w, "repository not found", http.StatusNotFound)
+		return
+	}
+
+	pr, err := s.prSvc.Get(r.Context(), repo.ID, number)
+	if err != nil {
+		jsonError(w, "pull request not found", http.StatusNotFound)
+		return
+	}
+
+	result, err := s.prSvc.Diff(r.Context(), owner, repoName, pr)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonResponse(w, http.StatusOK, result)
+}
+
+func (s *Server) handleMergePreview(w http.ResponseWriter, r *http.Request) {
+	owner := r.PathValue("owner")
+	repoName := r.PathValue("repo")
+	number, _ := strconv.Atoi(r.PathValue("number"))
+
+	repo, err := s.repoSvc.Get(r.Context(), owner, repoName)
+	if err != nil {
+		jsonError(w, "repository not found", http.StatusNotFound)
+		return
+	}
+
+	pr, err := s.prSvc.Get(r.Context(), repo.ID, number)
+	if err != nil {
+		jsonError(w, "pull request not found", http.StatusNotFound)
+		return
+	}
+
+	preview, err := s.prSvc.MergePreview(r.Context(), owner, repoName, pr)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonResponse(w, http.StatusOK, preview)
+}
+
+func (s *Server) handleMergePR(w http.ResponseWriter, r *http.Request) {
+	claims := auth.GetClaims(r.Context())
+	owner := r.PathValue("owner")
+	repoName := r.PathValue("repo")
+	number, _ := strconv.Atoi(r.PathValue("number"))
+
+	repo, err := s.repoSvc.Get(r.Context(), owner, repoName)
+	if err != nil {
+		jsonError(w, "repository not found", http.StatusNotFound)
+		return
+	}
+
+	pr, err := s.prSvc.Get(r.Context(), repo.ID, number)
+	if err != nil {
+		jsonError(w, "pull request not found", http.StatusNotFound)
+		return
+	}
+	if pr.State != "open" {
+		jsonError(w, "pull request is not open", http.StatusBadRequest)
+		return
+	}
+
+	user, _ := s.db.GetUserByID(r.Context(), claims.UserID)
+	mergerName := user.Username
+
+	mergeHash, err := s.prSvc.Merge(r.Context(), owner, repoName, pr, mergerName)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusConflict)
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]string{
+		"merge_commit": string(mergeHash),
+		"status":       "merged",
+	})
+}
+
+// PR Comments
+
+type createPRCommentRequest struct {
+	Body       string `json:"body"`
+	FilePath   string `json:"file_path"`
+	EntityKey  string `json:"entity_key"`
+	LineNumber *int   `json:"line_number"`
+	CommitHash string `json:"commit_hash"`
+}
+
+func (s *Server) handleCreatePRComment(w http.ResponseWriter, r *http.Request) {
+	claims := auth.GetClaims(r.Context())
+	owner := r.PathValue("owner")
+	repoName := r.PathValue("repo")
+	number, _ := strconv.Atoi(r.PathValue("number"))
+
+	repo, err := s.repoSvc.Get(r.Context(), owner, repoName)
+	if err != nil {
+		jsonError(w, "repository not found", http.StatusNotFound)
+		return
+	}
+
+	pr, err := s.prSvc.Get(r.Context(), repo.ID, number)
+	if err != nil {
+		jsonError(w, "pull request not found", http.StatusNotFound)
+		return
+	}
+
+	var req createPRCommentRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.Body == "" {
+		jsonError(w, "body is required", http.StatusBadRequest)
+		return
+	}
+
+	comment := &models.PRComment{
+		PRID:       pr.ID,
+		AuthorID:   claims.UserID,
+		Body:       req.Body,
+		FilePath:   req.FilePath,
+		EntityKey:  req.EntityKey,
+		LineNumber: req.LineNumber,
+		CommitHash: req.CommitHash,
+	}
+	if err := s.prSvc.CreateComment(r.Context(), comment); err != nil {
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	jsonResponse(w, http.StatusCreated, comment)
+}
+
+func (s *Server) handleListPRComments(w http.ResponseWriter, r *http.Request) {
+	owner := r.PathValue("owner")
+	repoName := r.PathValue("repo")
+	number, _ := strconv.Atoi(r.PathValue("number"))
+
+	repo, err := s.repoSvc.Get(r.Context(), owner, repoName)
+	if err != nil {
+		jsonError(w, "repository not found", http.StatusNotFound)
+		return
+	}
+
+	pr, err := s.prSvc.Get(r.Context(), repo.ID, number)
+	if err != nil {
+		jsonError(w, "pull request not found", http.StatusNotFound)
+		return
+	}
+
+	comments, err := s.prSvc.ListComments(r.Context(), pr.ID)
+	if err != nil {
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	jsonResponse(w, http.StatusOK, comments)
+}
+
+// PR Reviews
+
+type createPRReviewRequest struct {
+	State      string `json:"state"` // "approved", "changes_requested", "commented"
+	Body       string `json:"body"`
+	CommitHash string `json:"commit_hash"`
+}
+
+func (s *Server) handleCreatePRReview(w http.ResponseWriter, r *http.Request) {
+	claims := auth.GetClaims(r.Context())
+	owner := r.PathValue("owner")
+	repoName := r.PathValue("repo")
+	number, _ := strconv.Atoi(r.PathValue("number"))
+
+	repo, err := s.repoSvc.Get(r.Context(), owner, repoName)
+	if err != nil {
+		jsonError(w, "repository not found", http.StatusNotFound)
+		return
+	}
+
+	pr, err := s.prSvc.Get(r.Context(), repo.ID, number)
+	if err != nil {
+		jsonError(w, "pull request not found", http.StatusNotFound)
+		return
+	}
+
+	var req createPRReviewRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	review := &models.PRReview{
+		PRID:       pr.ID,
+		AuthorID:   claims.UserID,
+		State:      req.State,
+		Body:       req.Body,
+		CommitHash: req.CommitHash,
+	}
+	if err := s.prSvc.CreateReview(r.Context(), review); err != nil {
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	jsonResponse(w, http.StatusCreated, review)
+}
+
+func (s *Server) handleListPRReviews(w http.ResponseWriter, r *http.Request) {
+	owner := r.PathValue("owner")
+	repoName := r.PathValue("repo")
+	number, _ := strconv.Atoi(r.PathValue("number"))
+
+	repo, err := s.repoSvc.Get(r.Context(), owner, repoName)
+	if err != nil {
+		jsonError(w, "repository not found", http.StatusNotFound)
+		return
+	}
+
+	pr, err := s.prSvc.Get(r.Context(), repo.ID, number)
+	if err != nil {
+		jsonError(w, "pull request not found", http.StatusNotFound)
+		return
+	}
+
+	reviews, err := s.prSvc.ListReviews(r.Context(), pr.ID)
+	if err != nil {
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	jsonResponse(w, http.StatusOK, reviews)
+}
