@@ -26,8 +26,14 @@ type DatabaseConfig struct {
 }
 
 type StorageConfig struct {
-	Backend string `yaml:"backend"` // "local" or "s3"
-	Path    string `yaml:"path"`    // local filesystem path for repos
+	Backend   string `yaml:"backend"`    // "local" or "s3"
+	Path      string `yaml:"path"`       // local filesystem path for repos
+	Endpoint  string `yaml:"endpoint"`   // S3 endpoint (e.g. "s3.amazonaws.com" or "minio:9000")
+	Bucket    string `yaml:"bucket"`     // S3 bucket name
+	Region    string `yaml:"region"`     // S3 region
+	AccessKey string `yaml:"access_key"` // S3 access key
+	SecretKey string `yaml:"secret_key"` // S3 secret key
+	UseSSL    bool   `yaml:"use_ssl"`    // S3 use SSL
 }
 
 type AuthConfig struct {
@@ -100,5 +106,23 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("GOTHUB_JWT_SECRET"); v != "" {
 		cfg.Auth.JWTSecret = v
+	}
+	if v := os.Getenv("GOTHUB_S3_ENDPOINT"); v != "" {
+		cfg.Storage.Endpoint = v
+	}
+	if v := os.Getenv("GOTHUB_S3_BUCKET"); v != "" {
+		cfg.Storage.Bucket = v
+	}
+	if v := os.Getenv("GOTHUB_S3_REGION"); v != "" {
+		cfg.Storage.Region = v
+	}
+	if v := os.Getenv("GOTHUB_S3_ACCESS_KEY"); v != "" {
+		cfg.Storage.AccessKey = v
+	}
+	if v := os.Getenv("GOTHUB_S3_SECRET_KEY"); v != "" {
+		cfg.Storage.SecretKey = v
+	}
+	if v := os.Getenv("GOTHUB_S3_USE_SSL"); v == "true" {
+		cfg.Storage.UseSSL = true
 	}
 }

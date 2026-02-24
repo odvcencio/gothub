@@ -115,6 +115,8 @@ func openDB(cfg *config.Config) (database.DB, error) {
 	switch cfg.Database.Driver {
 	case "sqlite":
 		return database.OpenSQLite(cfg.Database.DSN)
+	case "postgres":
+		return database.OpenPostgres(cfg.Database.DSN)
 	default:
 		return nil, fmt.Errorf("unsupported database driver: %s", cfg.Database.Driver)
 	}

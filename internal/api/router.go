@@ -16,27 +16,30 @@ import (
 )
 
 type Server struct {
-	db        database.DB
-	authSvc   *auth.Service
-	repoSvc   *service.RepoService
-	browseSvc *service.BrowseService
-	diffSvc   *service.DiffService
-	prSvc     *service.PRService
-	mux       *http.ServeMux
+	db           database.DB
+	authSvc      *auth.Service
+	repoSvc      *service.RepoService
+	browseSvc    *service.BrowseService
+	diffSvc      *service.DiffService
+	prSvc        *service.PRService
+	codeIntelSvc *service.CodeIntelService
+	mux          *http.ServeMux
 }
 
 func NewServer(db database.DB, authSvc *auth.Service, repoSvc *service.RepoService) *Server {
 	browseSvc := service.NewBrowseService(repoSvc)
 	diffSvc := service.NewDiffService(repoSvc, browseSvc)
 	prSvc := service.NewPRService(db, repoSvc, browseSvc)
+	codeIntelSvc := service.NewCodeIntelService(repoSvc, browseSvc)
 	s := &Server{
-		db:        db,
-		authSvc:   authSvc,
-		repoSvc:   repoSvc,
-		browseSvc: browseSvc,
-		diffSvc:   diffSvc,
-		prSvc:     prSvc,
-		mux:       http.NewServeMux(),
+		db:           db,
+		authSvc:      authSvc,
+		repoSvc:      repoSvc,
+		browseSvc:    browseSvc,
+		diffSvc:      diffSvc,
+		prSvc:        prSvc,
+		codeIntelSvc: codeIntelSvc,
+		mux:          http.NewServeMux(),
 	}
 	s.routes()
 	return s
@@ -86,6 +89,21 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/pulls/{number}/comments", s.handleListPRComments)
 	s.mux.HandleFunc("POST /api/v1/repos/{owner}/{repo}/pulls/{number}/reviews", s.requireAuth(s.handleCreatePRReview))
 	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/pulls/{number}/reviews", s.handleListPRReviews)
+
+	// Code intelligence
+	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/symbols/{ref}", s.handleSearchSymbols)
+	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/references/{ref}", s.handleFindReferences)
+	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/callgraph/{ref}", s.handleCallGraph)
+
+	// Organizations
+	s.mux.HandleFunc("POST /api/v1/orgs", s.requireAuth(s.handleCreateOrg))
+	s.mux.HandleFunc("GET /api/v1/orgs/{org}", s.handleGetOrg)
+	s.mux.HandleFunc("DELETE /api/v1/orgs/{org}", s.requireAuth(s.handleDeleteOrg))
+	s.mux.HandleFunc("GET /api/v1/orgs/{org}/members", s.handleListOrgMembers)
+	s.mux.HandleFunc("POST /api/v1/orgs/{org}/members", s.requireAuth(s.handleAddOrgMember))
+	s.mux.HandleFunc("DELETE /api/v1/orgs/{org}/members/{username}", s.requireAuth(s.handleRemoveOrgMember))
+	s.mux.HandleFunc("GET /api/v1/orgs/{org}/repos", s.handleListOrgRepos)
+	s.mux.HandleFunc("GET /api/v1/user/orgs", s.requireAuth(s.handleListUserOrgs))
 
 	// Got protocol
 	gotProto := gotprotocol.NewHandler(func(owner, repo string) (*gotstore.RepoStore, error) {

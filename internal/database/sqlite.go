@@ -60,6 +60,19 @@ CREATE TABLE IF NOT EXISTS ssh_keys (
 	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS orgs (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	name TEXT NOT NULL UNIQUE,
+	display_name TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS org_members (
+	org_id INTEGER NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+	user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	role TEXT NOT NULL DEFAULT 'member',
+	PRIMARY KEY (org_id, user_id)
+);
+
 CREATE TABLE IF NOT EXISTS repositories (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	owner_user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
@@ -482,6 +495,128 @@ func (s *SQLiteDB) GetGitHash(ctx context.Context, repoID int64, gotHash string)
 	err := s.db.QueryRowContext(ctx,
 		`SELECT git_hash FROM hash_mapping WHERE repo_id = ? AND got_hash = ?`, repoID, gotHash).Scan(&h)
 	return h, err
+}
+
+// --- Organizations ---
+
+func (s *SQLiteDB) CreateOrg(ctx context.Context, o *models.Org) error {
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO orgs (name, display_name) VALUES (?, ?)`,
+		o.Name, o.DisplayName)
+	if err != nil {
+		return err
+	}
+	o.ID, _ = res.LastInsertId()
+	return nil
+}
+
+func (s *SQLiteDB) GetOrg(ctx context.Context, name string) (*models.Org, error) {
+	o := &models.Org{}
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, name, display_name FROM orgs WHERE name = ?`, name).
+		Scan(&o.ID, &o.Name, &o.DisplayName)
+	if err != nil {
+		return nil, err
+	}
+	return o, nil
+}
+
+func (s *SQLiteDB) GetOrgByID(ctx context.Context, id int64) (*models.Org, error) {
+	o := &models.Org{}
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, name, display_name FROM orgs WHERE id = ?`, id).
+		Scan(&o.ID, &o.Name, &o.DisplayName)
+	if err != nil {
+		return nil, err
+	}
+	return o, nil
+}
+
+func (s *SQLiteDB) ListUserOrgs(ctx context.Context, userID int64) ([]models.Org, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT o.id, o.name, o.display_name FROM orgs o
+		 JOIN org_members om ON om.org_id = o.id
+		 WHERE om.user_id = ?`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var orgs []models.Org
+	for rows.Next() {
+		var o models.Org
+		if err := rows.Scan(&o.ID, &o.Name, &o.DisplayName); err != nil {
+			return nil, err
+		}
+		orgs = append(orgs, o)
+	}
+	return orgs, rows.Err()
+}
+
+func (s *SQLiteDB) DeleteOrg(ctx context.Context, id int64) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM orgs WHERE id = ?`, id)
+	return err
+}
+
+func (s *SQLiteDB) AddOrgMember(ctx context.Context, m *models.OrgMember) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT OR REPLACE INTO org_members (org_id, user_id, role) VALUES (?, ?, ?)`,
+		m.OrgID, m.UserID, m.Role)
+	return err
+}
+
+func (s *SQLiteDB) GetOrgMember(ctx context.Context, orgID, userID int64) (*models.OrgMember, error) {
+	m := &models.OrgMember{}
+	err := s.db.QueryRowContext(ctx,
+		`SELECT org_id, user_id, role FROM org_members WHERE org_id = ? AND user_id = ?`, orgID, userID).
+		Scan(&m.OrgID, &m.UserID, &m.Role)
+	if err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+func (s *SQLiteDB) ListOrgMembers(ctx context.Context, orgID int64) ([]models.OrgMember, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT org_id, user_id, role FROM org_members WHERE org_id = ?`, orgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var members []models.OrgMember
+	for rows.Next() {
+		var m models.OrgMember
+		if err := rows.Scan(&m.OrgID, &m.UserID, &m.Role); err != nil {
+			return nil, err
+		}
+		members = append(members, m)
+	}
+	return members, rows.Err()
+}
+
+func (s *SQLiteDB) RemoveOrgMember(ctx context.Context, orgID, userID int64) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM org_members WHERE org_id = ? AND user_id = ?`, orgID, userID)
+	return err
+}
+
+func (s *SQLiteDB) ListOrgRepositories(ctx context.Context, orgID int64) ([]models.Repository, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at, o.name
+		 FROM repositories r
+		 JOIN orgs o ON o.id = r.owner_org_id
+		 WHERE r.owner_org_id = ?`, orgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var repos []models.Repository
+	for rows.Next() {
+		var r models.Repository
+		if err := rows.Scan(&r.ID, &r.OwnerUserID, &r.OwnerOrgID, &r.Name, &r.Description, &r.DefaultBranch, &r.IsPrivate, &r.StoragePath, &r.CreatedAt, &r.OwnerName); err != nil {
+			return nil, err
+		}
+		repos = append(repos, r)
+	}
+	return repos, rows.Err()
 }
 
 // Compile-time interface check

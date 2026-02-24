@@ -1,0 +1,52 @@
+services:
+  gothub:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      GOTHUB_DB_DRIVER: postgres
+      GOTHUB_DB_DSN: postgres://gothub:gothub@postgres:5432/gothub?sslmode=disable
+      GOTHUB_STORAGE_BACKEND: local
+      GOTHUB_STORAGE_PATH: /data/repos
+      GOTHUB_JWT_SECRET: ${GOTHUB_JWT_SECRET:-change-me-in-production}
+    volumes:
+      - repo-data:/data/repos
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: gothub
+      POSTGRES_PASSWORD: gothub
+      POSTGRES_DB: gothub
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gothub"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Optional: MinIO for S3-compatible storage
+  # Uncomment to use S3 storage backend instead of local
+  # minio:
+  #   image: minio/minio
+  #   command: server /data --console-address ":9001"
+  #   environment:
+  #     MINIO_ROOT_USER: minioadmin
+  #     MINIO_ROOT_PASSWORD: minioadmin
+  #   ports:
+  #     - "9000:9000"
+  #     - "9001:9001"
+  #   volumes:
+  #     - minio-data:/data
+  #   restart: unless-stopped
+
+volumes:
+  pg-data:
+  repo-data:
+  # minio-data:

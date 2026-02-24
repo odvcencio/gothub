@@ -54,4 +54,16 @@ type DB interface {
 	SetHashMapping(ctx context.Context, m *models.HashMapping) error
 	GetGotHash(ctx context.Context, repoID int64, gitHash string) (string, error)
 	GetGitHash(ctx context.Context, repoID int64, gotHash string) (string, error)
+
+	// Organizations
+	CreateOrg(ctx context.Context, o *models.Org) error
+	GetOrg(ctx context.Context, name string) (*models.Org, error)
+	GetOrgByID(ctx context.Context, id int64) (*models.Org, error)
+	ListUserOrgs(ctx context.Context, userID int64) ([]models.Org, error)
+	DeleteOrg(ctx context.Context, id int64) error
+	AddOrgMember(ctx context.Context, m *models.OrgMember) error
+	GetOrgMember(ctx context.Context, orgID, userID int64) (*models.OrgMember, error)
+	ListOrgMembers(ctx context.Context, orgID int64) ([]models.OrgMember, error)
+	RemoveOrgMember(ctx context.Context, orgID, userID int64) error
+	ListOrgRepositories(ctx context.Context, orgID int64) ([]models.Repository, error)
 }
