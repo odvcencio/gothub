@@ -181,9 +181,121 @@ func TestWalkObjectsIncludesEntitiesFromEntityList(t *testing.T) {
 	}
 }
 
+func TestBatchObjectsUsesWantHaveNegotiation(t *testing.T) {
+	store, err := gotstore.Open(filepath.Join(t.TempDir(), "repo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	blobHash, err := store.Objects.WriteBlob(&object.Blob{Data: []byte("hello\n")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	treeHash, err := store.Objects.WriteTree(&object.TreeObj{
+		Entries: []object.TreeEntry{{Name: "README.md", BlobHash: blobHash}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitHash, err := store.Objects.WriteCommit(&object.CommitObj{
+		TreeHash:  treeHash,
+		Author:    "Alice <alice@example.com>",
+		Timestamp: 1700000000,
+		Message:   "init",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	h := NewHandler(func(owner, repo string) (*gotstore.RepoStore, error) { return store, nil }, nil)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	reqBody, err := json.Marshal(map[string]any{
+		"wants": []string{string(commitHash)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Post(ts.URL+"/got/alice/repo/objects/batch", "application/json", bytes.NewReader(reqBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 for batch fetch, got %d", resp.StatusCode)
+	}
+	var first struct {
+		Objects []struct {
+			Hash string `json:"hash"`
+			Type string `json:"type"`
+			Data []byte `json:"data"`
+		} `json:"objects"`
+		Truncated bool `json:"truncated"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&first); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if first.Truncated {
+		t.Fatalf("did not expect truncated batch for tiny repo")
+	}
+	if !containsHashString(first.Objects, string(commitHash)) ||
+		!containsHashString(first.Objects, string(treeHash)) ||
+		!containsHashString(first.Objects, string(blobHash)) {
+		t.Fatalf("expected batch objects to include commit/tree/blob, got %+v", first.Objects)
+	}
+
+	reqBody, err = json.Marshal(map[string]any{
+		"wants": []string{string(commitHash)},
+		"haves": []string{string(treeHash), string(blobHash)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err = http.Post(ts.URL+"/got/alice/repo/objects/batch", "application/json", bytes.NewReader(reqBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 for batch fetch with haves, got %d", resp.StatusCode)
+	}
+	var second struct {
+		Objects []struct {
+			Hash string `json:"hash"`
+			Type string `json:"type"`
+			Data []byte `json:"data"`
+		} `json:"objects"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&second); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if !containsHashString(second.Objects, string(commitHash)) {
+		t.Fatalf("expected commit hash in second batch, got %+v", second.Objects)
+	}
+	if containsHashString(second.Objects, string(treeHash)) || containsHashString(second.Objects, string(blobHash)) {
+		t.Fatalf("expected haves to suppress tree/blob transfer, got %+v", second.Objects)
+	}
+}
+
 func containsHash(hashes []object.Hash, want object.Hash) bool {
 	for _, h := range hashes {
 		if h == want {
+			return true
+		}
+	}
+	return false
+}
+
+func containsHashString(objs []struct {
+	Hash string `json:"hash"`
+	Type string `json:"type"`
+	Data []byte `json:"data"`
+}, want string) bool {
+	for _, obj := range objs {
+		if obj.Hash == want {
 			return true
 		}
 	}

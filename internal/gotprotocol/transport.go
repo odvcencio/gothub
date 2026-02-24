@@ -18,6 +18,9 @@ const (
 	maxPushObjectBytes int   = 16 << 20
 	maxPushObjectCount int   = 50000
 	maxRefUpdateBytes  int64 = 4 << 20
+	maxBatchRequestB   int64 = 2 << 20
+	defaultBatchMaxObj int   = 10000
+	maxBatchMaxObj     int   = 50000
 )
 
 // Handler provides HTTP endpoints for the Got protocol (push/pull).
@@ -36,6 +39,7 @@ func NewHandler(
 // RegisterRoutes sets up Got protocol routes on the given mux.
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /got/{owner}/{repo}/refs", h.handleListRefs)
+	mux.HandleFunc("POST /got/{owner}/{repo}/objects/batch", h.handleBatchObjects)
 	mux.HandleFunc("GET /got/{owner}/{repo}/objects/{hash}", h.handleGetObject)
 	mux.HandleFunc("POST /got/{owner}/{repo}/objects", h.handlePushObjects)
 	mux.HandleFunc("POST /got/{owner}/{repo}/refs", h.handleUpdateRefs)
@@ -83,6 +87,109 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("X-Object-Type", string(objType))
 	w.Write(data)
+}
+
+// POST /{owner}/{repo}.got/objects/batch — fetch missing object graph in one round-trip.
+func (h *Handler) handleBatchObjects(w http.ResponseWriter, r *http.Request) {
+	if ok := h.authorizeRequest(w, r, false); !ok {
+		return
+	}
+	store, err := h.repoStore(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	var req struct {
+		Wants      []string `json:"wants"`
+		Haves      []string `json:"haves"`
+		MaxObjects int      `json:"max_objects"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBatchRequestB)).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if len(req.Wants) == 0 {
+		http.Error(w, "at least one want hash is required", http.StatusBadRequest)
+		return
+	}
+
+	maxObjects := req.MaxObjects
+	if maxObjects <= 0 {
+		maxObjects = defaultBatchMaxObj
+	}
+	if maxObjects > maxBatchMaxObj {
+		maxObjects = maxBatchMaxObj
+	}
+
+	haveSet := make(map[object.Hash]bool, len(req.Haves))
+	for _, h := range req.Haves {
+		h = strings.TrimSpace(h)
+		if h == "" {
+			continue
+		}
+		haveSet[object.Hash(h)] = true
+	}
+
+	seen := make(map[object.Hash]bool)
+	missing := make([]object.Hash, 0, maxObjects)
+	truncated := false
+	for _, want := range req.Wants {
+		want = strings.TrimSpace(want)
+		if want == "" {
+			continue
+		}
+		root := object.Hash(want)
+		if !store.Objects.Has(root) {
+			continue
+		}
+		objs, err := WalkObjects(store.Objects, root, func(h object.Hash) bool {
+			return haveSet[h] || seen[h]
+		})
+		if err != nil {
+			http.Error(w, fmt.Sprintf("walk objects for %s: %v", root, err), http.StatusBadRequest)
+			return
+		}
+		for _, h := range objs {
+			if seen[h] {
+				continue
+			}
+			seen[h] = true
+			missing = append(missing, h)
+			if len(missing) >= maxObjects {
+				truncated = true
+				break
+			}
+		}
+		if truncated {
+			break
+		}
+	}
+
+	type batchObject struct {
+		Hash string `json:"hash"`
+		Type string `json:"type"`
+		Data []byte `json:"data"`
+	}
+	out := make([]batchObject, 0, len(missing))
+	for _, h := range missing {
+		objType, data, err := store.Objects.Read(h)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("read object %s: %v", h, err), http.StatusInternalServerError)
+			return
+		}
+		out = append(out, batchObject{
+			Hash: string(h),
+			Type: string(objType),
+			Data: data,
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"objects":   out,
+		"truncated": truncated,
+	})
 }
 
 // POST /{owner}/{repo}.got/objects — push objects (newline-delimited JSON)
