@@ -47,12 +47,29 @@ func GotToGitBlob(data []byte) (GitHash, []byte) {
 // treeGitHash is the pre-resolved git hash of the tree.
 func GotToGitCommit(c *object.CommitObj, treeGitHash GitHash, parentGitHashes []GitHash) (GitHash, []byte) {
 	var buf bytes.Buffer
+	authorTZ := c.AuthorTimezone
+	if authorTZ == "" {
+		authorTZ = "+0000"
+	}
+	committer := c.Committer
+	if committer == "" {
+		committer = c.Author
+	}
+	committerTS := c.CommitterTimestamp
+	if committerTS == 0 {
+		committerTS = c.Timestamp
+	}
+	committerTZ := c.CommitterTimezone
+	if committerTZ == "" {
+		committerTZ = authorTZ
+	}
+
 	fmt.Fprintf(&buf, "tree %s\n", treeGitHash)
 	for _, p := range parentGitHashes {
 		fmt.Fprintf(&buf, "parent %s\n", p)
 	}
-	fmt.Fprintf(&buf, "author %s %d +0000\n", c.Author, c.Timestamp)
-	fmt.Fprintf(&buf, "committer %s %d +0000\n", c.Author, c.Timestamp)
+	fmt.Fprintf(&buf, "author %s %d %s\n", c.Author, c.Timestamp, authorTZ)
+	fmt.Fprintf(&buf, "committer %s %d %s\n", committer, committerTS, committerTZ)
 	fmt.Fprintf(&buf, "\n%s", c.Message)
 	data := buf.Bytes()
 	return GitHashBytes(GitTypeCommit, data), data

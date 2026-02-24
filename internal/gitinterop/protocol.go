@@ -826,40 +826,61 @@ func parseGitCommit(data []byte, resolveGotHash func(gitHash string) (string, er
 			}
 			c.Parents = append(c.Parents, object.Hash(gotHash))
 		case "author":
-			// "Name <email> timestamp timezone"
-			c.Author = extractAuthorName(parts[1])
-			c.Timestamp = extractTimestamp(parts[1])
+			ident, ts, tz := parseGitIdentityLine(parts[1])
+			c.Author = ident
+			c.Timestamp = ts
+			c.AuthorTimezone = tz
+		case "committer":
+			ident, ts, tz := parseGitIdentityLine(parts[1])
+			c.Committer = ident
+			c.CommitterTimestamp = ts
+			c.CommitterTimezone = tz
 		}
 	}
 	if c.TreeHash == "" {
 		return nil, fmt.Errorf("commit is missing tree hash")
 	}
+	if c.Committer == "" {
+		c.Committer = c.Author
+		c.CommitterTimestamp = c.Timestamp
+		if c.CommitterTimezone == "" {
+			c.CommitterTimezone = c.AuthorTimezone
+		}
+	}
+	if c.AuthorTimezone == "" {
+		c.AuthorTimezone = "+0000"
+	}
+	if c.CommitterTimezone == "" {
+		c.CommitterTimezone = "+0000"
+	}
 	c.Message = strings.Join(bodyLines, "\n")
 	return c, nil
 }
 
-func extractAuthorName(s string) string {
-	if idx := strings.LastIndex(s, ">"); idx >= 0 {
-		return strings.TrimSpace(s[:idx+1])
+func parseGitIdentityLine(raw string) (identity string, timestamp int64, timezone string) {
+	raw = strings.TrimSpace(raw)
+	timezone = "+0000"
+	if raw == "" {
+		return "", 0, timezone
 	}
-	return s
-}
 
-func extractTimestamp(s string) int64 {
-	// Format: "Name <email> 1234567890 +0000"
-	parts := strings.Fields(s)
-	if len(parts) >= 2 {
-		for i := len(parts) - 1; i >= 0; i-- {
-			if len(parts[i]) > 5 && parts[i][0] != '+' && parts[i][0] != '-' {
-				var ts int64
-				fmt.Sscanf(parts[i], "%d", &ts)
-				if ts > 0 {
-					return ts
-				}
-			}
+	if idx := strings.LastIndex(raw, ">"); idx >= 0 {
+		identity = strings.TrimSpace(raw[:idx+1])
+		rest := strings.Fields(strings.TrimSpace(raw[idx+1:]))
+		if len(rest) >= 1 {
+			fmt.Sscanf(rest[0], "%d", &timestamp)
 		}
+		if len(rest) >= 2 && strings.TrimSpace(rest[1]) != "" {
+			timezone = strings.TrimSpace(rest[1])
+		}
+		return identity, timestamp, timezone
 	}
-	return 0
+
+	parts := strings.Fields(raw)
+	if len(parts) >= 1 {
+		identity = parts[0]
+	}
+	return identity, timestamp, timezone
 }
 
 // walkGotObjects walks the Got object graph collecting objects the client doesn't have.
