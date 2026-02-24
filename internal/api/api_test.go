@@ -215,6 +215,57 @@ func TestAPIBodyLimitRejectsLargeJSON(t *testing.T) {
 	resp.Body.Close()
 }
 
+func TestCORSPreflightReturnsHeaders(t *testing.T) {
+	server, _ := setupTestServer(t)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	req, _ := http.NewRequest(http.MethodOptions, ts.URL+"/api/v1/repos", nil)
+	req.Header.Set("Origin", "https://example.test")
+	req.Header.Set("Access-Control-Request-Method", "POST")
+	req.Header.Set("Access-Control-Request-Headers", "Authorization, Content-Type")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("cors preflight: expected 204, got %d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Fatalf("cors preflight: expected allow-origin '*', got %q", got)
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Methods"); !strings.Contains(got, "POST") {
+		t.Fatalf("cors preflight: expected POST in allow-methods, got %q", got)
+	}
+	resp.Body.Close()
+}
+
+func TestRateLimitMiddlewareBlocksAuthBurst(t *testing.T) {
+	server, _ := setupTestServer(t)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	limited := false
+	for i := 0; i < 80; i++ {
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/auth/login", bytes.NewBufferString(`{"username":"","password":""}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Forwarded-For", "203.0.113.7")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode == http.StatusTooManyRequests {
+			limited = true
+			resp.Body.Close()
+			break
+		}
+		resp.Body.Close()
+	}
+	if !limited {
+		t.Fatal("expected at least one 429 from auth rate limiter burst")
+	}
+}
+
 func TestProtocolAuthForPrivateRepo(t *testing.T) {
 	server, _ := setupTestServer(t)
 	ts := httptest.NewServer(server)

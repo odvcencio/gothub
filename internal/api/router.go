@@ -28,6 +28,7 @@ type Server struct {
 	notifySvc    *service.NotificationService
 	codeIntelSvc *service.CodeIntelService
 	lineageSvc   *service.EntityLineageService
+	rateLimiter  *requestRateLimiter
 	mux          *http.ServeMux
 	handler      http.Handler
 }
@@ -53,10 +54,18 @@ func NewServer(db database.DB, authSvc *auth.Service, repoSvc *service.RepoServi
 		notifySvc:    notifySvc,
 		codeIntelSvc: codeIntelSvc,
 		lineageSvc:   lineageSvc,
+		rateLimiter:  newRequestRateLimiter(),
 		mux:          http.NewServeMux(),
 	}
 	s.routes()
-	s.handler = requestLoggingMiddleware(requestBodyLimitMiddleware(auth.Middleware(s.authSvc)(s.mux)))
+	s.handler = requestLoggingMiddleware(
+		corsMiddleware(
+			requestRateLimitMiddleware(
+				s.rateLimiter,
+				requestBodyLimitMiddleware(auth.Middleware(s.authSvc)(s.mux)),
+			),
+		),
+	)
 	return s
 }
 
