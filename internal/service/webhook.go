@@ -78,12 +78,29 @@ func (s *WebhookService) ListWebhooks(ctx context.Context, repoID int64) ([]mode
 	return hooks, nil
 }
 
+func (s *WebhookService) ListWebhooksPage(ctx context.Context, repoID int64, page, perPage int) ([]models.Webhook, error) {
+	limit, offset := normalizePage(page, perPage, 50, 200)
+	hooks, err := s.db.ListWebhooksPage(ctx, repoID, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	for i := range hooks {
+		hooks[i].Events = parseWebhookEvents(hooks[i].EventsCSV)
+	}
+	return hooks, nil
+}
+
 func (s *WebhookService) DeleteWebhook(ctx context.Context, repoID, webhookID int64) error {
 	return s.db.DeleteWebhook(ctx, repoID, webhookID)
 }
 
 func (s *WebhookService) ListWebhookDeliveries(ctx context.Context, repoID, webhookID int64) ([]models.WebhookDelivery, error) {
 	return s.db.ListWebhookDeliveries(ctx, repoID, webhookID)
+}
+
+func (s *WebhookService) ListWebhookDeliveriesPage(ctx context.Context, repoID, webhookID int64, page, perPage int) ([]models.WebhookDelivery, error) {
+	limit, offset := normalizePage(page, perPage, 50, 200)
+	return s.db.ListWebhookDeliveriesPage(ctx, repoID, webhookID, limit, offset)
 }
 
 func (s *WebhookService) Redeliver(ctx context.Context, repoID, webhookID, deliveryID int64) (*models.WebhookDelivery, error) {

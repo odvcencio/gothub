@@ -762,11 +762,23 @@ func (s *SQLiteDB) GetRepositoryByID(ctx context.Context, id int64) (*models.Rep
 }
 
 func (s *SQLiteDB) ListUserRepositories(ctx context.Context, userID int64) ([]models.Repository, error) {
+	return s.ListUserRepositoriesPage(ctx, userID, 1<<30, 0)
+}
+
+func (s *SQLiteDB) ListUserRepositoriesPage(ctx context.Context, userID int64, limit, offset int) ([]models.Repository, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.parent_repo_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at, u.username
 		 FROM repositories r
 		 JOIN users u ON u.id = r.owner_user_id
-		 WHERE r.owner_user_id = ?`, userID)
+		 WHERE r.owner_user_id = ?
+		 ORDER BY r.created_at DESC, r.id DESC
+		 LIMIT ? OFFSET ?`, userID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -783,6 +795,16 @@ func (s *SQLiteDB) ListUserRepositories(ctx context.Context, userID int64) ([]mo
 }
 
 func (s *SQLiteDB) ListRepositoryForks(ctx context.Context, parentRepoID int64) ([]models.Repository, error) {
+	return s.ListRepositoryForksPage(ctx, parentRepoID, 1<<30, 0)
+}
+
+func (s *SQLiteDB) ListRepositoryForksPage(ctx context.Context, parentRepoID int64, limit, offset int) ([]models.Repository, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.parent_repo_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at,
 		 COALESCE(u.username, o.name, '')
@@ -790,7 +812,8 @@ func (s *SQLiteDB) ListRepositoryForks(ctx context.Context, parentRepoID int64) 
 		 LEFT JOIN users u ON u.id = r.owner_user_id
 		 LEFT JOIN orgs o ON o.id = r.owner_org_id
 		 WHERE r.parent_repo_id = ?
-		 ORDER BY r.created_at DESC, r.id DESC`, parentRepoID)
+		 ORDER BY r.created_at DESC, r.id DESC
+		 LIMIT ? OFFSET ?`, parentRepoID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -853,13 +876,24 @@ func (s *SQLiteDB) CountRepoStars(ctx context.Context, repoID int64) (int, error
 }
 
 func (s *SQLiteDB) ListRepoStargazers(ctx context.Context, repoID int64) ([]models.User, error) {
+	return s.ListRepoStargazersPage(ctx, repoID, 1<<30, 0)
+}
+
+func (s *SQLiteDB) ListRepoStargazersPage(ctx context.Context, repoID int64, limit, offset int) ([]models.User, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT u.id, u.username, u.email, u.password_hash, u.is_admin, u.created_at
 		 FROM repo_stars rs
 		 JOIN users u ON u.id = rs.user_id
 		 WHERE rs.repo_id = ?
-		 ORDER BY rs.created_at DESC, u.id DESC`,
-		repoID)
+		 ORDER BY rs.created_at DESC, u.id DESC
+		 LIMIT ? OFFSET ?`,
+		repoID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -877,6 +911,16 @@ func (s *SQLiteDB) ListRepoStargazers(ctx context.Context, repoID int64) ([]mode
 }
 
 func (s *SQLiteDB) ListUserStarredRepositories(ctx context.Context, userID int64) ([]models.Repository, error) {
+	return s.ListUserStarredRepositoriesPage(ctx, userID, 1<<30, 0)
+}
+
+func (s *SQLiteDB) ListUserStarredRepositoriesPage(ctx context.Context, userID int64, limit, offset int) ([]models.Repository, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.parent_repo_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at,
 		 COALESCE(u.username, o.name, '')
@@ -885,8 +929,9 @@ func (s *SQLiteDB) ListUserStarredRepositories(ctx context.Context, userID int64
 		 LEFT JOIN users u ON u.id = r.owner_user_id
 		 LEFT JOIN orgs o ON o.id = r.owner_org_id
 		 WHERE rs.user_id = ?
-		 ORDER BY rs.created_at DESC, r.id DESC`,
-		userID)
+		 ORDER BY rs.created_at DESC, r.id DESC
+		 LIMIT ? OFFSET ?`,
+		userID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -924,8 +969,18 @@ func (s *SQLiteDB) GetCollaborator(ctx context.Context, repoID, userID int64) (*
 }
 
 func (s *SQLiteDB) ListCollaborators(ctx context.Context, repoID int64) ([]models.Collaborator, error) {
+	return s.ListCollaboratorsPage(ctx, repoID, 1<<30, 0)
+}
+
+func (s *SQLiteDB) ListCollaboratorsPage(ctx context.Context, repoID int64, limit, offset int) ([]models.Collaborator, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT repo_id, user_id, role FROM collaborators WHERE repo_id = ?`, repoID)
+		`SELECT repo_id, user_id, role FROM collaborators WHERE repo_id = ? ORDER BY user_id LIMIT ? OFFSET ?`, repoID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -1538,11 +1593,22 @@ func (s *SQLiteDB) UpsertPRCheckRun(ctx context.Context, run *models.PRCheckRun)
 }
 
 func (s *SQLiteDB) ListPRCheckRuns(ctx context.Context, prID int64) ([]models.PRCheckRun, error) {
+	return s.ListPRCheckRunsPage(ctx, prID, 1<<30, 0)
+}
+
+func (s *SQLiteDB) ListPRCheckRunsPage(ctx context.Context, prID int64, limit, offset int) ([]models.PRCheckRun, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, pr_id, name, status, conclusion, details_url, external_id, head_commit, created_at, updated_at
 		 FROM pr_check_runs
 		 WHERE pr_id = ?
-		 ORDER BY updated_at DESC, id DESC`, prID)
+		 ORDER BY updated_at DESC, id DESC
+		 LIMIT ? OFFSET ?`, prID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -1588,11 +1654,22 @@ func (s *SQLiteDB) GetWebhook(ctx context.Context, repoID, webhookID int64) (*mo
 }
 
 func (s *SQLiteDB) ListWebhooks(ctx context.Context, repoID int64) ([]models.Webhook, error) {
+	return s.ListWebhooksPage(ctx, repoID, 1<<30, 0)
+}
+
+func (s *SQLiteDB) ListWebhooksPage(ctx context.Context, repoID int64, limit, offset int) ([]models.Webhook, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, repo_id, url, secret, events_csv, active, created_at, updated_at
 		 FROM repo_webhooks
 		 WHERE repo_id = ?
-		 ORDER BY id DESC`, repoID)
+		 ORDER BY id DESC
+		 LIMIT ? OFFSET ?`, repoID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -1646,11 +1723,22 @@ func (s *SQLiteDB) GetWebhookDelivery(ctx context.Context, repoID, webhookID, de
 }
 
 func (s *SQLiteDB) ListWebhookDeliveries(ctx context.Context, repoID, webhookID int64) ([]models.WebhookDelivery, error) {
+	return s.ListWebhookDeliveriesPage(ctx, repoID, webhookID, 1<<30, 0)
+}
+
+func (s *SQLiteDB) ListWebhookDeliveriesPage(ctx context.Context, repoID, webhookID int64, limit, offset int) ([]models.WebhookDelivery, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, repo_id, webhook_id, event, delivery_uid, attempt, status_code, success, error, request_body, response_body, duration_ms, redelivery_of_id, created_at
 		 FROM webhook_deliveries
 		 WHERE repo_id = ? AND webhook_id = ?
-		 ORDER BY id DESC`, repoID, webhookID)
+		 ORDER BY id DESC
+		 LIMIT ? OFFSET ?`, repoID, webhookID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -1889,10 +1977,22 @@ func (s *SQLiteDB) GetOrgByID(ctx context.Context, id int64) (*models.Org, error
 }
 
 func (s *SQLiteDB) ListUserOrgs(ctx context.Context, userID int64) ([]models.Org, error) {
+	return s.ListUserOrgsPage(ctx, userID, 1<<30, 0)
+}
+
+func (s *SQLiteDB) ListUserOrgsPage(ctx context.Context, userID int64, limit, offset int) ([]models.Org, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT o.id, o.name, o.display_name FROM orgs o
 		 JOIN org_members om ON om.org_id = o.id
-		 WHERE om.user_id = ?`, userID)
+		 WHERE om.user_id = ?
+		 ORDER BY o.name ASC
+		 LIMIT ? OFFSET ?`, userID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -1932,8 +2032,18 @@ func (s *SQLiteDB) GetOrgMember(ctx context.Context, orgID, userID int64) (*mode
 }
 
 func (s *SQLiteDB) ListOrgMembers(ctx context.Context, orgID int64) ([]models.OrgMember, error) {
+	return s.ListOrgMembersPage(ctx, orgID, 1<<30, 0)
+}
+
+func (s *SQLiteDB) ListOrgMembersPage(ctx context.Context, orgID int64, limit, offset int) ([]models.OrgMember, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT org_id, user_id, role FROM org_members WHERE org_id = ?`, orgID)
+		`SELECT org_id, user_id, role FROM org_members WHERE org_id = ? ORDER BY user_id LIMIT ? OFFSET ?`, orgID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -1955,11 +2065,23 @@ func (s *SQLiteDB) RemoveOrgMember(ctx context.Context, orgID, userID int64) err
 }
 
 func (s *SQLiteDB) ListOrgRepositories(ctx context.Context, orgID int64) ([]models.Repository, error) {
+	return s.ListOrgRepositoriesPage(ctx, orgID, 1<<30, 0)
+}
+
+func (s *SQLiteDB) ListOrgRepositoriesPage(ctx context.Context, orgID int64, limit, offset int) ([]models.Repository, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.parent_repo_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at, o.name
 		 FROM repositories r
 		 JOIN orgs o ON o.id = r.owner_org_id
-		 WHERE r.owner_org_id = ?`, orgID)
+		 WHERE r.owner_org_id = ?
+		 ORDER BY r.created_at DESC, r.id DESC
+		 LIMIT ? OFFSET ?`, orgID, limit, offset)
 	if err != nil {
 		return nil, err
 	}

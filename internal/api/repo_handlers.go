@@ -55,13 +55,13 @@ func (s *Server) handleGetRepo(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListUserRepos(w http.ResponseWriter, r *http.Request) {
 	claims := auth.GetClaims(r.Context())
-	repos, err := s.repoSvc.List(r.Context(), claims.UserID)
+	page, perPage := parsePagination(r, 30, 200)
+	repos, err := s.repoSvc.ListPage(r.Context(), claims.UserID, page, perPage)
 	if err != nil {
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	page, perPage := parsePagination(r, 30, 200)
-	jsonResponse(w, http.StatusOK, paginateSlice(repos, page, perPage))
+	jsonResponse(w, http.StatusOK, repos)
 }
 
 func (s *Server) handleDeleteRepo(w http.ResponseWriter, r *http.Request) {
@@ -115,11 +115,11 @@ func (s *Server) handleListRepoForks(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	forks, err := s.repoSvc.ListForks(r.Context(), sourceRepo.ID)
+	page, perPage := parsePagination(r, 30, 200)
+	forks, err := s.repoSvc.ListForksPage(r.Context(), sourceRepo.ID, page, perPage)
 	if err != nil {
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	page, perPage := parsePagination(r, 30, 200)
-	jsonResponse(w, http.StatusOK, paginateSlice(forks, page, perPage))
+	jsonResponse(w, http.StatusOK, forks)
 }

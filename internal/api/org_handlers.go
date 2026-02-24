@@ -60,7 +60,10 @@ func (s *Server) handleGetOrg(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListUserOrgs(w http.ResponseWriter, r *http.Request) {
 	claims := auth.GetClaims(r.Context())
-	orgs, err := s.db.ListUserOrgs(r.Context(), claims.UserID)
+	page, perPage := parsePagination(r, 30, 200)
+	limit := perPage
+	offset := (page - 1) * perPage
+	orgs, err := s.db.ListUserOrgsPage(r.Context(), claims.UserID, limit, offset)
 	if err != nil {
 		jsonError(w, "failed to list orgs", http.StatusInternalServerError)
 		return
@@ -68,8 +71,7 @@ func (s *Server) handleListUserOrgs(w http.ResponseWriter, r *http.Request) {
 	if orgs == nil {
 		orgs = []models.Org{}
 	}
-	page, perPage := parsePagination(r, 30, 200)
-	jsonResponse(w, http.StatusOK, paginateSlice(orgs, page, perPage))
+	jsonResponse(w, http.StatusOK, orgs)
 }
 
 func (s *Server) handleDeleteOrg(w http.ResponseWriter, r *http.Request) {
@@ -112,7 +114,10 @@ func (s *Server) handleListOrgMembers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	members, err := s.db.ListOrgMembers(r.Context(), org.ID)
+	page, perPage := parsePagination(r, 50, 200)
+	limit := perPage
+	offset := (page - 1) * perPage
+	members, err := s.db.ListOrgMembersPage(r.Context(), org.ID, limit, offset)
 	if err != nil {
 		jsonError(w, "failed to list members", http.StatusInternalServerError)
 		return
@@ -120,8 +125,7 @@ func (s *Server) handleListOrgMembers(w http.ResponseWriter, r *http.Request) {
 	if members == nil {
 		members = []models.OrgMember{}
 	}
-	page, perPage := parsePagination(r, 50, 200)
-	jsonResponse(w, http.StatusOK, paginateSlice(members, page, perPage))
+	jsonResponse(w, http.StatusOK, members)
 }
 
 func (s *Server) handleAddOrgMember(w http.ResponseWriter, r *http.Request) {
@@ -229,7 +233,10 @@ func (s *Server) handleListOrgRepos(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	repos, err := s.db.ListOrgRepositories(r.Context(), org.ID)
+	page, perPage := parsePagination(r, 30, 200)
+	limit := perPage
+	offset := (page - 1) * perPage
+	repos, err := s.db.ListOrgRepositoriesPage(r.Context(), org.ID, limit, offset)
 	if err != nil {
 		jsonError(w, "failed to list repos", http.StatusInternalServerError)
 		return
@@ -260,6 +267,5 @@ func (s *Server) handleListOrgRepos(w http.ResponseWriter, r *http.Request) {
 		repos = visible
 	}
 
-	page, perPage := parsePagination(r, 30, 200)
-	jsonResponse(w, http.StatusOK, paginateSlice(repos, page, perPage))
+	jsonResponse(w, http.StatusOK, repos)
 }

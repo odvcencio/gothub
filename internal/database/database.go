@@ -41,7 +41,9 @@ type DB interface {
 	GetRepository(ctx context.Context, ownerName, repoName string) (*models.Repository, error)
 	GetRepositoryByID(ctx context.Context, id int64) (*models.Repository, error)
 	ListUserRepositories(ctx context.Context, userID int64) ([]models.Repository, error)
+	ListUserRepositoriesPage(ctx context.Context, userID int64, limit, offset int) ([]models.Repository, error)
 	ListRepositoryForks(ctx context.Context, parentRepoID int64) ([]models.Repository, error)
+	ListRepositoryForksPage(ctx context.Context, parentRepoID int64, limit, offset int) ([]models.Repository, error)
 	DeleteRepository(ctx context.Context, id int64) error
 
 	// Stars
@@ -50,12 +52,15 @@ type DB interface {
 	IsRepoStarred(ctx context.Context, repoID, userID int64) (bool, error)
 	CountRepoStars(ctx context.Context, repoID int64) (int, error)
 	ListRepoStargazers(ctx context.Context, repoID int64) ([]models.User, error)
+	ListRepoStargazersPage(ctx context.Context, repoID int64, limit, offset int) ([]models.User, error)
 	ListUserStarredRepositories(ctx context.Context, userID int64) ([]models.Repository, error)
+	ListUserStarredRepositoriesPage(ctx context.Context, userID int64, limit, offset int) ([]models.Repository, error)
 
 	// Collaborators
 	AddCollaborator(ctx context.Context, c *models.Collaborator) error
 	GetCollaborator(ctx context.Context, repoID, userID int64) (*models.Collaborator, error)
 	ListCollaborators(ctx context.Context, repoID int64) ([]models.Collaborator, error)
+	ListCollaboratorsPage(ctx context.Context, repoID int64, limit, offset int) ([]models.Collaborator, error)
 	RemoveCollaborator(ctx context.Context, repoID, userID int64) error
 
 	// Pull Requests
@@ -84,6 +89,7 @@ type DB interface {
 	// PR Check Runs
 	UpsertPRCheckRun(ctx context.Context, run *models.PRCheckRun) error
 	ListPRCheckRuns(ctx context.Context, prID int64) ([]models.PRCheckRun, error)
+	ListPRCheckRunsPage(ctx context.Context, prID int64, limit, offset int) ([]models.PRCheckRun, error)
 
 	// Issues
 	CreateIssue(ctx context.Context, issue *models.Issue) error
@@ -108,10 +114,12 @@ type DB interface {
 	CreateWebhook(ctx context.Context, hook *models.Webhook) error
 	GetWebhook(ctx context.Context, repoID, webhookID int64) (*models.Webhook, error)
 	ListWebhooks(ctx context.Context, repoID int64) ([]models.Webhook, error)
+	ListWebhooksPage(ctx context.Context, repoID int64, limit, offset int) ([]models.Webhook, error)
 	DeleteWebhook(ctx context.Context, repoID, webhookID int64) error
 	CreateWebhookDelivery(ctx context.Context, delivery *models.WebhookDelivery) error
 	GetWebhookDelivery(ctx context.Context, repoID, webhookID, deliveryID int64) (*models.WebhookDelivery, error)
 	ListWebhookDeliveries(ctx context.Context, repoID, webhookID int64) ([]models.WebhookDelivery, error)
+	ListWebhookDeliveriesPage(ctx context.Context, repoID, webhookID int64, limit, offset int) ([]models.WebhookDelivery, error)
 
 	// Hash Mapping
 	SetHashMapping(ctx context.Context, m *models.HashMapping) error
@@ -132,10 +140,13 @@ type DB interface {
 	GetOrg(ctx context.Context, name string) (*models.Org, error)
 	GetOrgByID(ctx context.Context, id int64) (*models.Org, error)
 	ListUserOrgs(ctx context.Context, userID int64) ([]models.Org, error)
+	ListUserOrgsPage(ctx context.Context, userID int64, limit, offset int) ([]models.Org, error)
 	DeleteOrg(ctx context.Context, id int64) error
 	AddOrgMember(ctx context.Context, m *models.OrgMember) error
 	GetOrgMember(ctx context.Context, orgID, userID int64) (*models.OrgMember, error)
 	ListOrgMembers(ctx context.Context, orgID int64) ([]models.OrgMember, error)
+	ListOrgMembersPage(ctx context.Context, orgID int64, limit, offset int) ([]models.OrgMember, error)
 	RemoveOrgMember(ctx context.Context, orgID, userID int64) error
 	ListOrgRepositories(ctx context.Context, orgID int64) ([]models.Repository, error)
+	ListOrgRepositoriesPage(ctx context.Context, orgID int64, limit, offset int) ([]models.Repository, error)
 }

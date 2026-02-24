@@ -73,7 +73,10 @@ func (s *Server) handleListCollaborators(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	collabs, err := s.db.ListCollaborators(r.Context(), repo.ID)
+	page, perPage := parsePagination(r, 50, 200)
+	limit := perPage
+	offset := (page - 1) * perPage
+	collabs, err := s.db.ListCollaboratorsPage(r.Context(), repo.ID, limit, offset)
 	if err != nil {
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
@@ -91,8 +94,7 @@ func (s *Server) handleListCollaborators(w http.ResponseWriter, r *http.Request)
 			Role:     c.Role,
 		})
 	}
-	page, perPage := parsePagination(r, 50, 200)
-	jsonResponse(w, http.StatusOK, paginateSlice(resp, page, perPage))
+	jsonResponse(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleRemoveCollaborator(w http.ResponseWriter, r *http.Request) {

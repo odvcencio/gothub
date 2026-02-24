@@ -198,11 +198,11 @@ func (s *Server) handleListPRCheckRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	runs, err := s.prSvc.ListPRCheckRuns(r.Context(), pr.ID)
+	page, perPage := parsePagination(r, 50, 200)
+	runs, err := s.prSvc.ListPRCheckRunsPage(r.Context(), pr.ID, page, perPage)
 	if err != nil {
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	page, perPage := parsePagination(r, 50, 200)
-	jsonResponse(w, http.StatusOK, paginateSlice(runs, page, perPage))
+	jsonResponse(w, http.StatusOK, runs)
 }

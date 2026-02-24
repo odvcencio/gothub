@@ -92,7 +92,10 @@ func (s *Server) handleListRepoStargazers(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	users, err := s.db.ListRepoStargazers(r.Context(), repo.ID)
+	page, perPage := parsePagination(r, 50, 200)
+	limit := perPage
+	offset := (page - 1) * perPage
+	users, err := s.db.ListRepoStargazersPage(r.Context(), repo.ID, limit, offset)
 	if err != nil {
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
@@ -101,8 +104,7 @@ func (s *Server) handleListRepoStargazers(w http.ResponseWriter, r *http.Request
 	for i := range users {
 		resp = append(resp, stargazerResponse{ID: users[i].ID, Username: users[i].Username})
 	}
-	page, perPage := parsePagination(r, 50, 200)
-	jsonResponse(w, http.StatusOK, paginateSlice(resp, page, perPage))
+	jsonResponse(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleListUserStarredRepos(w http.ResponseWriter, r *http.Request) {
@@ -112,11 +114,13 @@ func (s *Server) handleListUserStarredRepos(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	repos, err := s.db.ListUserStarredRepositories(r.Context(), claims.UserID)
+	page, perPage := parsePagination(r, 30, 200)
+	limit := perPage
+	offset := (page - 1) * perPage
+	repos, err := s.db.ListUserStarredRepositoriesPage(r.Context(), claims.UserID, limit, offset)
 	if err != nil {
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	page, perPage := parsePagination(r, 30, 200)
-	jsonResponse(w, http.StatusOK, paginateSlice(repos, page, perPage))
+	jsonResponse(w, http.StatusOK, repos)
 }

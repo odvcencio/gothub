@@ -72,7 +72,8 @@ func (s *Server) handleListWebhooks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hooks, err := s.webhookSvc.ListWebhooks(r.Context(), repo.ID)
+	page, perPage := parsePagination(r, 50, 200)
+	hooks, err := s.webhookSvc.ListWebhooksPage(r.Context(), repo.ID, page, perPage)
 	if err != nil {
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
@@ -81,8 +82,7 @@ func (s *Server) handleListWebhooks(w http.ResponseWriter, r *http.Request) {
 	for i := range hooks {
 		resp = append(resp, webhookToResponse(&hooks[i]))
 	}
-	page, perPage := parsePagination(r, 50, 200)
-	jsonResponse(w, http.StatusOK, paginateSlice(resp, page, perPage))
+	jsonResponse(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleGetWebhook(w http.ResponseWriter, r *http.Request) {
@@ -145,13 +145,13 @@ func (s *Server) handleListWebhookDeliveries(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	deliveries, err := s.webhookSvc.ListWebhookDeliveries(r.Context(), repo.ID, webhookID)
+	page, perPage := parsePagination(r, 50, 200)
+	deliveries, err := s.webhookSvc.ListWebhookDeliveriesPage(r.Context(), repo.ID, webhookID, page, perPage)
 	if err != nil {
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	page, perPage := parsePagination(r, 50, 200)
-	jsonResponse(w, http.StatusOK, paginateSlice(deliveries, page, perPage))
+	jsonResponse(w, http.StatusOK, deliveries)
 }
 
 func (s *Server) handleRedeliverWebhookDelivery(w http.ResponseWriter, r *http.Request) {

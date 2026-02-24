@@ -61,6 +61,11 @@ func (s *PRService) ListPRCheckRuns(ctx context.Context, prID int64) ([]models.P
 	return s.db.ListPRCheckRuns(ctx, prID)
 }
 
+func (s *PRService) ListPRCheckRunsPage(ctx context.Context, prID int64, page, perPage int) ([]models.PRCheckRun, error) {
+	limit, offset := normalizePage(page, perPage, 50, 200)
+	return s.db.ListPRCheckRunsPage(ctx, prID, limit, offset)
+}
+
 // EvaluateBranchUpdateGate evaluates branch-protection checks that can be
 // enforced for direct ref updates (pushes).
 func (s *PRService) EvaluateBranchUpdateGate(ctx context.Context, repoID int64, branch string, oldHead, newHead object.Hash) ([]string, error) {
