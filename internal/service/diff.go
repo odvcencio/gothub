@@ -68,13 +68,14 @@ type EntityHistoryHit struct {
 }
 
 type DiffService struct {
-	repoSvc   *RepoService
-	browseSvc *BrowseService
-	db        database.DB
+	repoSvc    *RepoService
+	browseSvc  *BrowseService
+	db         database.DB
+	lineageSvc *EntityLineageService
 }
 
-func NewDiffService(repoSvc *RepoService, browseSvc *BrowseService, db database.DB) *DiffService {
-	return &DiffService{repoSvc: repoSvc, browseSvc: browseSvc, db: db}
+func NewDiffService(repoSvc *RepoService, browseSvc *BrowseService, db database.DB, lineageSvc *EntityLineageService) *DiffService {
+	return &DiffService{repoSvc: repoSvc, browseSvc: browseSvc, db: db, lineageSvc: lineageSvc}
 }
 
 // ExtractEntities extracts entities from a file at the given ref/path.
@@ -208,6 +209,17 @@ func (s *DiffService) EntityHistory(ctx context.Context, owner, repo, ref, stabl
 	head, err := s.browseSvc.ResolveRef(ctx, owner, repo, ref)
 	if err != nil {
 		return nil, fmt.Errorf("resolve ref: %w", err)
+	}
+	if s.lineageSvc != nil {
+		has, err := s.db.HasEntityVersionsForCommit(ctx, repoModel.ID, string(head))
+		if err != nil {
+			return nil, err
+		}
+		if !has {
+			if err := s.lineageSvc.IndexCommit(ctx, repoModel.ID, store, head); err != nil {
+				return nil, fmt.Errorf("lineage index: %w", err)
+			}
+		}
 	}
 	if limit <= 0 {
 		limit = 50

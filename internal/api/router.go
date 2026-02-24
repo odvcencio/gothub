@@ -33,13 +33,13 @@ type Server struct {
 
 func NewServer(db database.DB, authSvc *auth.Service, repoSvc *service.RepoService) *Server {
 	browseSvc := service.NewBrowseService(repoSvc)
-	diffSvc := service.NewDiffService(repoSvc, browseSvc, db)
+	lineageSvc := service.NewEntityLineageService(db)
+	diffSvc := service.NewDiffService(repoSvc, browseSvc, db, lineageSvc)
 	prSvc := service.NewPRService(db, repoSvc, browseSvc)
 	issueSvc := service.NewIssueService(db)
 	webhookSvc := service.NewWebhookService(db)
 	notifySvc := service.NewNotificationService(db)
 	codeIntelSvc := service.NewCodeIntelService(db, repoSvc, browseSvc)
-	lineageSvc := service.NewEntityLineageService(db)
 	s := &Server{
 		db:           db,
 		authSvc:      authSvc,

@@ -150,3 +150,88 @@ func processOrderStableID(ctx context.Context, db database.DB, repoID int64, com
 	}
 	return "", nil
 }
+
+func TestEntityHistoryLazyIndexesLineageWhenMissing(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	db, err := database.OpenSQLite(filepath.Join(tmpDir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	user := &models.User{Username: "alice", Email: "alice@example.com", PasswordHash: "x"}
+	if err := db.CreateUser(ctx, user); err != nil {
+		t.Fatal(err)
+	}
+	repoSvc := NewRepoService(db, filepath.Join(tmpDir, "repos"))
+	repo, err := repoSvc.Create(ctx, user.ID, "repo", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := repoSvc.OpenStore(ctx, "alice", "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	blobHash, err := store.Objects.WriteBlob(&object.Blob{
+		Data: []byte("package main\n\nfunc ProcessOrder() int { return 1 }\n"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	treeHash, err := store.Objects.WriteTree(&object.TreeObj{
+		Entries: []object.TreeEntry{{Name: "main.go", BlobHash: blobHash}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitHash, err := store.Objects.WriteCommit(&object.CommitObj{
+		TreeHash:  treeHash,
+		Author:    "Alice <alice@example.com>",
+		Timestamp: 1700000000,
+		Message:   "initial",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Refs.Set("heads/main", commitHash); err != nil {
+		t.Fatal(err)
+	}
+
+	// Ensure lineage DB starts empty.
+	has, err := db.HasEntityVersionsForCommit(ctx, repo.ID, string(commitHash))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if has {
+		t.Fatalf("expected no lineage versions before lazy indexing")
+	}
+
+	browseSvc := NewBrowseService(repoSvc)
+	lineageSvc := NewEntityLineageService(db)
+	diffSvc := NewDiffService(repoSvc, browseSvc, db, lineageSvc)
+
+	hits, err := diffSvc.EntityHistory(ctx, "alice", "repo", "main", "", "ProcessOrder", "", 10)
+	if err != nil {
+		t.Fatalf("entity history: %v", err)
+	}
+	if len(hits) == 0 {
+		t.Fatalf("expected history hits after lazy indexing")
+	}
+	if strings.TrimSpace(hits[0].StableID) == "" {
+		t.Fatalf("expected stable id in entity history hit")
+	}
+
+	has, err = db.HasEntityVersionsForCommit(ctx, repo.ID, string(commitHash))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !has {
+		t.Fatalf("expected lazy indexing to persist entity versions")
+	}
+}
