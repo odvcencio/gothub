@@ -3,7 +3,9 @@ module github.com/odvcencio/gothub
 go 1.25
 
 require (
-	github.com/golang-jwt/jwt/v5 v5.2.2
+	github.com/go-webauthn/webauthn v0.13.4
+	github.com/golang-jwt/jwt/v5 v5.2.3
+	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.8.0
 	github.com/odvcencio/got v0.1.0
 	github.com/odvcencio/gotreesitter v0.2.0
@@ -14,20 +16,26 @@ require (
 )
 
 replace github.com/odvcencio/got => ../got
+
 replace github.com/odvcencio/gotreesitter => ../gotreesitter
+
 replace github.com/odvcencio/gts-suite => ../gts-suite
 
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/google/uuid v1.6.0 // indirect
+	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
+	github.com/go-webauthn/x v0.1.23 // indirect
+	github.com/google/go-tpm v0.9.5 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	github.com/kr/text v0.2.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
+	github.com/mitchellh/mapstructure v1.5.0 // indirect
 	github.com/ncruces/go-strftime v0.1.9 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/rogpeppe/go-internal v1.14.1 // indirect
+	github.com/x448/float16 v0.8.4 // indirect
 	golang.org/x/exp v0.0.0-20250408133849-7e4ce0ab07d0 // indirect
 	golang.org/x/sync v0.19.0 // indirect
 	golang.org/x/sys v0.41.0 // indirect

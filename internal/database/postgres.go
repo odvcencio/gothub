@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/odvcencio/gothub/internal/models"
 
@@ -71,6 +72,44 @@ CREATE TABLE IF NOT EXISTS ssh_keys (
 	fingerprint TEXT NOT NULL UNIQUE,
 	public_key TEXT NOT NULL,
 	key_type TEXT NOT NULL,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS magic_link_tokens (
+	id BIGSERIAL PRIMARY KEY,
+	user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	token_hash TEXT NOT NULL UNIQUE,
+	expires_at TIMESTAMPTZ NOT NULL,
+	used_at TIMESTAMPTZ,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS ssh_auth_challenges (
+	id TEXT PRIMARY KEY,
+	user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	fingerprint TEXT NOT NULL,
+	challenge TEXT NOT NULL,
+	expires_at TIMESTAMPTZ NOT NULL,
+	used_at TIMESTAMPTZ,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS webauthn_credentials (
+	id BIGSERIAL PRIMARY KEY,
+	user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	credential_id TEXT NOT NULL UNIQUE,
+	data_json TEXT NOT NULL,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	last_used_at TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS webauthn_sessions (
+	id TEXT PRIMARY KEY,
+	user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	flow TEXT NOT NULL,
+	data_json TEXT NOT NULL,
+	expires_at TIMESTAMPTZ NOT NULL,
+	used_at TIMESTAMPTZ,
 	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -309,6 +348,11 @@ CREATE TABLE IF NOT EXISTS entity_versions (
 
 CREATE INDEX IF NOT EXISTS idx_hash_mapping_git ON hash_mapping(repo_id, git_hash);
 CREATE INDEX IF NOT EXISTS idx_hash_mapping_got ON hash_mapping(repo_id, got_hash);
+CREATE INDEX IF NOT EXISTS idx_magic_link_tokens_hash ON magic_link_tokens(token_hash);
+CREATE INDEX IF NOT EXISTS idx_magic_link_tokens_user ON magic_link_tokens(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ssh_auth_challenges_user ON ssh_auth_challenges(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_webauthn_credentials_user ON webauthn_credentials(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_webauthn_sessions_user_flow ON webauthn_sessions(user_id, flow, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_commit_indexes_repo ON commit_indexes(repo_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_tree_modes_repo_tree ON git_tree_entry_modes(repo_id, got_tree_hash);
 CREATE INDEX IF NOT EXISTS idx_entity_versions_repo_commit ON entity_versions(repo_id, commit_hash);
@@ -360,6 +404,159 @@ func (p *PostgresDB) scanUser(row *sql.Row) (*models.User, error) {
 func (p *PostgresDB) UpdateUserPassword(ctx context.Context, userID int64, passwordHash string) error {
 	_, err := p.db.ExecContext(ctx, `UPDATE users SET password_hash = $1 WHERE id = $2`, passwordHash, userID)
 	return err
+}
+
+func (p *PostgresDB) CreateMagicLinkToken(ctx context.Context, token *models.MagicLinkToken) error {
+	return p.db.QueryRowContext(ctx,
+		`INSERT INTO magic_link_tokens (user_id, token_hash, expires_at) VALUES ($1, $2, $3) RETURNING id, created_at`,
+		token.UserID, token.TokenHash, token.ExpiresAt).Scan(&token.ID, &token.CreatedAt)
+}
+
+func (p *PostgresDB) ConsumeMagicLinkToken(ctx context.Context, tokenHash string, now time.Time) (*models.User, error) {
+	tx, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	var tokenID int64
+	u := &models.User{}
+	err = tx.QueryRowContext(ctx,
+		`SELECT m.id, u.id, u.username, u.email, u.password_hash, u.is_admin, u.created_at
+		 FROM magic_link_tokens m
+		 JOIN users u ON u.id = m.user_id
+		 WHERE m.token_hash = $1 AND m.used_at IS NULL AND m.expires_at > $2
+		 FOR UPDATE`,
+		tokenHash, now).Scan(&tokenID, &u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.IsAdmin, &u.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	res, err := tx.ExecContext(ctx, `UPDATE magic_link_tokens SET used_at = $1 WHERE id = $2 AND used_at IS NULL`, now, tokenID)
+	if err != nil {
+		return nil, err
+	}
+	n, _ := res.RowsAffected()
+	if n != 1 {
+		return nil, sql.ErrNoRows
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return u, nil
+}
+
+func (p *PostgresDB) CreateSSHAuthChallenge(ctx context.Context, challenge *models.SSHAuthChallenge) error {
+	_, err := p.db.ExecContext(ctx,
+		`INSERT INTO ssh_auth_challenges (id, user_id, fingerprint, challenge, expires_at) VALUES ($1, $2, $3, $4, $5)`,
+		challenge.ID, challenge.UserID, challenge.Fingerprint, challenge.Challenge, challenge.ExpiresAt)
+	return err
+}
+
+func (p *PostgresDB) ConsumeSSHAuthChallenge(ctx context.Context, id string, now time.Time) (*models.SSHAuthChallenge, error) {
+	tx, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	ch := &models.SSHAuthChallenge{}
+	err = tx.QueryRowContext(ctx,
+		`SELECT id, user_id, fingerprint, challenge, expires_at, used_at, created_at
+		 FROM ssh_auth_challenges
+		 WHERE id = $1 AND used_at IS NULL AND expires_at > $2
+		 FOR UPDATE`,
+		id, now).
+		Scan(&ch.ID, &ch.UserID, &ch.Fingerprint, &ch.Challenge, &ch.ExpiresAt, &ch.UsedAt, &ch.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	res, err := tx.ExecContext(ctx, `UPDATE ssh_auth_challenges SET used_at = $1 WHERE id = $2 AND used_at IS NULL`, now, id)
+	if err != nil {
+		return nil, err
+	}
+	n, _ := res.RowsAffected()
+	if n != 1 {
+		return nil, sql.ErrNoRows
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return ch, nil
+}
+
+func (p *PostgresDB) CreateWebAuthnCredential(ctx context.Context, credential *models.WebAuthnCredential) error {
+	return p.db.QueryRowContext(ctx,
+		`INSERT INTO webauthn_credentials (user_id, credential_id, data_json) VALUES ($1, $2, $3) RETURNING id, created_at`,
+		credential.UserID, credential.CredentialID, credential.DataJSON).Scan(&credential.ID, &credential.CreatedAt)
+}
+
+func (p *PostgresDB) ListWebAuthnCredentials(ctx context.Context, userID int64) ([]models.WebAuthnCredential, error) {
+	rows, err := p.db.QueryContext(ctx,
+		`SELECT id, user_id, credential_id, data_json, created_at, last_used_at
+		 FROM webauthn_credentials
+		 WHERE user_id = $1
+		 ORDER BY created_at DESC`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []models.WebAuthnCredential
+	for rows.Next() {
+		var c models.WebAuthnCredential
+		if err := rows.Scan(&c.ID, &c.UserID, &c.CredentialID, &c.DataJSON, &c.CreatedAt, &c.LastUsedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+func (p *PostgresDB) UpdateWebAuthnCredential(ctx context.Context, credential *models.WebAuthnCredential) error {
+	_, err := p.db.ExecContext(ctx,
+		`UPDATE webauthn_credentials
+		 SET data_json = $1, last_used_at = $2
+		 WHERE user_id = $3 AND credential_id = $4`,
+		credential.DataJSON, credential.LastUsedAt, credential.UserID, credential.CredentialID)
+	return err
+}
+
+func (p *PostgresDB) CreateWebAuthnSession(ctx context.Context, session *models.WebAuthnSession) error {
+	_, err := p.db.ExecContext(ctx,
+		`INSERT INTO webauthn_sessions (id, user_id, flow, data_json, expires_at) VALUES ($1, $2, $3, $4, $5)`,
+		session.ID, session.UserID, session.Flow, session.DataJSON, session.ExpiresAt)
+	return err
+}
+
+func (p *PostgresDB) ConsumeWebAuthnSession(ctx context.Context, id, flow string, now time.Time) (*models.WebAuthnSession, error) {
+	tx, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	session := &models.WebAuthnSession{}
+	err = tx.QueryRowContext(ctx,
+		`SELECT id, user_id, flow, data_json, expires_at, used_at, created_at
+		 FROM webauthn_sessions
+		 WHERE id = $1 AND flow = $2 AND used_at IS NULL AND expires_at > $3
+		 FOR UPDATE`,
+		id, flow, now).
+		Scan(&session.ID, &session.UserID, &session.Flow, &session.DataJSON, &session.ExpiresAt, &session.UsedAt, &session.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	res, err := tx.ExecContext(ctx, `UPDATE webauthn_sessions SET used_at = $1 WHERE id = $2 AND used_at IS NULL`, now, id)
+	if err != nil {
+		return nil, err
+	}
+	n, _ := res.RowsAffected()
+	if n != 1 {
+		return nil, sql.ErrNoRows
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return session, nil
 }
 
 // --- SSH Keys ---

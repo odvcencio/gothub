@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"time"
 
 	"github.com/odvcencio/gothub/internal/models"
 )
@@ -17,6 +18,15 @@ type DB interface {
 	GetUserByUsername(ctx context.Context, username string) (*models.User, error)
 	GetUserByEmail(ctx context.Context, email string) (*models.User, error)
 	UpdateUserPassword(ctx context.Context, userID int64, passwordHash string) error
+	CreateMagicLinkToken(ctx context.Context, token *models.MagicLinkToken) error
+	ConsumeMagicLinkToken(ctx context.Context, tokenHash string, now time.Time) (*models.User, error)
+	CreateSSHAuthChallenge(ctx context.Context, challenge *models.SSHAuthChallenge) error
+	ConsumeSSHAuthChallenge(ctx context.Context, id string, now time.Time) (*models.SSHAuthChallenge, error)
+	CreateWebAuthnCredential(ctx context.Context, credential *models.WebAuthnCredential) error
+	ListWebAuthnCredentials(ctx context.Context, userID int64) ([]models.WebAuthnCredential, error)
+	UpdateWebAuthnCredential(ctx context.Context, credential *models.WebAuthnCredential) error
+	CreateWebAuthnSession(ctx context.Context, session *models.WebAuthnSession) error
+	ConsumeWebAuthnSession(ctx context.Context, id, flow string, now time.Time) (*models.WebAuthnSession, error)
 
 	// SSH Keys
 	CreateSSHKey(ctx context.Context, key *models.SSHKey) error

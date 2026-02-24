@@ -51,11 +51,9 @@ func (s *Server) handleCreatePR(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Best-effort webhook emission; does not block PR creation success.
-	go func(repoID int64, createdPR *models.PullRequest) {
-		if err := s.webhookSvc.EmitPullRequestEvent(context.Background(), repoID, "opened", createdPR); err != nil {
-			slog.Error("webhook pr opened", "error", err, "repo_id", repoID, "pr", createdPR.Number)
-		}
-	}(repo.ID, pr)
+	s.runAsync(r.Context(), "webhook pr opened", []any{"repo_id", repo.ID, "pr", pr.Number}, func(ctx context.Context) error {
+		return s.webhookSvc.EmitPullRequestEvent(ctx, repo.ID, "opened", pr)
+	})
 
 	jsonResponse(w, http.StatusCreated, pr)
 }
@@ -77,7 +75,10 @@ func (s *Server) handleListPRs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetPR(w http.ResponseWriter, r *http.Request) {
-	number, _ := strconv.Atoi(r.PathValue("number"))
+	number, ok := parsePathPositiveInt(w, r, "number", "pull request number")
+	if !ok {
+		return
+	}
 
 	repo, ok := s.authorizeRepoRequest(w, r, false)
 	if !ok {
@@ -99,7 +100,10 @@ func (s *Server) handleGetPR(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handlePRDiff(w http.ResponseWriter, r *http.Request) {
 	owner := r.PathValue("owner")
 	repoName := r.PathValue("repo")
-	number, _ := strconv.Atoi(r.PathValue("number"))
+	number, ok := parsePathPositiveInt(w, r, "number", "pull request number")
+	if !ok {
+		return
+	}
 
 	repo, ok := s.authorizeRepoRequest(w, r, false)
 	if !ok {
@@ -123,7 +127,10 @@ func (s *Server) handlePRDiff(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleMergePreview(w http.ResponseWriter, r *http.Request) {
 	owner := r.PathValue("owner")
 	repoName := r.PathValue("repo")
-	number, _ := strconv.Atoi(r.PathValue("number"))
+	number, ok := parsePathPositiveInt(w, r, "number", "pull request number")
+	if !ok {
+		return
+	}
 
 	repo, ok := s.authorizeRepoRequest(w, r, false)
 	if !ok {
@@ -145,7 +152,10 @@ func (s *Server) handleMergePreview(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePRMergeGate(w http.ResponseWriter, r *http.Request) {
-	number, _ := strconv.Atoi(r.PathValue("number"))
+	number, ok := parsePathPositiveInt(w, r, "number", "pull request number")
+	if !ok {
+		return
+	}
 
 	repo, ok := s.authorizeRepoRequest(w, r, false)
 	if !ok {
@@ -170,7 +180,10 @@ func (s *Server) handleMergePR(w http.ResponseWriter, r *http.Request) {
 	claims := auth.GetClaims(r.Context())
 	owner := r.PathValue("owner")
 	repoName := r.PathValue("repo")
-	number, _ := strconv.Atoi(r.PathValue("number"))
+	number, ok := parsePathPositiveInt(w, r, "number", "pull request number")
+	if !ok {
+		return
+	}
 
 	repo, ok := s.authorizeRepoRequest(w, r, true)
 	if !ok {
@@ -201,8 +214,15 @@ func (s *Server) handleMergePR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, _ := s.db.GetUserByID(r.Context(), claims.UserID)
-	mergerName := user.Username
+	mergerName := strings.TrimSpace(claims.Username)
+	if mergerName == "" {
+		user, err := s.db.GetUserByID(r.Context(), claims.UserID)
+		if err != nil {
+			jsonError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		mergerName = user.Username
+	}
 
 	mergeHash, err := s.prSvc.Merge(r.Context(), owner, repoName, pr, mergerName)
 	if err != nil {
@@ -216,16 +236,17 @@ func (s *Server) handleMergePR(w http.ResponseWriter, r *http.Request) {
 	})
 
 	// Best-effort webhook emission after merge.
-	go func(repoID int64, mergedPR *models.PullRequest) {
-		if err := s.webhookSvc.EmitPullRequestEvent(context.Background(), repoID, "merged", mergedPR); err != nil {
-			slog.Error("webhook pr merged", "error", err, "repo_id", repoID, "pr", mergedPR.Number)
-		}
-	}(repo.ID, pr)
+	s.runAsync(r.Context(), "webhook pr merged", []any{"repo_id", repo.ID, "pr", pr.Number}, func(ctx context.Context) error {
+		return s.webhookSvc.EmitPullRequestEvent(ctx, repo.ID, "merged", pr)
+	})
 }
 
 func (s *Server) handleUpdatePR(w http.ResponseWriter, r *http.Request) {
 	claims := auth.GetClaims(r.Context())
-	number, _ := strconv.Atoi(r.PathValue("number"))
+	number, ok := parsePathPositiveInt(w, r, "number", "pull request number")
+	if !ok {
+		return
+	}
 
 	repo, ok := s.authorizeRepoRequest(w, r, true)
 	if !ok {
@@ -298,7 +319,10 @@ type createPRCommentRequest struct {
 
 func (s *Server) handleCreatePRComment(w http.ResponseWriter, r *http.Request) {
 	claims := auth.GetClaims(r.Context())
-	number, _ := strconv.Atoi(r.PathValue("number"))
+	number, ok := parsePathPositiveInt(w, r, "number", "pull request number")
+	if !ok {
+		return
+	}
 
 	repo, ok := s.authorizeRepoRequest(w, r, true)
 	if !ok {
@@ -343,7 +367,10 @@ func (s *Server) handleCreatePRComment(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListPRComments(w http.ResponseWriter, r *http.Request) {
-	number, _ := strconv.Atoi(r.PathValue("number"))
+	number, ok := parsePathPositiveInt(w, r, "number", "pull request number")
+	if !ok {
+		return
+	}
 
 	repo, ok := s.authorizeRepoRequest(w, r, false)
 	if !ok {
@@ -375,7 +402,10 @@ type createPRReviewRequest struct {
 
 func (s *Server) handleCreatePRReview(w http.ResponseWriter, r *http.Request) {
 	claims := auth.GetClaims(r.Context())
-	number, _ := strconv.Atoi(r.PathValue("number"))
+	number, ok := parsePathPositiveInt(w, r, "number", "pull request number")
+	if !ok {
+		return
+	}
 
 	repo, ok := s.authorizeRepoRequest(w, r, true)
 	if !ok {
@@ -412,7 +442,10 @@ func (s *Server) handleCreatePRReview(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListPRReviews(w http.ResponseWriter, r *http.Request) {
-	number, _ := strconv.Atoi(r.PathValue("number"))
+	number, ok := parsePathPositiveInt(w, r, "number", "pull request number")
+	if !ok {
+		return
+	}
 
 	repo, ok := s.authorizeRepoRequest(w, r, false)
 	if !ok {

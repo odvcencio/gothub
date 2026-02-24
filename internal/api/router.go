@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/odvcencio/got/pkg/object"
 	"github.com/odvcencio/gothub/internal/auth"
 	"github.com/odvcencio/gothub/internal/database"
@@ -30,6 +31,7 @@ type Server struct {
 	codeIntelSvc *service.CodeIntelService
 	lineageSvc   *service.EntityLineageService
 	rateLimiter  *requestRateLimiter
+	passkey      *webauthn.WebAuthn
 	mux          *http.ServeMux
 	handler      http.Handler
 }
@@ -58,6 +60,7 @@ func NewServer(db database.DB, authSvc *auth.Service, repoSvc *service.RepoServi
 		codeIntelSvc: codeIntelSvc,
 		lineageSvc:   lineageSvc,
 		rateLimiter:  newRequestRateLimiter(),
+		passkey:      initWebAuthn(),
 		mux:          http.NewServeMux(),
 	}
 	s.routes()
@@ -86,6 +89,14 @@ func (s *Server) routes() {
 	// Auth
 	s.mux.HandleFunc("POST /api/v1/auth/register", s.handleRegister)
 	s.mux.HandleFunc("POST /api/v1/auth/login", s.handleLogin)
+	s.mux.HandleFunc("POST /api/v1/auth/magic/request", s.handleRequestMagicLink)
+	s.mux.HandleFunc("POST /api/v1/auth/magic/verify", s.handleVerifyMagicLink)
+	s.mux.HandleFunc("POST /api/v1/auth/ssh/challenge", s.handleSSHChallenge)
+	s.mux.HandleFunc("POST /api/v1/auth/ssh/verify", s.handleSSHVerify)
+	s.mux.HandleFunc("POST /api/v1/auth/webauthn/register/begin", s.requireAuth(s.handleBeginWebAuthnRegistration))
+	s.mux.HandleFunc("POST /api/v1/auth/webauthn/register/finish", s.requireAuth(s.handleFinishWebAuthnRegistration))
+	s.mux.HandleFunc("POST /api/v1/auth/webauthn/login/begin", s.handleBeginWebAuthnLogin)
+	s.mux.HandleFunc("POST /api/v1/auth/webauthn/login/finish", s.handleFinishWebAuthnLogin)
 	s.mux.HandleFunc("POST /api/v1/auth/refresh", s.requireAuth(s.handleRefreshToken))
 	s.mux.HandleFunc("POST /api/v1/auth/change-password", s.requireAuth(s.handleChangePassword))
 

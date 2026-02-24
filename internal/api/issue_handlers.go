@@ -40,11 +40,9 @@ func (s *Server) handleCreateIssue(w http.ResponseWriter, r *http.Request) {
 		slog.Error("notify issue opened", "error", err, "repo_id", repo.ID, "issue", issue.Number)
 	}
 
-	go func(repoID int64, createdIssueID int, issueTitle string, issueBody string) {
-		if err := s.webhookSvc.EmitIssueEvent(context.Background(), repoID, "opened", createdIssueID, issueTitle, issueBody, "open"); err != nil {
-			slog.Error("webhook issue opened", "error", err, "repo_id", repoID, "issue", createdIssueID)
-		}
-	}(repo.ID, issue.Number, issue.Title, issue.Body)
+	s.runAsync(r.Context(), "webhook issue opened", []any{"repo_id", repo.ID, "issue", issue.Number}, func(ctx context.Context) error {
+		return s.webhookSvc.EmitIssueEvent(ctx, repo.ID, "opened", issue.Number, issue.Title, issue.Body, "open")
+	})
 
 	jsonResponse(w, http.StatusCreated, issue)
 }
@@ -72,7 +70,10 @@ func (s *Server) handleGetIssue(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	number, _ := strconv.Atoi(r.PathValue("number"))
+	number, ok := parsePathPositiveInt(w, r, "number", "issue number")
+	if !ok {
+		return
+	}
 	issue, err := s.issueSvc.Get(r.Context(), repo.ID, number)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -96,7 +97,10 @@ func (s *Server) handleUpdateIssue(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	number, _ := strconv.Atoi(r.PathValue("number"))
+	number, ok := parsePathPositiveInt(w, r, "number", "issue number")
+	if !ok {
+		return
+	}
 	issue, err := s.issueSvc.Get(r.Context(), repo.ID, number)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -136,11 +140,9 @@ func (s *Server) handleUpdateIssue(w http.ResponseWriter, r *http.Request) {
 			action = "reopened"
 		}
 	}
-	go func(repoID int64, n int, title string, body string, state string, eventAction string) {
-		if err := s.webhookSvc.EmitIssueEvent(context.Background(), repoID, eventAction, n, title, body, state); err != nil {
-			slog.Error("webhook issue event", "error", err, "repo_id", repoID, "issue", n, "action", eventAction)
-		}
-	}(repo.ID, issue.Number, issue.Title, issue.Body, issue.State, action)
+	s.runAsync(r.Context(), "webhook issue event", []any{"repo_id", repo.ID, "issue", issue.Number, "action", action}, func(ctx context.Context) error {
+		return s.webhookSvc.EmitIssueEvent(ctx, repo.ID, action, issue.Number, issue.Title, issue.Body, issue.State)
+	})
 
 	jsonResponse(w, http.StatusOK, issue)
 }
@@ -155,7 +157,10 @@ func (s *Server) handleCreateIssueComment(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
-	number, _ := strconv.Atoi(r.PathValue("number"))
+	number, ok := parsePathPositiveInt(w, r, "number", "issue number")
+	if !ok {
+		return
+	}
 	issue, err := s.issueSvc.Get(r.Context(), repo.ID, number)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -202,7 +207,10 @@ func (s *Server) handleListIssueComments(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	number, _ := strconv.Atoi(r.PathValue("number"))
+	number, ok := parsePathPositiveInt(w, r, "number", "issue number")
+	if !ok {
+		return
+	}
 	issue, err := s.issueSvc.Get(r.Context(), repo.ID, number)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {

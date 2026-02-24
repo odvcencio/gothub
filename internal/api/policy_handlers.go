@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"strconv"
 	"strings"
 
 	"github.com/odvcencio/gothub/internal/models"
@@ -119,7 +118,10 @@ type upsertPRCheckRunRequest struct {
 }
 
 func (s *Server) handleUpsertPRCheckRun(w http.ResponseWriter, r *http.Request) {
-	number, _ := strconv.Atoi(r.PathValue("number"))
+	number, ok := parsePathPositiveInt(w, r, "number", "pull request number")
+	if !ok {
+		return
+	}
 	repo, ok := s.authorizeRepoRequest(w, r, true)
 	if !ok {
 		return
@@ -177,7 +179,10 @@ func (s *Server) handleUpsertPRCheckRun(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) handleListPRCheckRuns(w http.ResponseWriter, r *http.Request) {
-	number, _ := strconv.Atoi(r.PathValue("number"))
+	number, ok := parsePathPositiveInt(w, r, "number", "pull request number")
+	if !ok {
+		return
+	}
 	repo, ok := s.authorizeRepoRequest(w, r, false)
 	if !ok {
 		return

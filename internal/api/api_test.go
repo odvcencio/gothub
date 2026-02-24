@@ -112,6 +112,160 @@ func TestRegisterAndLogin(t *testing.T) {
 	resp.Body.Close()
 }
 
+func TestMagicLinkAuthFlow(t *testing.T) {
+	server, _ := setupTestServer(t)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	regBody := `{"username":"magicuser","email":"magic@example.com","password":"secret123"}`
+	resp, err := http.Post(ts.URL+"/api/v1/auth/register", "application/json", bytes.NewBufferString(regBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("register: expected 201, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	reqBody := `{"email":"magic@example.com"}`
+	resp, err = http.Post(ts.URL+"/api/v1/auth/magic/request", "application/json", bytes.NewBufferString(reqBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("magic request: expected 200, got %d", resp.StatusCode)
+	}
+	var requestResp struct {
+		Sent  bool   `json:"sent"`
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&requestResp); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if !requestResp.Sent {
+		t.Fatal("expected sent=true")
+	}
+	if requestResp.Token == "" {
+		t.Fatal("expected magic token in response for local/dev mode")
+	}
+
+	verifyBody := fmt.Sprintf(`{"token":"%s"}`, requestResp.Token)
+	resp, err = http.Post(ts.URL+"/api/v1/auth/magic/verify", "application/json", bytes.NewBufferString(verifyBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("magic verify: expected 200, got %d", resp.StatusCode)
+	}
+	var verifyResp struct {
+		Token string `json:"token"`
+		User  struct {
+			Username string `json:"username"`
+		} `json:"user"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&verifyResp); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if verifyResp.Token == "" {
+		t.Fatal("expected jwt token from magic verify")
+	}
+	if verifyResp.User.Username != "magicuser" {
+		t.Fatalf("expected username magicuser, got %q", verifyResp.User.Username)
+	}
+
+	// One-time token: replay must fail.
+	resp, err = http.Post(ts.URL+"/api/v1/auth/magic/verify", "application/json", bytes.NewBufferString(verifyBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("magic verify replay: expected 401, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestSSHChallengeAuthFlow(t *testing.T) {
+	server, _ := setupTestServer(t)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	signer, pubText, fingerprint := newTestSSHSigner(t)
+	token := registerAndGetToken(t, ts.URL, "sshuser")
+
+	addKeyBody := fmt.Sprintf(`{"name":"laptop","public_key":%q}`, strings.TrimSpace(pubText))
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/user/ssh-keys", bytes.NewBufferString(addKeyBody))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create ssh key: expected 201, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	challengeReq := fmt.Sprintf(`{"username":"sshuser","fingerprint":"%s"}`, fingerprint)
+	resp, err = http.Post(ts.URL+"/api/v1/auth/ssh/challenge", "application/json", bytes.NewBufferString(challengeReq))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("ssh challenge: expected 200, got %d", resp.StatusCode)
+	}
+	var challengeResp struct {
+		ChallengeID string `json:"challenge_id"`
+		Challenge   string `json:"challenge"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&challengeResp); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if challengeResp.ChallengeID == "" || challengeResp.Challenge == "" {
+		t.Fatalf("invalid challenge response: %+v", challengeResp)
+	}
+
+	signature, err := signer.Sign(rand.Reader, []byte(challengeResp.Challenge))
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifyReq := fmt.Sprintf(
+		`{"challenge_id":"%s","signature":"%s","signature_format":"%s"}`,
+		challengeResp.ChallengeID,
+		base64.StdEncoding.EncodeToString(signature.Blob),
+		signature.Format,
+	)
+	resp, err = http.Post(ts.URL+"/api/v1/auth/ssh/verify", "application/json", bytes.NewBufferString(verifyReq))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("ssh verify: expected 200, got %d", resp.StatusCode)
+	}
+	var verifyResp struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&verifyResp); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if verifyResp.Token == "" {
+		t.Fatal("expected jwt token from ssh verify")
+	}
+
+	// One-time challenge: replay must fail.
+	resp, err = http.Post(ts.URL+"/api/v1/auth/ssh/verify", "application/json", bytes.NewBufferString(verifyReq))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("ssh verify replay: expected 401, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
 func TestCreateAndGetRepo(t *testing.T) {
 	server, db := setupTestServer(t)
 	ts := httptest.NewServer(server)

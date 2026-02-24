@@ -75,6 +75,7 @@ func (e *TargetBranchMovedError) Error() string {
 const (
 	mergePreviewCacheTTL        = 30 * time.Second
 	mergePreviewCacheMaxEntries = 256
+	mergePreviewCleanupInterval = 2 * time.Second
 )
 
 type mergePreviewCacheEntry struct {
@@ -92,6 +93,7 @@ type PRService struct {
 
 	mergePreviewMu    sync.Mutex
 	mergePreviewCache map[string]mergePreviewCacheEntry
+	mergePreviewPrune time.Time
 }
 
 func NewPRService(db database.DB, repoSvc *RepoService, browseSvc *BrowseService) *PRService {
@@ -533,7 +535,12 @@ func (s *PRService) Merge(ctx context.Context, owner, repo string, pr *models.Pu
 	pr.MergedAt = &now
 	pr.SourceCommit = string(srcHash)
 	pr.TargetCommit = string(tgtHash)
-	s.db.UpdatePullRequest(ctx, pr)
+	if err := s.db.UpdatePullRequest(ctx, pr); err != nil {
+		if rollbackErr := updateTargetBranchRef(store, pr.TargetBranch, mergeCommitHash, tgtHash); rollbackErr != nil {
+			return "", fmt.Errorf("update pull request: %w (also failed to roll back target branch: %v)", err, rollbackErr)
+		}
+		return "", fmt.Errorf("update pull request: %w", err)
+	}
 
 	// Keep merge commits aligned with push paths by indexing lineage and code intel.
 	if s.lineageSvc != nil {
@@ -599,11 +606,15 @@ func (s *PRService) setCachedMergePreview(key string, resp *MergePreviewResponse
 }
 
 func (s *PRService) pruneExpiredMergePreviewCache(now time.Time) {
+	if !s.mergePreviewPrune.IsZero() && now.Sub(s.mergePreviewPrune) < mergePreviewCleanupInterval {
+		return
+	}
 	for key, entry := range s.mergePreviewCache {
 		if now.After(entry.expires) {
 			delete(s.mergePreviewCache, key)
 		}
 	}
+	s.mergePreviewPrune = now
 }
 
 func (s *PRService) evictOldestMergePreviewEntry() {

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +25,8 @@ const (
 	limiterBucketTTL       = 10 * time.Minute
 	limiterCleanupInterval = time.Minute
 )
+
+var trustProxyHeaders = parseEnvBool("GOTHUB_TRUST_PROXY")
 
 type rateLimitBucket struct {
 	tokens     float64
@@ -189,7 +192,8 @@ func requestRateLimitMiddleware(limiter *requestRateLimiter, next http.Handler) 
 }
 
 func clientIPFromRequest(r *http.Request) string {
-	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
+	if trustXForwardedFor(r) {
+		forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For"))
 		if idx := strings.Index(forwarded, ","); idx >= 0 {
 			forwarded = strings.TrimSpace(forwarded[:idx])
 		}
@@ -202,6 +206,28 @@ func clientIPFromRequest(r *http.Request) string {
 		return host
 	}
 	return strings.TrimSpace(r.RemoteAddr)
+}
+
+func trustXForwardedFor(r *http.Request) bool {
+	if trustProxyHeaders {
+		return true
+	}
+	host := strings.TrimSpace(r.RemoteAddr)
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+		host = parsedHost
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func parseEnvBool(name string) bool {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv(name)))
+	switch v {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 func requestBodyLimitMiddleware(next http.Handler) http.Handler {

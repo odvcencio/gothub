@@ -1,5 +1,16 @@
 import { useState, useEffect } from 'preact/hooks';
-import { getUser, getToken, listSSHKeys, createSSHKey, deleteSSHKey, listUserOrgs, createOrg } from '../api/client';
+import {
+  getUser,
+  getToken,
+  listSSHKeys,
+  createSSHKey,
+  deleteSSHKey,
+  listUserOrgs,
+  createOrg,
+  beginWebAuthnRegistration,
+  finishWebAuthnRegistration,
+} from '../api/client';
+import { browserSupportsPasskeys, createPasskeyCredential } from '../lib/webauthn';
 
 interface Props {
   path?: string;
@@ -20,6 +31,7 @@ export function SettingsView({ path }: Props) {
     <div style={{ maxWidth: '800px', margin: '0 auto' }}>
       <h1 style={{ fontSize: '24px', color: '#f0f6fc', marginBottom: '24px' }}>Settings</h1>
       <ProfileSection />
+      <PasskeysSection />
       <SSHKeysSection />
       <OrganizationsSection />
     </div>
@@ -221,6 +233,59 @@ function SSHKeysSection() {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+function PasskeysSection() {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+  const available = browserSupportsPasskeys();
+
+  const handleRegister = async () => {
+    setBusy(true);
+    setError('');
+    setSuccess('');
+    try {
+      const begin = await beginWebAuthnRegistration();
+      const credential = await createPasskeyCredential(begin.options);
+      const result = await finishWebAuthnRegistration(begin.session_id, credential);
+      setSuccess(`Passkey registered (${result.credential_id.slice(0, 16)}...)`);
+    } catch (err: any) {
+      setError(err.message || 'Failed to register passkey');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={{ marginBottom: '32px' }}>
+      <h2 style={{ fontSize: '20px', color: '#f0f6fc', marginBottom: '12px' }}>Passkeys</h2>
+      {error && <div style={{ color: '#f85149', marginBottom: '12px' }}>{error}</div>}
+      {success && <div style={{ color: '#3fb950', marginBottom: '12px' }}>{success}</div>}
+      <div style={{ border: '1px solid #30363d', borderRadius: '6px', padding: '16px', background: '#161b22' }}>
+        <p style={{ marginTop: 0, marginBottom: '12px', color: '#8b949e', fontSize: '13px' }}>
+          Passkeys are the preferred passwordless sign-in method for gothub.
+        </p>
+        <button
+          onClick={handleRegister}
+          disabled={!available || busy}
+          style={{
+            background: '#238636',
+            color: '#fff',
+            border: 'none',
+            padding: '8px 16px',
+            borderRadius: '6px',
+            cursor: !available || busy ? 'not-allowed' : 'pointer',
+            fontWeight: 'bold',
+            fontSize: '13px',
+            opacity: !available || busy ? 0.6 : 1,
+          }}
+        >
+          {available ? (busy ? 'Registering...' : 'Register passkey') : 'Passkeys unavailable in this browser'}
+        </button>
+      </div>
     </div>
   );
 }

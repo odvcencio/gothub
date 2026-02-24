@@ -1,6 +1,7 @@
 package api
 
 import (
+	"crypto/rand"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -32,15 +33,33 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
-	if req.Username == "" || req.Email == "" || req.Password == "" {
-		jsonError(w, "username, email, and password are required", http.StatusBadRequest)
+	if req.Username == "" || req.Email == "" {
+		jsonError(w, "username and email are required", http.StatusBadRequest)
 		return
 	}
 
-	hash, err := s.authSvc.HashPassword(req.Password)
-	if err != nil {
-		jsonError(w, "internal error", http.StatusInternalServerError)
-		return
+	hash := ""
+	if req.Password == "" {
+		// Passwordless accounts keep an unusable password hash so legacy password
+		// login remains explicitly disabled for this user.
+		random := make([]byte, 32)
+		if _, err := rand.Read(random); err != nil {
+			jsonError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		var err error
+		hash, err = s.authSvc.HashPassword(string(random))
+		if err != nil {
+			jsonError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+	} else {
+		var err error
+		hash, err = s.authSvc.HashPassword(req.Password)
+		if err != nil {
+			jsonError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
 	}
 
 	user := &models.User{

@@ -47,6 +47,22 @@ export const register = (username: string, email: string, password: string) =>
   request<{ token: string; user: any }>('POST', '/auth/register', { username, email, password });
 export const login = (username: string, password: string) =>
   request<{ token: string; user: any }>('POST', '/auth/login', { username, password });
+export const requestMagicLink = (email: string) =>
+  request<{ sent: boolean; token?: string; expires_at?: string }>('POST', '/auth/magic/request', { email });
+export const verifyMagicLink = (token: string) =>
+  request<{ token: string; user: any }>('POST', '/auth/magic/verify', { token });
+export const beginSSHLogin = (username: string, fingerprint?: string) =>
+  request<{ challenge_id: string; challenge: string; fingerprint: string; expires_at: string }>('POST', '/auth/ssh/challenge', { username, fingerprint });
+export const finishSSHLogin = (challengeId: string, signature: string, signatureFormat: string) =>
+  request<{ token: string; user: any }>('POST', '/auth/ssh/verify', { challenge_id: challengeId, signature, signature_format: signatureFormat });
+export const beginWebAuthnRegistration = () =>
+  request<{ session_id: string; options: any }>('POST', '/auth/webauthn/register/begin');
+export const finishWebAuthnRegistration = (sessionId: string, credential: any) =>
+  request<{ credential_id: string }>('POST', '/auth/webauthn/register/finish', { session_id: sessionId, credential });
+export const beginWebAuthnLogin = (username: string) =>
+  request<{ session_id: string; options: any }>('POST', '/auth/webauthn/login/begin', { username });
+export const finishWebAuthnLogin = (sessionId: string, credential: any) =>
+  request<{ token: string; user: any }>('POST', '/auth/webauthn/login/finish', { session_id: sessionId, credential });
 export const refreshToken = () =>
   request<{ token: string; user: any }>('POST', '/auth/refresh');
 export const changePassword = (currentPassword: string, newPassword: string) =>

@@ -11,6 +11,44 @@ type User struct {
 	CreatedAt    time.Time `json:"created_at"`
 }
 
+type MagicLinkToken struct {
+	ID        int64      `json:"id"`
+	UserID    int64      `json:"user_id"`
+	TokenHash string     `json:"-"`
+	ExpiresAt time.Time  `json:"expires_at"`
+	UsedAt    *time.Time `json:"used_at,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
+}
+
+type SSHAuthChallenge struct {
+	ID          string     `json:"id"`
+	UserID      int64      `json:"user_id"`
+	Fingerprint string     `json:"fingerprint"`
+	Challenge   string     `json:"challenge"`
+	ExpiresAt   time.Time  `json:"expires_at"`
+	UsedAt      *time.Time `json:"used_at,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+}
+
+type WebAuthnCredential struct {
+	ID           int64      `json:"id"`
+	UserID       int64      `json:"user_id"`
+	CredentialID string     `json:"credential_id"`
+	DataJSON     string     `json:"-"`
+	CreatedAt    time.Time  `json:"created_at"`
+	LastUsedAt   *time.Time `json:"last_used_at,omitempty"`
+}
+
+type WebAuthnSession struct {
+	ID        string     `json:"id"`
+	UserID    int64      `json:"user_id"`
+	Flow      string     `json:"flow"`
+	DataJSON  string     `json:"-"`
+	ExpiresAt time.Time  `json:"expires_at"`
+	UsedAt    *time.Time `json:"used_at,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
+}
+
 type SSHKey struct {
 	ID          int64     `json:"id"`
 	UserID      int64     `json:"user_id"`
