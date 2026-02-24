@@ -50,6 +50,31 @@ Task 30 (Obs: OTel tracing)
         → Task 34 (Obs: GotHub benchmarks)
 ```
 
+## Execution Tracker (Live)
+
+Updated: 2026-02-24
+
+### Completed
+
+| Task | Status | Repo | Commit | Verification |
+|------|--------|------|--------|--------------|
+| 1 | complete | got | `d14d240` | `go test ./pkg/object -run TestPack -v`, `go test ./...` |
+| 2 | complete | got | `e27ceeb` | `go test ./pkg/object -run TestPackWriter -v`, `go test ./...` |
+| 3 | complete | got | `251b62d` | `go test ./pkg/object -run TestReadPack -v`, `go test ./...` |
+| 4 | complete | got | `4b916f1` | `go test ./pkg/object -run TestWritePackIndex -v`, `go test ./...` |
+| 5 | complete | got | `eed3d13` | `go test ./pkg/object -run 'TestReadPackIndex|TestReadPackIndexFromReader' -v`, `go test ./...` |
+
+### In Progress
+
+| Task | Status | Notes |
+|------|--------|-------|
+| 6 | next | implement delta compression writer (`OFS_DELTA`) |
+
+### Remaining (Not Yet Implemented)
+
+- Tasks 7-34 are pending.
+- Tasks 35-39 are queued post-Phase-1 cloud multi-tenancy work.
+
 ---
 
 ## Workstream A: Git-Compatible Pack File Engine (Got)
