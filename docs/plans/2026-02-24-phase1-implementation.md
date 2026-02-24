@@ -2108,3 +2108,37 @@ Tasks can be partially parallelized across workstreams:
 **Week 7-8:** Tasks 20-23 (Bloom + xref + impact + semantic diff) + Tasks 24-26 (Generation numbers + LCA + merge cache) in parallel
 **Week 9:** Tasks 27-28 (Preview cache + parallel merge) + Tasks 29-32 (Observability) in parallel
 **Week 10:** Tasks 33-34 (Benchmarks) + integration testing + performance validation against design targets
+
+---
+
+## Queued Post-Phase-1 Workstream (Cloud Multi-Tenancy)
+
+These tasks are queued and intentionally excluded from Phase 1 scope.
+
+### Task 35: Tenant Key Propagation in Schema
+
+**Goal:** add `tenant_id BIGINT NOT NULL` to all tenant-scoped tables (`users`, `orgs`, `repositories`, and dependent tables via FK propagation), including migration strategy for existing rows.
+
+### Task 36: Postgres RLS Enforcement
+
+**Goal:** enable RLS on all tenant-scoped tables and add policies enforcing:
+
+```sql
+tenant_id = current_setting('app.tenant_id')::bigint
+```
+
+### Task 37: Tenant Context in Request + DB Layer
+
+**Goal:** set `app.tenant_id` on every request/connection/transaction boundary from authenticated request context middleware.
+
+### Task 38: Tenant-Aware Storage Paths
+
+**Goal:** update object storage layout to:
+
+```text
+{root}/{tenant_id}/{repo_id}/
+```
+
+### Task 39: Multi-Tenant Security Verification
+
+**Goal:** add integration tests for cross-tenant data isolation (API and direct SQL path) to prove RLS defense-in-depth.

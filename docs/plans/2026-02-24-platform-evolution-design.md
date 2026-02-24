@@ -381,11 +381,24 @@ Index status API:
 | SSO/SAML | OAuth2, SAML 2.0, OIDC for enterprise identity providers |
 | Audit logs | Immutable log of all actions: pushes, merges, permission changes, policy overrides |
 | RBAC | Custom roles beyond admin/write/read, org-level and repo-level inheritance |
+| Shared-instance multi-tenancy with RLS | Add `tenant_id` to all tenant-scoped tables, enforce Postgres RLS using `current_setting('app.tenant_id')`, set tenant context per request/connection, and isolate storage paths as `{root}/{tenant_id}/{repo_id}/` |
 | Compliance policies | "All public API changes require security review", "No merge without 2 CODEOWNERS approvals" (extend existing merge gates) |
 | Horizontal scaling | Stateless API servers + shared object storage (S3/GCS for packs) + distributed index |
 | On-prem deployment | Helm chart, Terraform module, air-gapped install |
 | Backup/restore | Point-in-time recovery, cross-region replication |
 | Admin console | Org management, usage analytics, health monitoring, license management |
+
+### Phase 4.1 (Queued): Shared-Instance Multi-Tenancy with RLS
+
+This is the cloud hardening milestone required before running multiple companies on a shared Postgres instance.
+
+**Required changes:**
+- Add `tenant_id BIGINT NOT NULL` to tenant-scoped tables (`users`, `orgs`, `repositories`, and dependent tables via foreign-key propagation).
+- Enable Postgres RLS on every tenant-scoped table with policies enforcing `tenant_id = current_setting('app.tenant_id')::bigint`.
+- Add request middleware + DB session plumbing to set `app.tenant_id` for each request/transaction.
+- Move repository storage layout to `{root}/{tenant_id}/{repo_id}/`.
+
+**Why this matters:** database-enforced tenancy boundaries provide defense-in-depth when application logic fails.
 
 ---
 
