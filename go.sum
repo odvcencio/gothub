@@ -36,6 +36,12 @@ github.com/mitchellh/mapstructure v1.5.0 h1:jeMsZIYE/09sWLaz43PL7Gy6RuMjD2eJVyua
 github.com/mitchellh/mapstructure v1.5.0/go.mod h1:bFUtVrKA4DC2yAKiSyO/QUcy7e+RRV2QTWOzhPopBRo=
 github.com/ncruces/go-strftime v0.1.9 h1:bY0MQC28UADQmHmaF5dgpLmImcShSi2kHU9XLdhx/f4=
 github.com/ncruces/go-strftime v0.1.9/go.mod h1:Fwc5htZGVVkseilnfgOVb9mKy6w1naJmn9CehxcKcls=
+github.com/odvcencio/got v0.2.0 h1:zr89fJmxvKyp8RWvtuN322kDf9tPnON0N9Zmgz3K+ew=
+github.com/odvcencio/got v0.2.0/go.mod h1:AC5qZyl4rWD2BPdniU8fPtUxo5K8LAB1690r5f14Y5c=
+github.com/odvcencio/gotreesitter v0.3.0 h1:RXwfnawO6JUAUi3VuNBDB471A/dJD6op+9EXJOhJ/0s=
+github.com/odvcencio/gotreesitter v0.3.0/go.mod h1:CEjhRXmfP38AHqxwWxNcLaMsLQ3YoGMrwNGle1huZdU=
+github.com/odvcencio/gts-suite v0.4.0 h1:bUFsNbe9p78AmCx9Wy3bxTiFuhkccLFv28ox6FCeSjY=
+github.com/odvcencio/gts-suite v0.4.0/go.mod h1:njg97OlHRVVfgR6rMteCZLtnDwsaaEaVwf6TeKTrrhM=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec h1:W09IVJc94icq4NjY3clb7Lk8O1qJ8BdBEF8z0ibU0rE=
