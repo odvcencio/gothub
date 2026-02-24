@@ -5,8 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -21,6 +20,7 @@ import (
 
 const (
 	repoIndexObjectType           object.ObjectType = "repoindex"
+	repoIndexSchemaVersion                          = "0.1.0"
 	defaultCodeIntelCacheMaxItems                   = 128
 	defaultCodeIntelCacheTTL                        = 15 * time.Minute
 )
@@ -55,7 +55,8 @@ func NewCodeIntelService(db database.DB, repoSvc *RepoService, browseSvc *Browse
 }
 
 // BuildIndex returns a semantic index for a repository at a ref.
-// It first checks in-memory cache, then persisted store-backed index, then falls back to on-demand build.
+// It first checks in-memory cache, then persisted store-backed index, then
+// falls back to an on-demand object-store build.
 func (s *CodeIntelService) BuildIndex(ctx context.Context, owner, repo, ref string) (*model.Index, error) {
 	commitHash, err := s.browseSvc.ResolveRef(ctx, owner, repo, ref)
 	if err != nil {
@@ -78,7 +79,7 @@ func (s *CodeIntelService) BuildIndex(ctx context.Context, owner, repo, ref stri
 		return idx, nil
 	}
 
-	idx, err := s.buildIndexViaTempDir(ctx, owner, repo, ref, store)
+	idx, err := s.buildIndexFromStore(ctx, owner, repo, ref, store)
 	if err != nil {
 		return nil, err
 	}
@@ -87,38 +88,53 @@ func (s *CodeIntelService) BuildIndex(ctx context.Context, owner, repo, ref stri
 	return idx, nil
 }
 
-func (s *CodeIntelService) buildIndexViaTempDir(ctx context.Context, owner, repo, ref string, store *gotstore.RepoStore) (*model.Index, error) {
-	// Materialize tree to temp dir for compatibility with gts-suite v0.3.0.
+func (s *CodeIntelService) buildIndexFromStore(ctx context.Context, owner, repo, ref string, store *gotstore.RepoStore) (*model.Index, error) {
+	// Read file blobs directly from the object store to avoid temp-dir materialization.
 	files, err := s.browseSvc.FlattenTree(ctx, owner, repo, ref)
 	if err != nil {
 		return nil, fmt.Errorf("flatten tree: %w", err)
 	}
-	tmpDir, err := os.MkdirTemp("", "gothub-index-*")
-	if err != nil {
-		return nil, err
+	builder := index.NewBuilder()
+	idx := &model.Index{
+		Version:     repoIndexSchemaVersion,
+		Root:        fmt.Sprintf("%s/%s@%s", owner, repo, ref),
+		GeneratedAt: time.Now().UTC(),
+		Files:       make([]model.FileSummary, 0, len(files)),
 	}
-	defer os.RemoveAll(tmpDir)
 
-	// Write all files to temp dir by reading blobs
+	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
 	for _, fe := range files {
-		blob, bErr := store.Objects.ReadBlob(object.Hash(fe.BlobHash))
-		if bErr != nil {
+		parser, ok := builder.ParserForPath(fe.Path)
+		if !ok {
 			continue
 		}
-		full := filepath.Join(tmpDir, fe.Path)
-		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-			return nil, err
+		blob, err := store.Objects.ReadBlob(object.Hash(fe.BlobHash))
+		if err != nil {
+			idx.Errors = append(idx.Errors, model.ParseError{
+				Path:  fe.Path,
+				Error: fmt.Sprintf("read blob: %v", err),
+			})
+			continue
 		}
-		if err := os.WriteFile(full, blob.Data, 0o644); err != nil {
-			return nil, err
+		summary, err := parser.Parse(fe.Path, blob.Data)
+		if err != nil {
+			idx.Errors = append(idx.Errors, model.ParseError{
+				Path:  fe.Path,
+				Error: err.Error(),
+			})
+			continue
 		}
-	}
 
-	// Build index
-	builder := index.NewBuilder()
-	idx, err := builder.BuildPath(tmpDir)
-	if err != nil {
-		return nil, fmt.Errorf("build index: %w", err)
+		summary.Path = fe.Path
+		summary.Language = parser.Language()
+		summary.SizeBytes = int64(len(blob.Data))
+		for i := range summary.Symbols {
+			summary.Symbols[i].File = fe.Path
+		}
+		for i := range summary.References {
+			summary.References[i].File = fe.Path
+		}
+		idx.Files = append(idx.Files, summary)
 	}
 	return idx, nil
 }
