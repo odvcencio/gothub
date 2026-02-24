@@ -44,6 +44,7 @@ type PRService struct {
 	repoSvc      *RepoService
 	browseSvc    *BrowseService
 	codeIntelSvc *CodeIntelService
+	lineageSvc   *EntityLineageService
 }
 
 func NewPRService(db database.DB, repoSvc *RepoService, browseSvc *BrowseService) *PRService {
@@ -52,6 +53,10 @@ func NewPRService(db database.DB, repoSvc *RepoService, browseSvc *BrowseService
 
 func (s *PRService) SetCodeIntelService(codeIntelSvc *CodeIntelService) {
 	s.codeIntelSvc = codeIntelSvc
+}
+
+func (s *PRService) SetLineageService(lineageSvc *EntityLineageService) {
+	s.lineageSvc = lineageSvc
 }
 
 func (s *PRService) Create(ctx context.Context, repoID, authorID int64, title, body, srcBranch, tgtBranch string) (*models.PullRequest, error) {
@@ -466,6 +471,18 @@ func (s *PRService) Merge(ctx context.Context, owner, repo string, pr *models.Pu
 	pr.SourceCommit = string(srcHash)
 	pr.TargetCommit = string(tgtHash)
 	s.db.UpdatePullRequest(ctx, pr)
+
+	// Keep merge commits aligned with push paths by indexing lineage and code intel.
+	if s.lineageSvc != nil {
+		if err := s.lineageSvc.IndexCommit(ctx, pr.RepoID, store, mergeCommitHash); err != nil {
+			return "", fmt.Errorf("index merge commit lineage: %w", err)
+		}
+	}
+	if s.codeIntelSvc != nil {
+		if err := s.codeIntelSvc.EnsureCommitIndexed(ctx, pr.RepoID, store, owner+"/"+repo, mergeCommitHash); err != nil {
+			return "", fmt.Errorf("index merge commit codeintel: %w", err)
+		}
+	}
 
 	return mergeCommitHash, nil
 }

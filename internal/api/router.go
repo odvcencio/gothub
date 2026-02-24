@@ -43,6 +43,7 @@ func NewServer(db database.DB, authSvc *auth.Service, repoSvc *service.RepoServi
 	notifySvc := service.NewNotificationService(db)
 	codeIntelSvc := service.NewCodeIntelService(db, repoSvc, browseSvc)
 	prSvc.SetCodeIntelService(codeIntelSvc)
+	prSvc.SetLineageService(lineageSvc)
 	s := &Server{
 		db:           db,
 		authSvc:      authSvc,
