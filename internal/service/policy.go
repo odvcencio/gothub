@@ -5,8 +5,12 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
+	gotdiff "github.com/odvcencio/got/pkg/diff"
+	"github.com/odvcencio/got/pkg/object"
+	"github.com/odvcencio/gothub/internal/gotstore"
 	"github.com/odvcencio/gothub/internal/models"
 )
 
@@ -66,11 +70,15 @@ func (s *PRService) EvaluateMergeGate(ctx context.Context, repoID int64, pr *mod
 		return result, nil
 	}
 
-	if rule.RequireApprovals {
-		reviews, err := s.db.ListPRReviews(ctx, pr.ID)
+	var reviews []models.PRReview
+	if rule.RequireApprovals || rule.RequireEntityOwnerApproval {
+		reviews, err = s.db.ListPRReviews(ctx, pr.ID)
 		if err != nil {
 			return nil, fmt.Errorf("list reviews: %w", err)
 		}
+	}
+
+	if rule.RequireApprovals {
 		approvals, hasChangesRequested := evaluateApprovals(reviews, pr.AuthorID)
 		if hasChangesRequested {
 			result.Reasons = append(result.Reasons, "changes requested review is blocking merge")
@@ -78,6 +86,14 @@ func (s *PRService) EvaluateMergeGate(ctx context.Context, repoID int64, pr *mod
 		if approvals < rule.RequiredApprovals {
 			result.Reasons = append(result.Reasons, fmt.Sprintf("requires %d approving review(s), currently %d", rule.RequiredApprovals, approvals))
 		}
+	}
+
+	if rule.RequireEntityOwnerApproval {
+		reasons, evalErr := s.evaluateEntityOwnerApprovals(ctx, repoID, pr, reviews)
+		if evalErr != nil {
+			result.Reasons = append(result.Reasons, fmt.Sprintf("unable to evaluate entity owner approvals: %v", evalErr))
+		}
+		result.Reasons = append(result.Reasons, reasons...)
 	}
 
 	if rule.RequireStatusChecks {
@@ -93,6 +109,247 @@ func (s *PRService) EvaluateMergeGate(ctx context.Context, repoID int64, pr *mod
 
 	result.Allowed = len(result.Reasons) == 0
 	return result, nil
+}
+
+func (s *PRService) evaluateEntityOwnerApprovals(ctx context.Context, repoID int64, pr *models.PullRequest, reviews []models.PRReview) ([]string, error) {
+	store, err := s.repoSvc.OpenStoreByID(ctx, repoID)
+	if err != nil {
+		return nil, err
+	}
+
+	cfg, err := loadGotOwnersForBranch(store, pr.TargetBranch)
+	if err != nil {
+		return nil, err
+	}
+	if len(cfg.rules) == 0 {
+		return nil, nil
+	}
+
+	changes, err := listPREntityChanges(store, pr.SourceBranch, pr.TargetBranch)
+	if err != nil {
+		return nil, err
+	}
+	if len(changes) == 0 {
+		return nil, nil
+	}
+
+	approvedUsers := make(map[string]bool, len(reviews))
+	for authorID, review := range latestReviewsByAuthor(reviews) {
+		if authorID == pr.AuthorID {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(review.State), "approved") {
+			u := strings.ToLower(strings.TrimSpace(review.AuthorName))
+			if u != "" {
+				approvedUsers[u] = true
+			}
+		}
+	}
+
+	reasons := make([]string, 0)
+	seenReasons := make(map[string]bool)
+	for _, ch := range changes {
+		owners := cfg.ownersForChange(ch)
+		if len(owners) == 0 {
+			continue
+		}
+
+		requiredUsers, unresolvedTeams := cfg.resolveOwners(owners)
+		if len(unresolvedTeams) > 0 {
+			reason := fmt.Sprintf("entity %q references undefined team(s): %s", ch.Key, formatTeamRefs(unresolvedTeams))
+			if !seenReasons[reason] {
+				seenReasons[reason] = true
+				reasons = append(reasons, reason)
+			}
+		}
+		if len(requiredUsers) == 0 {
+			continue
+		}
+
+		hasOwnerApproval := false
+		for _, user := range requiredUsers {
+			if approvedUsers[user] {
+				hasOwnerApproval = true
+				break
+			}
+		}
+		if hasOwnerApproval {
+			continue
+		}
+
+		reason := fmt.Sprintf("entity %q requires approval from %s", ch.Key, formatUserMentions(requiredUsers))
+		if !seenReasons[reason] {
+			seenReasons[reason] = true
+			reasons = append(reasons, reason)
+		}
+	}
+
+	sort.Strings(reasons)
+	return reasons, nil
+}
+
+func loadGotOwnersForBranch(store *gotstore.RepoStore, branch string) (*gotOwnersConfig, error) {
+	headHash, err := store.Refs.Get("heads/" + branch)
+	if err != nil {
+		return nil, fmt.Errorf("resolve target branch %q: %w", branch, err)
+	}
+	commit, err := store.Objects.ReadCommit(headHash)
+	if err != nil {
+		return nil, fmt.Errorf("read target commit %q: %w", string(headHash), err)
+	}
+
+	blobHash, err := findBlob(store.Objects, commit.TreeHash, ".gotowners")
+	if err != nil {
+		if isMissingFileErr(err) {
+			return &gotOwnersConfig{teams: make(map[string][]string)}, nil
+		}
+		return nil, fmt.Errorf("read .gotowners: %w", err)
+	}
+	blob, err := store.Objects.ReadBlob(blobHash)
+	if err != nil {
+		return nil, fmt.Errorf("read .gotowners blob: %w", err)
+	}
+	return parseGotOwners(blob.Data)
+}
+
+func listPREntityChanges(store *gotstore.RepoStore, sourceBranch, targetBranch string) ([]ownerEntityChange, error) {
+	srcHash, err := store.Refs.Get("heads/" + sourceBranch)
+	if err != nil {
+		return nil, fmt.Errorf("resolve source branch %q: %w", sourceBranch, err)
+	}
+	tgtHash, err := store.Refs.Get("heads/" + targetBranch)
+	if err != nil {
+		return nil, fmt.Errorf("resolve target branch %q: %w", targetBranch, err)
+	}
+
+	srcCommit, err := store.Objects.ReadCommit(srcHash)
+	if err != nil {
+		return nil, fmt.Errorf("read source commit %q: %w", string(srcHash), err)
+	}
+	tgtCommit, err := store.Objects.ReadCommit(tgtHash)
+	if err != nil {
+		return nil, fmt.Errorf("read target commit %q: %w", string(tgtHash), err)
+	}
+
+	srcFiles, err := flattenTree(store.Objects, srcCommit.TreeHash, "")
+	if err != nil {
+		return nil, fmt.Errorf("flatten source tree: %w", err)
+	}
+	tgtFiles, err := flattenTree(store.Objects, tgtCommit.TreeHash, "")
+	if err != nil {
+		return nil, fmt.Errorf("flatten target tree: %w", err)
+	}
+
+	srcMap := make(map[string]FileEntry, len(srcFiles))
+	for _, f := range srcFiles {
+		srcMap[f.Path] = f
+	}
+	tgtMap := make(map[string]FileEntry, len(tgtFiles))
+	for _, f := range tgtFiles {
+		tgtMap[f.Path] = f
+	}
+
+	pathSet := make(map[string]struct{}, len(srcMap)+len(tgtMap))
+	for path, srcEntry := range srcMap {
+		if tgtEntry, ok := tgtMap[path]; !ok || tgtEntry.BlobHash != srcEntry.BlobHash {
+			pathSet[path] = struct{}{}
+		}
+	}
+	for path := range tgtMap {
+		if _, ok := srcMap[path]; !ok {
+			pathSet[path] = struct{}{}
+		}
+	}
+
+	paths := make([]string, 0, len(pathSet))
+	for p := range pathSet {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+
+	changes := make([]ownerEntityChange, 0)
+	seen := make(map[string]bool)
+	for _, path := range paths {
+		srcEntry, hasSrc := srcMap[path]
+		tgtEntry, hasTgt := tgtMap[path]
+
+		var srcData, tgtData []byte
+		if hasSrc && srcEntry.BlobHash != "" {
+			srcData, err = readBlobData(store.Objects, object.Hash(srcEntry.BlobHash))
+			if err != nil {
+				continue
+			}
+		}
+		if hasTgt && tgtEntry.BlobHash != "" {
+			tgtData, err = readBlobData(store.Objects, object.Hash(tgtEntry.BlobHash))
+			if err != nil {
+				continue
+			}
+		}
+
+		fd, err := gotdiff.DiffFiles(path, tgtData, srcData)
+		if err != nil {
+			continue
+		}
+		for _, c := range fd.Changes {
+			key := path + "\x00" + c.Key
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+
+			ch := ownerEntityChange{
+				Path: path,
+				Key:  c.Key,
+			}
+			if c.After != nil {
+				ch.Name = c.After.Name
+				ch.DeclKind = c.After.DeclKind
+				ch.Receiver = c.After.Receiver
+			} else if c.Before != nil {
+				ch.Name = c.Before.Name
+				ch.DeclKind = c.Before.DeclKind
+				ch.Receiver = c.Before.Receiver
+			}
+			changes = append(changes, ch)
+		}
+	}
+	sort.Slice(changes, func(i, j int) bool {
+		if changes[i].Path == changes[j].Path {
+			return changes[i].Key < changes[j].Key
+		}
+		return changes[i].Path < changes[j].Path
+	})
+	return changes, nil
+}
+
+func isMissingFileErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "file not found")
+}
+
+func formatUserMentions(users []string) string {
+	if len(users) == 0 {
+		return ""
+	}
+	mentions := make([]string, len(users))
+	for i, u := range users {
+		mentions[i] = "@" + u
+	}
+	return strings.Join(mentions, " or ")
+}
+
+func formatTeamRefs(teams []string) string {
+	if len(teams) == 0 {
+		return ""
+	}
+	refs := make([]string, len(teams))
+	for i, t := range teams {
+		refs[i] = "@team/" + t
+	}
+	return strings.Join(refs, ", ")
 }
 
 func parseChecksCSV(csv string) []string {
@@ -125,7 +382,7 @@ func normalizeStatus(status string) string {
 	}
 }
 
-func evaluateApprovals(reviews []models.PRReview, prAuthorID int64) (approvals int, hasChangesRequested bool) {
+func latestReviewsByAuthor(reviews []models.PRReview) map[int64]models.PRReview {
 	latestByAuthor := make(map[int64]models.PRReview, len(reviews))
 	for _, r := range reviews {
 		prev, exists := latestByAuthor[r.AuthorID]
@@ -133,8 +390,11 @@ func evaluateApprovals(reviews []models.PRReview, prAuthorID int64) (approvals i
 			latestByAuthor[r.AuthorID] = r
 		}
 	}
+	return latestByAuthor
+}
 
-	for authorID, review := range latestByAuthor {
+func evaluateApprovals(reviews []models.PRReview, prAuthorID int64) (approvals int, hasChangesRequested bool) {
+	for authorID, review := range latestReviewsByAuthor(reviews) {
 		if authorID == prAuthorID {
 			continue
 		}

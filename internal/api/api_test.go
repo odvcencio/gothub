@@ -1627,6 +1627,171 @@ func TestPRMergeGateEndpoint(t *testing.T) {
 	}
 }
 
+func TestMergeGateRequiresEntityOwnerApproval(t *testing.T) {
+	server, db := setupTestServer(t)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	ownerToken := registerAndGetToken(t, ts.URL, "alice")
+	reviewerToken := registerAndGetToken(t, ts.URL, "bob")
+	createRepo(t, ts.URL, ownerToken, "repo", false)
+
+	repo, err := db.GetRepository(context.Background(), "alice", "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := gotstore.Open(repo.StoragePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	gotOwnersHash, err := store.Objects.WriteBlob(&object.Blob{Data: []byte("func:ProcessOrder @bob\n")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseBlobHash, err := store.Objects.WriteBlob(&object.Blob{Data: []byte("package main\n\nfunc ProcessOrder() int { return 1 }\n")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseTreeHash, err := store.Objects.WriteTree(&object.TreeObj{
+		Entries: []object.TreeEntry{
+			{Name: ".gotowners", BlobHash: gotOwnersHash},
+			{Name: "main.go", BlobHash: baseBlobHash},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseCommitHash, err := store.Objects.WriteCommit(&object.CommitObj{
+		TreeHash:  baseTreeHash,
+		Author:    "alice",
+		Timestamp: 1700001000,
+		Message:   "base",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	featureBlobHash, err := store.Objects.WriteBlob(&object.Blob{Data: []byte("package main\n\nfunc ProcessOrder() int { return 2 }\n")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	featureTreeHash, err := store.Objects.WriteTree(&object.TreeObj{
+		Entries: []object.TreeEntry{
+			{Name: ".gotowners", BlobHash: gotOwnersHash},
+			{Name: "main.go", BlobHash: featureBlobHash},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	featureCommitHash, err := store.Objects.WriteCommit(&object.CommitObj{
+		TreeHash:  featureTreeHash,
+		Parents:   []object.Hash{baseCommitHash},
+		Author:    "alice",
+		Timestamp: 1700001100,
+		Message:   "feature",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Refs.Set("heads/main", baseCommitHash); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Refs.Set("heads/feature", featureCommitHash); err != nil {
+		t.Fatal(err)
+	}
+
+	addCollabBody := `{"username":"bob","role":"write"}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/repos/alice/repo/collaborators", bytes.NewBufferString(addCollabBody))
+	req.Header.Set("Authorization", "Bearer "+ownerToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("add collaborator: expected 201, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	prNumber := createPRNumber(t, ts.URL, ownerToken, "alice", "repo", "feature", "main")
+
+	ruleBody := `{
+		"enabled": true,
+		"require_approvals": false,
+		"require_status_checks": false,
+		"require_entity_owner_approval": true
+	}`
+	req, _ = http.NewRequest("PUT", ts.URL+"/api/v1/repos/alice/repo/branch-protection/main", bytes.NewBufferString(ruleBody))
+	req.Header.Set("Authorization", "Bearer "+ownerToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("set branch protection: expected 200, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	req, _ = http.NewRequest("GET", fmt.Sprintf("%s/api/v1/repos/alice/repo/pulls/%d/merge-gate", ts.URL, prNumber), nil)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("merge gate endpoint: expected 200, got %d", resp.StatusCode)
+	}
+	var blockedGate struct {
+		Allowed bool     `json:"allowed"`
+		Reasons []string `json:"reasons"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&blockedGate); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if blockedGate.Allowed {
+		t.Fatalf("expected merge gate to block until owner approval, got %+v", blockedGate)
+	}
+	if !strings.Contains(strings.Join(blockedGate.Reasons, " "), "@bob") {
+		t.Fatalf("expected entity owner reason to mention @bob, got %+v", blockedGate.Reasons)
+	}
+
+	reviewBody := `{"state":"approved","body":"owner-approved"}`
+	req, _ = http.NewRequest("POST", fmt.Sprintf("%s/api/v1/repos/alice/repo/pulls/%d/reviews", ts.URL, prNumber), bytes.NewBufferString(reviewBody))
+	req.Header.Set("Authorization", "Bearer "+reviewerToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create review: expected 201, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	req, _ = http.NewRequest("GET", fmt.Sprintf("%s/api/v1/repos/alice/repo/pulls/%d/merge-gate", ts.URL, prNumber), nil)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("merge gate endpoint after approval: expected 200, got %d", resp.StatusCode)
+	}
+	var allowedGate struct {
+		Allowed bool     `json:"allowed"`
+		Reasons []string `json:"reasons"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&allowedGate); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if !allowedGate.Allowed {
+		t.Fatalf("expected merge gate to allow after owner approval, got %+v", allowedGate)
+	}
+}
+
 func TestMergeProducesEntityEnrichedTree(t *testing.T) {
 	server, db := setupTestServer(t)
 	ts := httptest.NewServer(server)

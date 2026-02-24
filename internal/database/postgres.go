@@ -35,7 +35,10 @@ func (p *PostgresDB) Migrate(ctx context.Context) error {
 	if _, err := p.db.ExecContext(ctx, pgSchema); err != nil {
 		return err
 	}
-	_, err := p.db.ExecContext(ctx, `ALTER TABLE pr_comments ADD COLUMN IF NOT EXISTS entity_stable_id TEXT NOT NULL DEFAULT ''`)
+	if _, err := p.db.ExecContext(ctx, `ALTER TABLE pr_comments ADD COLUMN IF NOT EXISTS entity_stable_id TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	_, err := p.db.ExecContext(ctx, `ALTER TABLE branch_protection_rules ADD COLUMN IF NOT EXISTS require_entity_owner_approval BOOLEAN NOT NULL DEFAULT FALSE`)
 	return err
 }
 
@@ -185,6 +188,7 @@ CREATE TABLE IF NOT EXISTS branch_protection_rules (
 	require_approvals BOOLEAN NOT NULL DEFAULT FALSE,
 	required_approvals INTEGER NOT NULL DEFAULT 1,
 	require_status_checks BOOLEAN NOT NULL DEFAULT FALSE,
+	require_entity_owner_approval BOOLEAN NOT NULL DEFAULT FALSE,
 	required_checks_csv TEXT NOT NULL DEFAULT '',
 	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 	updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -954,30 +958,31 @@ func (p *PostgresDB) UpsertBranchProtectionRule(ctx context.Context, rule *model
 	}
 	return p.db.QueryRowContext(ctx,
 		`INSERT INTO branch_protection_rules (
-			 repo_id, branch, enabled, require_approvals, required_approvals, require_status_checks, required_checks_csv
-		 ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+			 repo_id, branch, enabled, require_approvals, required_approvals, require_status_checks, require_entity_owner_approval, required_checks_csv
+		 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		 ON CONFLICT(repo_id, branch) DO UPDATE SET
 			 enabled = EXCLUDED.enabled,
 			 require_approvals = EXCLUDED.require_approvals,
 			 required_approvals = EXCLUDED.required_approvals,
 			 require_status_checks = EXCLUDED.require_status_checks,
+			 require_entity_owner_approval = EXCLUDED.require_entity_owner_approval,
 			 required_checks_csv = EXCLUDED.required_checks_csv,
 			 updated_at = NOW()
-		 RETURNING id, repo_id, branch, enabled, require_approvals, required_approvals, require_status_checks, required_checks_csv, created_at, updated_at`,
-		rule.RepoID, rule.Branch, rule.Enabled, rule.RequireApprovals, rule.RequiredApprovals, rule.RequireStatusChecks, rule.RequiredChecksCSV).
+		 RETURNING id, repo_id, branch, enabled, require_approvals, required_approvals, require_status_checks, require_entity_owner_approval, required_checks_csv, created_at, updated_at`,
+		rule.RepoID, rule.Branch, rule.Enabled, rule.RequireApprovals, rule.RequiredApprovals, rule.RequireStatusChecks, rule.RequireEntityOwnerApproval, rule.RequiredChecksCSV).
 		Scan(&rule.ID, &rule.RepoID, &rule.Branch, &rule.Enabled, &rule.RequireApprovals, &rule.RequiredApprovals,
-			&rule.RequireStatusChecks, &rule.RequiredChecksCSV, &rule.CreatedAt, &rule.UpdatedAt)
+			&rule.RequireStatusChecks, &rule.RequireEntityOwnerApproval, &rule.RequiredChecksCSV, &rule.CreatedAt, &rule.UpdatedAt)
 }
 
 func (p *PostgresDB) GetBranchProtectionRule(ctx context.Context, repoID int64, branch string) (*models.BranchProtectionRule, error) {
 	rule := &models.BranchProtectionRule{}
 	err := p.db.QueryRowContext(ctx,
-		`SELECT id, repo_id, branch, enabled, require_approvals, required_approvals, require_status_checks, required_checks_csv, created_at, updated_at
+		`SELECT id, repo_id, branch, enabled, require_approvals, required_approvals, require_status_checks, require_entity_owner_approval, required_checks_csv, created_at, updated_at
 		 FROM branch_protection_rules
 		 WHERE repo_id = $1 AND branch = $2`,
 		repoID, branch).
 		Scan(&rule.ID, &rule.RepoID, &rule.Branch, &rule.Enabled, &rule.RequireApprovals, &rule.RequiredApprovals,
-			&rule.RequireStatusChecks, &rule.RequiredChecksCSV, &rule.CreatedAt, &rule.UpdatedAt)
+			&rule.RequireStatusChecks, &rule.RequireEntityOwnerApproval, &rule.RequiredChecksCSV, &rule.CreatedAt, &rule.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}

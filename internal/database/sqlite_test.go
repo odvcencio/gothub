@@ -575,13 +575,14 @@ func TestSQLiteBranchProtectionRuleCRUD(t *testing.T) {
 	}
 
 	rule := &models.BranchProtectionRule{
-		RepoID:              repo.ID,
-		Branch:              "main",
-		Enabled:             true,
-		RequireApprovals:    true,
-		RequiredApprovals:   2,
-		RequireStatusChecks: true,
-		RequiredChecksCSV:   "ci/test,lint",
+		RepoID:                     repo.ID,
+		Branch:                     "main",
+		Enabled:                    true,
+		RequireApprovals:           true,
+		RequiredApprovals:          2,
+		RequireStatusChecks:        true,
+		RequireEntityOwnerApproval: true,
+		RequiredChecksCSV:          "ci/test,lint",
 	}
 	if err := db.UpsertBranchProtectionRule(ctx, rule); err != nil {
 		t.Fatal(err)
@@ -599,6 +600,9 @@ func TestSQLiteBranchProtectionRuleCRUD(t *testing.T) {
 	}
 	if !got.RequireStatusChecks || got.RequiredChecksCSV != "ci/test,lint" {
 		t.Fatalf("unexpected status check settings: %+v", got)
+	}
+	if !got.RequireEntityOwnerApproval {
+		t.Fatalf("expected require_entity_owner_approval to persist, got %+v", got)
 	}
 
 	if err := db.DeleteBranchProtectionRule(ctx, repo.ID, "main"); err != nil {

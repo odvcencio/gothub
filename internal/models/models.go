@@ -97,17 +97,18 @@ type PRReview struct {
 }
 
 type BranchProtectionRule struct {
-	ID                  int64     `json:"id"`
-	RepoID              int64     `json:"repo_id"`
-	Branch              string    `json:"branch"`
-	Enabled             bool      `json:"enabled"`
-	RequireApprovals    bool      `json:"require_approvals"`
-	RequiredApprovals   int       `json:"required_approvals"`
-	RequireStatusChecks bool      `json:"require_status_checks"`
-	RequiredChecksCSV   string    `json:"-"`
-	RequiredChecks      []string  `json:"required_checks,omitempty"`
-	CreatedAt           time.Time `json:"created_at"`
-	UpdatedAt           time.Time `json:"updated_at"`
+	ID                         int64     `json:"id"`
+	RepoID                     int64     `json:"repo_id"`
+	Branch                     string    `json:"branch"`
+	Enabled                    bool      `json:"enabled"`
+	RequireApprovals           bool      `json:"require_approvals"`
+	RequiredApprovals          int       `json:"required_approvals"`
+	RequireStatusChecks        bool      `json:"require_status_checks"`
+	RequireEntityOwnerApproval bool      `json:"require_entity_owner_approval"`
+	RequiredChecksCSV          string    `json:"-"`
+	RequiredChecks             []string  `json:"required_checks,omitempty"`
+	CreatedAt                  time.Time `json:"created_at"`
+	UpdatedAt                  time.Time `json:"updated_at"`
 }
 
 type PRCheckRun struct {

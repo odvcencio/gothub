@@ -12,11 +12,12 @@ import (
 )
 
 type upsertBranchProtectionRequest struct {
-	Enabled             *bool    `json:"enabled"`
-	RequireApprovals    bool     `json:"require_approvals"`
-	RequiredApprovals   int      `json:"required_approvals"`
-	RequireStatusChecks bool     `json:"require_status_checks"`
-	RequiredChecks      []string `json:"required_checks"`
+	Enabled                    *bool    `json:"enabled"`
+	RequireApprovals           bool     `json:"require_approvals"`
+	RequiredApprovals          int      `json:"required_approvals"`
+	RequireStatusChecks        bool     `json:"require_status_checks"`
+	RequireEntityOwnerApproval bool     `json:"require_entity_owner_approval"`
+	RequiredChecks             []string `json:"required_checks"`
 }
 
 func (s *Server) handleUpsertBranchProtection(w http.ResponseWriter, r *http.Request) {
@@ -46,13 +47,14 @@ func (s *Server) handleUpsertBranchProtection(w http.ResponseWriter, r *http.Req
 	}
 
 	rule := &models.BranchProtectionRule{
-		RepoID:              repo.ID,
-		Branch:              branch,
-		Enabled:             enabled,
-		RequireApprovals:    req.RequireApprovals,
-		RequiredApprovals:   requiredApprovals,
-		RequireStatusChecks: req.RequireStatusChecks,
-		RequiredChecks:      req.RequiredChecks,
+		RepoID:                     repo.ID,
+		Branch:                     branch,
+		Enabled:                    enabled,
+		RequireApprovals:           req.RequireApprovals,
+		RequiredApprovals:          requiredApprovals,
+		RequireStatusChecks:        req.RequireStatusChecks,
+		RequireEntityOwnerApproval: req.RequireEntityOwnerApproval,
+		RequiredChecks:             req.RequiredChecks,
 	}
 	if err := s.prSvc.UpsertBranchProtectionRule(r.Context(), rule); err != nil {
 		jsonError(w, "internal error", http.StatusInternalServerError)

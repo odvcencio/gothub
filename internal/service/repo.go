@@ -84,3 +84,15 @@ func (s *RepoService) OpenStore(ctx context.Context, owner, name string) (*gotst
 	}
 	return gotstore.Open(repo.StoragePath)
 }
+
+// OpenStoreByID opens the object store for a repository by numeric ID.
+func (s *RepoService) OpenStoreByID(ctx context.Context, repoID int64) (*gotstore.RepoStore, error) {
+	repo, err := s.db.GetRepositoryByID(ctx, repoID)
+	if err != nil {
+		return nil, fmt.Errorf("repo %d: %w", repoID, err)
+	}
+	if repo.StoragePath == "" || repo.StoragePath == "pending" {
+		repo.StoragePath = filepath.Join(s.storagePath, fmt.Sprintf("%d", repo.ID))
+	}
+	return gotstore.Open(repo.StoragePath)
+}
