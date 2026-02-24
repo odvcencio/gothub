@@ -7,7 +7,7 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.2.3
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.8.0
-	github.com/odvcencio/got v0.2.3
+	github.com/odvcencio/got v0.2.4
 	github.com/odvcencio/gotreesitter v0.4.0
 	github.com/odvcencio/gts-suite v0.5.0
 	github.com/prometheus/client_golang v1.23.2
