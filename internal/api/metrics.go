@@ -67,8 +67,7 @@ func requestMetricsMiddleware(metrics *httpMetrics, next http.Handler) http.Hand
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Avoid recursive scrape accounting.
-		if r.URL != nil && r.URL.Path == "/metrics" {
+		if shouldSkipRequestInstrumentation(r) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -110,8 +109,12 @@ func requestRouteLabel(r *http.Request) string {
 	switch {
 	case path == "/healthz":
 		return "/healthz"
+	case path == "/admin/health":
+		return "/admin/health"
 	case path == "/metrics":
 		return "/metrics"
+	case strings.HasPrefix(path, "/debug/pprof/"):
+		return "/debug/pprof/*"
 	case strings.HasPrefix(path, "/api/v1/"):
 		return "/api/v1/*"
 	case strings.HasPrefix(path, "/git/"):
@@ -121,6 +124,14 @@ func requestRouteLabel(r *http.Request) string {
 	default:
 		return "other"
 	}
+}
+
+func shouldSkipRequestInstrumentation(r *http.Request) bool {
+	if r == nil || r.URL == nil {
+		return false
+	}
+	path := r.URL.Path
+	return path == "/metrics" || strings.HasPrefix(path, "/debug/pprof/")
 }
 
 func normalizeRoutePattern(pattern string) string {

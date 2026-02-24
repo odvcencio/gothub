@@ -15,7 +15,7 @@ const apiTracerName = "github.com/odvcencio/gothub/internal/api"
 func requestTracingMiddleware(next http.Handler) http.Handler {
 	tracer := otel.Tracer(apiTracerName)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL != nil && r.URL.Path == "/metrics" {
+		if shouldSkipRequestInstrumentation(r) {
 			next.ServeHTTP(w, r)
 			return
 		}

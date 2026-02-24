@@ -75,6 +75,26 @@ func TestRequestMetricsMiddlewareSkipsMetricsEndpoint(t *testing.T) {
 	}
 }
 
+func TestRequestMetricsMiddlewareSkipsPprofEndpoint(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	metrics := newHTTPMetrics(reg)
+
+	handler := requestMetricsMiddleware(metrics, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/debug/pprof/", nil)
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", resp.Code)
+	}
+	if got := testutil.CollectAndCount(metrics.requestTotal); got != 0 {
+		t.Fatalf("expected no request samples for /debug/pprof/, got %d", got)
+	}
+}
+
 func TestMetricsHandlerExposesMetrics(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	metrics := newHTTPMetrics(reg)

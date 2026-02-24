@@ -58,6 +58,32 @@ func TestRequestTracingMiddlewareCreatesRequestSpan(t *testing.T) {
 	}
 }
 
+func TestRequestTracingMiddlewareSkipsPprofEndpoint(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider()
+	tp.RegisterSpanProcessor(recorder)
+	otel.SetTracerProvider(tp)
+	t.Cleanup(func() {
+		otel.SetTracerProvider(noop.NewTracerProvider())
+		_ = tp.Shutdown(context.Background())
+	})
+
+	handler := requestTracingMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/debug/pprof/", nil)
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", resp.Code)
+	}
+	if got := len(recorder.Ended()); got != 0 {
+		t.Fatalf("expected no spans for /debug/pprof/, got %d", got)
+	}
+}
+
 func containsStringAttribute(attrs []attribute.KeyValue, key, value string) bool {
 	for _, attr := range attrs {
 		if string(attr.Key) == key && attr.Value.Type() == attribute.STRING && attr.Value.AsString() == value {

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"time"
 
 	"github.com/odvcencio/gothub/internal/api"
@@ -83,9 +84,13 @@ func cmdServe(args []string) {
 	}
 	authSvc := auth.NewService(cfg.Auth.JWTSecret, dur)
 	repoSvc := service.NewRepoService(db, cfg.Storage.Path)
-	server := api.NewServerWithOptions(db, authSvc, repoSvc, api.ServerOptions{
+	serverOpts := api.ServerOptions{
 		EnablePasswordAuth: cfg.Auth.EnablePasswordAuth,
-	})
+		EnableAdminHealth:  envBool("GOTHUB_ENABLE_ADMIN_HEALTH"),
+		EnablePprof:        envBool("GOTHUB_ENABLE_PPROF"),
+		AdminAllowedCIDRs:  parseAdminCIDRs("GOTHUB_ADMIN_ALLOWED_CIDRS"),
+	}
+	server := api.NewServerWithOptions(db, authSvc, repoSvc, serverOpts)
 
 	httpServer := &http.Server{
 		Addr:         cfg.Addr(),
@@ -163,4 +168,21 @@ func validateServeConfig(cfg *config.Config) error {
 		return fmt.Errorf("storage.path must be configured")
 	}
 	return nil
+}
+
+func parseAdminCIDRs(name string) []string {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		cidr := strings.TrimSpace(part)
+		if cidr == "" {
+			continue
+		}
+		out = append(out, cidr)
+	}
+	return out
 }

@@ -20,30 +20,36 @@ import (
 )
 
 type Server struct {
-	db           database.DB
-	authSvc      *auth.Service
-	repoSvc      *service.RepoService
-	browseSvc    *service.BrowseService
-	diffSvc      *service.DiffService
-	prSvc        *service.PRService
-	issueSvc     *service.IssueService
-	webhookSvc   *service.WebhookService
-	notifySvc    *service.NotificationService
-	codeIntelSvc *service.CodeIntelService
-	lineageSvc   *service.EntityLineageService
-	indexQueue   *jobs.Queue
-	asyncIndex   bool
-	rateLimiter  *requestRateLimiter
-	httpMetrics  *httpMetrics
-	passkey      *webauthn.WebAuthn
-	passwordAuth bool
-	mux          *http.ServeMux
-	handler      http.Handler
+	db                database.DB
+	authSvc           *auth.Service
+	repoSvc           *service.RepoService
+	browseSvc         *service.BrowseService
+	diffSvc           *service.DiffService
+	prSvc             *service.PRService
+	issueSvc          *service.IssueService
+	webhookSvc        *service.WebhookService
+	notifySvc         *service.NotificationService
+	codeIntelSvc      *service.CodeIntelService
+	lineageSvc        *service.EntityLineageService
+	indexQueue        *jobs.Queue
+	asyncIndex        bool
+	rateLimiter       *requestRateLimiter
+	httpMetrics       *httpMetrics
+	passkey           *webauthn.WebAuthn
+	passwordAuth      bool
+	enableAdminHealth bool
+	enablePprof       bool
+	adminRouteAccess  adminRouteAccess
+	mux               *http.ServeMux
+	handler           http.Handler
 }
 
 type ServerOptions struct {
 	EnablePasswordAuth  bool
 	EnableAsyncIndexing bool
+	EnableAdminHealth   bool
+	EnablePprof         bool
+	AdminAllowedCIDRs   []string
 }
 
 func NewServer(db database.DB, authSvc *auth.Service, repoSvc *service.RepoService) *Server {
@@ -63,25 +69,32 @@ func NewServerWithOptions(db database.DB, authSvc *auth.Service, repoSvc *servic
 	httpMetrics := getDefaultHTTPMetrics()
 	prSvc.SetCodeIntelService(codeIntelSvc)
 	prSvc.SetLineageService(lineageSvc)
+	adminCIDRs := opts.AdminAllowedCIDRs
+	if (opts.EnableAdminHealth || opts.EnablePprof) && len(adminCIDRs) == 0 {
+		adminCIDRs = defaultAdminRouteCIDRs
+	}
 	s := &Server{
-		db:           db,
-		authSvc:      authSvc,
-		repoSvc:      repoSvc,
-		browseSvc:    browseSvc,
-		diffSvc:      diffSvc,
-		prSvc:        prSvc,
-		issueSvc:     issueSvc,
-		webhookSvc:   webhookSvc,
-		notifySvc:    notifySvc,
-		codeIntelSvc: codeIntelSvc,
-		lineageSvc:   lineageSvc,
-		indexQueue:   indexQueue,
-		asyncIndex:   opts.EnableAsyncIndexing,
-		rateLimiter:  newRequestRateLimiter(),
-		httpMetrics:  httpMetrics,
-		passkey:      initWebAuthn(),
-		passwordAuth: opts.EnablePasswordAuth,
-		mux:          http.NewServeMux(),
+		db:                db,
+		authSvc:           authSvc,
+		repoSvc:           repoSvc,
+		browseSvc:         browseSvc,
+		diffSvc:           diffSvc,
+		prSvc:             prSvc,
+		issueSvc:          issueSvc,
+		webhookSvc:        webhookSvc,
+		notifySvc:         notifySvc,
+		codeIntelSvc:      codeIntelSvc,
+		lineageSvc:        lineageSvc,
+		indexQueue:        indexQueue,
+		asyncIndex:        opts.EnableAsyncIndexing,
+		rateLimiter:       newRequestRateLimiter(),
+		httpMetrics:       httpMetrics,
+		passkey:           initWebAuthn(),
+		passwordAuth:      opts.EnablePasswordAuth,
+		enableAdminHealth: opts.EnableAdminHealth,
+		enablePprof:       opts.EnablePprof,
+		adminRouteAccess:  newAdminRouteAccess(adminCIDRs),
+		mux:               http.NewServeMux(),
 	}
 	s.routes()
 	s.handler = requestTracingMiddleware(
@@ -111,6 +124,16 @@ func (s *Server) routes() {
 		w.Write([]byte(`{"status":"ok"}`))
 	})
 	s.mux.Handle("GET /metrics", metricsHandler(nil))
+	if s.enableAdminHealth {
+		s.mux.Handle("GET /admin/health", s.adminRouteAccess.wrap(http.HandlerFunc(s.handleAdminHealth)))
+	} else {
+		s.mux.HandleFunc("GET /admin/health", http.NotFound)
+	}
+	if s.enablePprof {
+		s.registerPprofRoutes()
+	} else {
+		s.mux.HandleFunc("/debug/pprof/", http.NotFound)
+	}
 
 	// Auth
 	s.mux.HandleFunc("POST /api/v1/auth/register", s.handleRegister)
