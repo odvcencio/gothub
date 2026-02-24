@@ -513,18 +513,21 @@ func (h *SmartHTTPHandler) handleUploadPack(w http.ResponseWriter, r *http.Reque
 			return haveSet[h]
 		})
 		if err != nil {
-			continue
+			http.Error(w, fmt.Sprintf("walk object graph: %v", err), http.StatusInternalServerError)
+			return
 		}
 
 		for _, m := range missing {
 			objType, data, err := store.Objects.Read(m)
 			if err != nil {
-				continue
+				http.Error(w, fmt.Sprintf("read object %s: %v", m, err), http.StatusInternalServerError)
+				return
 			}
 			gitType := gotTypeToPackType(objType)
 			gitData, err := convertGotToGitData(m, objType, data, store.Objects, r.Context(), h.db, repoID)
 			if err != nil {
-				continue
+				http.Error(w, fmt.Sprintf("convert object %s to git: %v", m, err), http.StatusInternalServerError)
+				return
 			}
 			packObjects = append(packObjects, PackfileObject{Type: gitType, Data: gitData})
 		}

@@ -904,6 +904,62 @@ func TestGitUploadPackAdvertisementNoSidebandCapability(t *testing.T) {
 	}
 }
 
+func TestGitUploadPackReturnsErrorOnCorruptObjectGraph(t *testing.T) {
+	server, db := setupTestServer(t)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	token := registerAndGetToken(t, ts.URL, "owner")
+	createRepo(t, ts.URL, token, "repo", false)
+
+	repo, err := db.GetRepository(context.Background(), "owner", "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := gotstore.Open(repo.StoragePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	commitHash, err := store.Objects.WriteCommit(&object.CommitObj{
+		TreeHash:  object.Hash(strings.Repeat("a", 64)),
+		Author:    "Owner <owner@example.com>",
+		Timestamp: 1700000000,
+		Message:   "broken commit",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Refs.Set("heads/main", commitHash); err != nil {
+		t.Fatal(err)
+	}
+
+	gitHash := strings.Repeat("1", 40)
+	if err := db.SetHashMapping(context.Background(), &models.HashMapping{
+		RepoID:     repo.ID,
+		GotHash:    string(commitHash),
+		GitHash:    gitHash,
+		ObjectType: "commit",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	payload := append(pktLineForTest("want "+gitHash+"\n"), pktFlushForTest()...)
+	payload = append(payload, pktLineForTest("done\n")...)
+	payload = append(payload, pktFlushForTest()...)
+
+	req, _ := http.NewRequest("POST", ts.URL+"/git/owner/repo/git-upload-pack", bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/x-git-upload-pack-request")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("git upload-pack: expected 500 for corrupt graph, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
 func TestReceivePackReportsActualRefStatus(t *testing.T) {
 	server, _ := setupTestServer(t)
 	ts := httptest.NewServer(server)
