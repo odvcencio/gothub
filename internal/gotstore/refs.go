@@ -14,6 +14,17 @@ type Refs struct {
 	dir string // e.g. "/data/repos/1/refs"
 }
 
+// RefCASMismatchError indicates an atomic ref update failed due to compare-and-swap mismatch.
+type RefCASMismatchError struct {
+	Name     string
+	Expected object.Hash
+	Actual   object.Hash
+}
+
+func (e *RefCASMismatchError) Error() string {
+	return fmt.Sprintf("stale ref %s (expected %s, got %s)", e.Name, e.Expected, e.Actual)
+}
+
 func NewRefs(dir string) *Refs {
 	return &Refs{dir: dir}
 }
@@ -29,6 +40,13 @@ func (r *Refs) Get(name string) (object.Hash, error) {
 
 // Set updates a reference to point to a commit hash.
 func (r *Refs) Set(name string, h object.Hash) error {
+	return r.Update(name, nil, &h)
+}
+
+// Update atomically compares and updates/deletes a reference.
+// If expectedOld is non-nil and doesn't match the current value, returns RefCASMismatchError.
+// If newHash is nil or empty, the ref is deleted.
+func (r *Refs) Update(name string, expectedOld *object.Hash, newHash *object.Hash) error {
 	path := filepath.Join(r.dir, filepath.FromSlash(name))
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
@@ -38,7 +56,35 @@ func (r *Refs) Set(name string, h object.Hash) error {
 	if err != nil {
 		return fmt.Errorf("acquire ref lock %s: %w", lockPath, err)
 	}
-	if _, err := f.WriteString(string(h) + "\n"); err != nil {
+	current, err := r.getNoErrNotExist(name)
+	if err != nil {
+		f.Close()
+		os.Remove(lockPath)
+		return err
+	}
+	if expectedOld != nil && current != *expectedOld {
+		f.Close()
+		os.Remove(lockPath)
+		return &RefCASMismatchError{
+			Name:     name,
+			Expected: *expectedOld,
+			Actual:   current,
+		}
+	}
+	if newHash == nil || *newHash == "" {
+		if err := f.Close(); err != nil {
+			os.Remove(lockPath)
+			return fmt.Errorf("close ref lock %s: %w", lockPath, err)
+		}
+		if err := os.Remove(lockPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove ref lock %s: %w", lockPath, err)
+		}
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("delete ref %s: %w", name, err)
+		}
+		return nil
+	}
+	if _, err := f.WriteString(string(*newHash) + "\n"); err != nil {
 		f.Close()
 		os.Remove(lockPath)
 		return fmt.Errorf("write ref lock %s: %w", lockPath, err)
@@ -56,7 +102,7 @@ func (r *Refs) Set(name string, h object.Hash) error {
 
 // Delete removes a reference.
 func (r *Refs) Delete(name string) error {
-	return os.Remove(filepath.Join(r.dir, filepath.FromSlash(name)))
+	return r.Update(name, nil, nil)
 }
 
 // List returns all references under a prefix (e.g. "heads/" for branches).
@@ -96,4 +142,15 @@ func (r *Refs) ListAll() (map[string]object.Hash, error) {
 // HEAD returns the default branch commit hash.
 func (r *Refs) HEAD(defaultBranch string) (object.Hash, error) {
 	return r.Get("heads/" + defaultBranch)
+}
+
+func (r *Refs) getNoErrNotExist(name string) (object.Hash, error) {
+	h, err := r.Get(name)
+	if err != nil {
+		if os.IsNotExist(err) || strings.Contains(strings.ToLower(err.Error()), "no such file") {
+			return "", nil
+		}
+		return "", err
+	}
+	return h, nil
 }

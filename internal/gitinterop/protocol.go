@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
 
 	"github.com/odvcencio/got/pkg/entity"
@@ -352,18 +351,21 @@ func (h *SmartHTTPHandler) handleReceivePack(w http.ResponseWriter, r *http.Requ
 	// Update refs
 	refErrors := make(map[string]string, len(updates))
 	for _, u := range updates {
-		currentGitHash, err := h.currentGitRefHash(r.Context(), store, repoID, u.storageRef)
+		expectedOldGotHash, err := h.resolveExpectedOldGotHash(r.Context(), repoID, u.oldHash)
 		if err != nil {
 			refErrors[u.refName] = err.Error()
 			continue
 		}
-		if currentGitHash != string(u.oldHash) {
-			refErrors[u.refName] = fmt.Sprintf("stale old hash (expected %s, got %s)", string(u.oldHash), currentGitHash)
-			continue
-		}
+		expectedOldPtr := &expectedOldGotHash
 
 		if string(u.newHash) == gitZeroHash40 {
-			if err := store.Refs.Delete(u.storageRef); err != nil {
+			if err := store.Refs.Update(u.storageRef, expectedOldPtr, nil); err != nil {
+				var mismatch *gotstore.RefCASMismatchError
+				if errors.As(err, &mismatch) {
+					actualGit := h.gitHashForGotHash(r.Context(), repoID, mismatch.Actual)
+					refErrors[u.refName] = fmt.Sprintf("stale old hash (expected %s, got %s)", string(u.oldHash), actualGit)
+					continue
+				}
 				refErrors[u.refName] = err.Error()
 			}
 			continue
@@ -379,7 +381,14 @@ func (h *SmartHTTPHandler) handleReceivePack(w http.ResponseWriter, r *http.Requ
 				continue
 			}
 		}
-		if err := store.Refs.Set(u.storageRef, object.Hash(gotHash)); err != nil {
+		newGotHash := object.Hash(gotHash)
+		if err := store.Refs.Update(u.storageRef, expectedOldPtr, &newGotHash); err != nil {
+			var mismatch *gotstore.RefCASMismatchError
+			if errors.As(err, &mismatch) {
+				actualGit := h.gitHashForGotHash(r.Context(), repoID, mismatch.Actual)
+				refErrors[u.refName] = fmt.Sprintf("stale old hash (expected %s, got %s)", string(u.oldHash), actualGit)
+				continue
+			}
 			refErrors[u.refName] = err.Error()
 		}
 	}
@@ -387,19 +396,29 @@ func (h *SmartHTTPHandler) handleReceivePack(w http.ResponseWriter, r *http.Requ
 	h.sendReceivePackResult(w, "", updates, refErrors)
 }
 
-func (h *SmartHTTPHandler) currentGitRefHash(ctx context.Context, store *gotstore.RepoStore, repoID int64, storageRef string) (string, error) {
-	gotHash, err := store.Refs.Get(storageRef)
+func (h *SmartHTTPHandler) resolveExpectedOldGotHash(ctx context.Context, repoID int64, oldGitHash GitHash) (object.Hash, error) {
+	if string(oldGitHash) == gitZeroHash40 {
+		return "", nil
+	}
+	gotHash, err := h.db.GetGotHash(ctx, repoID, string(oldGitHash))
 	if err != nil {
-		if os.IsNotExist(err) || strings.Contains(strings.ToLower(err.Error()), "no such file") {
-			return gitZeroHash40, nil
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", fmt.Errorf("missing old object mapping")
 		}
-		return "", fmt.Errorf("read current ref: %w", err)
+		return "", fmt.Errorf("resolve old ref mapping: %w", err)
+	}
+	return object.Hash(gotHash), nil
+}
+
+func (h *SmartHTTPHandler) gitHashForGotHash(ctx context.Context, repoID int64, gotHash object.Hash) string {
+	if gotHash == "" {
+		return gitZeroHash40
 	}
 	gitHash, err := h.db.GetGitHash(ctx, repoID, string(gotHash))
 	if err != nil {
-		return "", fmt.Errorf("resolve current ref mapping: %w", err)
+		return "unknown"
 	}
-	return gitHash, nil
+	return gitHash
 }
 
 // POST /git/{owner}/{repo}/git-upload-pack

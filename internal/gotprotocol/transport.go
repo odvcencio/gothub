@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
 
 	"github.com/odvcencio/got/pkg/entity"
@@ -297,20 +296,6 @@ func (h *Handler) handleUpdateRefs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	currentRefHash := make(map[string]string, len(updates))
-	for _, u := range updates {
-		currentHash, err := currentRefValue(store, u.Name)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("read ref %s: %v", u.Name, err), http.StatusInternalServerError)
-			return
-		}
-		currentRefHash[u.Name] = currentHash
-		if u.Old != nil && currentHash != *u.Old {
-			http.Error(w, fmt.Sprintf("set ref %s: stale old hash (expected %s, got %s)", u.Name, *u.Old, currentHash), http.StatusConflict)
-			return
-		}
-	}
-
 	// Precompute and validate all new target hashes before applying any ref updates.
 	enrichedByTarget := make(map[object.Hash]object.Hash, len(updates))
 	refTargets := make(map[string]object.Hash, len(updates))
@@ -348,18 +333,39 @@ func (h *Handler) handleUpdateRefs(w http.ResponseWriter, r *http.Request) {
 
 	applied := make(map[string]string, len(updates))
 	for _, u := range updates {
+		var expectedOld *object.Hash
+		if u.Old != nil {
+			oldHash := object.Hash(*u.Old)
+			expectedOld = &oldHash
+		}
 		if u.New == nil || *u.New == "" {
-			if currentRefHash[u.Name] != "" {
-				if err := store.Refs.Delete(u.Name); err != nil {
-					http.Error(w, fmt.Sprintf("delete ref %s: %v", u.Name, err), http.StatusInternalServerError)
+			if err := store.Refs.Update(u.Name, expectedOld, nil); err != nil {
+				var mismatch *gotstore.RefCASMismatchError
+				if errors.As(err, &mismatch) {
+					expected := ""
+					if u.Old != nil {
+						expected = *u.Old
+					}
+					http.Error(w, fmt.Sprintf("set ref %s: stale old hash (expected %s, got %s)", u.Name, expected, mismatch.Actual), http.StatusConflict)
 					return
 				}
+				http.Error(w, fmt.Sprintf("delete ref %s: %v", u.Name, err), http.StatusInternalServerError)
+				return
 			}
 			applied[u.Name] = ""
 			continue
 		}
 		target := refTargets[u.Name]
-		if err := store.Refs.Set(u.Name, target); err != nil {
+		if err := store.Refs.Update(u.Name, expectedOld, &target); err != nil {
+			var mismatch *gotstore.RefCASMismatchError
+			if errors.As(err, &mismatch) {
+				expected := ""
+				if u.Old != nil {
+					expected = *u.Old
+				}
+				http.Error(w, fmt.Sprintf("set ref %s: stale old hash (expected %s, got %s)", u.Name, expected, mismatch.Actual), http.StatusConflict)
+				return
+			}
 			http.Error(w, fmt.Sprintf("set ref %s: %v", u.Name, err), http.StatusInternalServerError)
 			return
 		}
@@ -458,18 +464,6 @@ func parseRefUpdates(w http.ResponseWriter, r *http.Request) ([]refUpdateItem, e
 		out = append(out, refUpdateItem{Name: n, New: &h})
 	}
 	return out, nil
-}
-
-func currentRefValue(store *gotstore.RepoStore, name string) (string, error) {
-	h, err := store.Refs.Get(name)
-	if err != nil {
-		msg := strings.ToLower(err.Error())
-		if os.IsNotExist(err) || strings.Contains(msg, "no such file") {
-			return "", nil
-		}
-		return "", err
-	}
-	return string(h), nil
 }
 
 func parsePushedObjectType(raw string) (object.ObjectType, error) {
