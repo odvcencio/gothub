@@ -141,6 +141,7 @@ export interface PullRequest {
 export interface MergeGate {
   allowed: boolean;
   reasons?: string[];
+  entity_owner_approvals?: EntityOwnerApproval[];
 }
 
 export interface CheckRun {
@@ -149,6 +150,16 @@ export interface CheckRun {
   status: string;
   conclusion?: string;
   [key: string]: unknown;
+}
+
+export interface EntityOwnerApproval {
+  path: string;
+  entity_key: string;
+  required_owners?: string[];
+  approved_by?: string[];
+  missing_owners?: string[];
+  unresolved_teams?: string[];
+  satisfied: boolean;
 }
 
 export interface PRComment {
@@ -274,8 +285,12 @@ export interface EntityHistoryHit {
 }
 
 export interface SemverRecommendation {
-  level: string;
-  reason?: string;
+  base?: string;
+  head?: string;
+  bump: string;
+  breaking_changes?: string[];
+  features?: string[];
+  fixes?: string[];
   [key: string]: unknown;
 }
 

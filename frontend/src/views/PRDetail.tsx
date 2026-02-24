@@ -1,5 +1,26 @@
-import { useState, useEffect } from 'preact/hooks';
-import { getPR, getPRDiff, getMergePreview, getMergeGate, mergePR, listPRComments, createPRComment, listPRReviews, createPRReview, listPRChecks, getToken } from '../api/client';
+import { useState, useEffect, useMemo } from 'preact/hooks';
+import {
+  createPRComment,
+  createPRReview,
+  getMergeGate,
+  getMergePreview,
+  getPR,
+  getPRDiff,
+  getSemver,
+  getToken,
+  listPRChecks,
+  listPRComments,
+  listPRReviews,
+  mergePR,
+  type CheckRun,
+  type DiffFile,
+  type MergeGate,
+  type MergePreviewResponse,
+  type PRComment,
+  type PRReview,
+  type PullRequest,
+  type SemverRecommendation,
+} from '../api/client';
 import { EntityDiff } from '../components/EntityDiff';
 import { MergePreview } from '../components/MergePreview';
 import { ConflictViewer } from '../components/ConflictViewer';
@@ -11,19 +32,34 @@ interface Props {
 }
 
 export function PRDetailView({ owner, repo, number }: Props) {
-  const [pr, setPr] = useState<any>(null);
+  const [pr, setPr] = useState<PullRequest | null>(null);
   const [tab, setTab] = useState<'conversation' | 'files' | 'merge'>('conversation');
-  const [diff, setDiff] = useState<any>(null);
-  const [mergePreview, setMergePreview] = useState<any>(null);
-  const [mergeGate, setMergeGate] = useState<{ allowed: boolean; reasons?: string[] } | null>(null);
-  const [checks, setChecks] = useState<any[]>([]);
-  const [comments, setComments] = useState<any[]>([]);
-  const [reviews, setReviews] = useState<any[]>([]);
+  const [diff, setDiff] = useState<{ files: DiffFile[] } | null>(null);
+  const [mergePreview, setMergePreview] = useState<MergePreviewResponse | null>(null);
+  const [mergeGate, setMergeGate] = useState<MergeGate | null>(null);
+  const [semver, setSemver] = useState<SemverRecommendation | null>(null);
+  const [checks, setChecks] = useState<CheckRun[]>([]);
+  const [comments, setComments] = useState<PRComment[]>([]);
+  const [reviews, setReviews] = useState<PRReview[]>([]);
   const [merging, setMerging] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
 
   const prNum = Number(number);
+
+  useEffect(() => {
+    setPr(null);
+    setDiff(null);
+    setMergePreview(null);
+    setMergeGate(null);
+    setSemver(null);
+    setChecks([]);
+    setComments([]);
+    setReviews([]);
+    setMerging(false);
+    setError('');
+    setNotice('');
+  }, [owner, repo, prNum]);
 
   useEffect(() => {
     if (!owner || !repo || !prNum) return;
@@ -34,7 +70,7 @@ export function PRDetailView({ owner, repo, number }: Props) {
 
   useEffect(() => {
     if (!owner || !repo || !prNum) return;
-    if (tab === 'files' && !diff) {
+    if ((tab === 'files' || tab === 'merge') && !diff) {
       getPRDiff(owner, repo, prNum).then(setDiff).catch(e => setNotice(e.message || 'failed to load diff'));
     }
     if (tab === 'merge' && !mergePreview) {
@@ -43,8 +79,14 @@ export function PRDetailView({ owner, repo, number }: Props) {
     if (tab === 'merge') {
       getMergeGate(owner, repo, prNum).then(setMergeGate).catch(e => setNotice(e.message || 'failed to load merge gate'));
       listPRChecks(owner, repo, prNum).then(setChecks).catch(e => setNotice(e.message || 'failed to load checks'));
+      if (pr && !semver) {
+        const spec = `${pr.target_branch}...${pr.source_branch}`;
+        getSemver(owner, repo, spec).then(setSemver).catch(e => setNotice(e.message || 'failed to load semver recommendation'));
+      }
     }
-  }, [tab, owner, repo, prNum, reviews.length]);
+  }, [tab, owner, repo, prNum, pr, reviews.length, semver]);
+
+  const impactSummary = useMemo(() => summarizeDiff(diff?.files || []), [diff]);
 
   const handleMerge = async () => {
     if (!owner || !repo || !prNum) {
@@ -126,11 +168,18 @@ export function PRDetailView({ owner, repo, number }: Props) {
       )}
 
       {tab === 'files' && (
-        diff ? <EntityDiff files={diff.files || []} /> : <div style={{ color: '#8b949e' }}>Loading diff...</div>
+        diff ? (
+          <div style={{ display: 'grid', gap: '16px' }}>
+            <PRImpactSummary summary={impactSummary} />
+            <EntityDiff files={diff.files || []} />
+          </div>
+        ) : <div style={{ color: '#8b949e' }}>Loading diff...</div>
       )}
 
       {tab === 'merge' && (
         <div style={{ display: 'grid', gap: '16px' }}>
+          <PRImpactSummary summary={impactSummary} />
+          <SemverPanel semver={semver} />
           <MergeGatePanel gate={mergeGate} checks={checks} />
           {mergePreview
             ? <>
@@ -144,7 +193,9 @@ export function PRDetailView({ owner, repo, number }: Props) {
   );
 }
 
-function MergeGatePanel({ gate, checks }: { gate: { allowed: boolean; reasons?: string[] } | null; checks: any[] }) {
+function MergeGatePanel({ gate, checks }: { gate: MergeGate | null; checks: CheckRun[] }) {
+  const ownerApprovals = gate?.entity_owner_approvals || [];
+
   return (
     <div style={{ border: '1px solid #30363d', borderRadius: '6px' }}>
       <div style={{ padding: '12px 16px', borderBottom: '1px solid #30363d', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -159,6 +210,43 @@ function MergeGatePanel({ gate, checks }: { gate: { allowed: boolean; reasons?: 
           <div style={{ color: '#f85149', fontSize: '13px', marginBottom: '6px' }}>Blocking reasons</div>
           {gate.reasons.map((reason, idx) => (
             <div key={idx} style={{ color: '#c9d1d9', fontSize: '13px' }}>- {reason}</div>
+          ))}
+        </div>
+      )}
+
+      {gate && ownerApprovals.length > 0 && (
+        <div style={{ padding: '12px 16px', borderBottom: '1px solid #30363d' }}>
+          <div style={{ color: '#8b949e', fontSize: '12px', marginBottom: '8px' }}>Entity owner approvals</div>
+          {ownerApprovals.map(approval => (
+            <div key={`${approval.path}:${approval.entity_key}`} style={{ padding: '8px 0', borderTop: '1px solid #21262d' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+                <span style={{ fontFamily: 'monospace', fontSize: '13px', color: '#c9d1d9' }}>{approval.entity_key}</span>
+                <span style={{ color: approval.satisfied ? '#3fb950' : '#f85149', fontSize: '12px', fontWeight: 'bold' }}>
+                  {approval.satisfied ? 'approved' : 'awaiting'}
+                </span>
+              </div>
+              <div style={{ color: '#8b949e', fontSize: '12px', marginTop: '4px' }}>{approval.path}</div>
+              {approval.required_owners && approval.required_owners.length > 0 && (
+                <div style={{ color: '#8b949e', fontSize: '12px', marginTop: '4px' }}>
+                  required: {formatMentions(approval.required_owners)}
+                </div>
+              )}
+              {approval.approved_by && approval.approved_by.length > 0 && (
+                <div style={{ color: '#3fb950', fontSize: '12px', marginTop: '2px' }}>
+                  approved by: {formatMentions(approval.approved_by)}
+                </div>
+              )}
+              {approval.missing_owners && approval.missing_owners.length > 0 && (
+                <div style={{ color: '#f85149', fontSize: '12px', marginTop: '2px' }}>
+                  missing: {formatMentions(approval.missing_owners)}
+                </div>
+              )}
+              {approval.unresolved_teams && approval.unresolved_teams.length > 0 && (
+                <div style={{ color: '#d29922', fontSize: '12px', marginTop: '2px' }}>
+                  unresolved teams: {approval.unresolved_teams.map(team => `@team/${team}`).join(', ')}
+                </div>
+              )}
+            </div>
           ))}
         </div>
       )}
@@ -182,9 +270,127 @@ function MergeGatePanel({ gate, checks }: { gate: { allowed: boolean; reasons?: 
   );
 }
 
+function PRImpactSummary({ summary }: { summary: ImpactSummary }) {
+  return (
+    <div style={{ border: '1px solid #30363d', borderRadius: '6px' }}>
+      <div style={{ padding: '12px 16px', borderBottom: '1px solid #30363d' }}>
+        <strong style={{ color: '#f0f6fc', fontSize: '14px' }}>PR Impact</strong>
+      </div>
+      <div style={{ padding: '12px 16px', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(110px, 1fr))', gap: '10px' }}>
+        <ImpactStat label="Files" value={summary.files} color="#8b949e" />
+        <ImpactStat label="Entities" value={summary.entities} color="#8b949e" />
+        <ImpactStat label="Added" value={summary.added} color="#3fb950" />
+        <ImpactStat label="Modified" value={summary.modified} color="#d29922" />
+        <ImpactStat label="Removed" value={summary.removed} color="#f85149" />
+      </div>
+    </div>
+  );
+}
+
+function ImpactStat({ label, value, color }: { label: string; value: number; color: string }) {
+  return (
+    <div style={{ border: '1px solid #21262d', borderRadius: '6px', padding: '10px 12px', background: '#0d1117' }}>
+      <div style={{ color: '#8b949e', fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: '4px' }}>
+        {label}
+      </div>
+      <div style={{ color, fontSize: '20px', fontWeight: 'bold', lineHeight: 1 }}>{value}</div>
+    </div>
+  );
+}
+
+function SemverPanel({ semver }: { semver: SemverRecommendation | null }) {
+  if (!semver) {
+    return (
+      <div style={{ border: '1px solid #30363d', borderRadius: '6px', padding: '12px 16px', color: '#8b949e', fontSize: '13px' }}>
+        Loading semver recommendation...
+      </div>
+    );
+  }
+
+  const bump = (semver.bump || 'none').toLowerCase();
+  const bumpColor = bump === 'major' ? '#f85149' : bump === 'minor' ? '#d29922' : bump === 'patch' ? '#3fb950' : '#8b949e';
+
+  return (
+    <div style={{ border: '1px solid #30363d', borderRadius: '6px' }}>
+      <div style={{ padding: '12px 16px', borderBottom: '1px solid #30363d', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <strong style={{ color: '#f0f6fc', fontSize: '14px' }}>SemVer Recommendation</strong>
+        <span style={{ color: bumpColor, fontWeight: 'bold', fontSize: '13px', textTransform: 'uppercase' }}>{bump}</span>
+      </div>
+      <div style={{ padding: '12px 16px', display: 'grid', gap: '8px' }}>
+        {semver.breaking_changes && semver.breaking_changes.length > 0 && (
+          <SemverDetail title="Breaking changes" color="#f85149" items={semver.breaking_changes} />
+        )}
+        {semver.features && semver.features.length > 0 && (
+          <SemverDetail title="Features" color="#d29922" items={semver.features} />
+        )}
+        {semver.fixes && semver.fixes.length > 0 && (
+          <SemverDetail title="Fixes" color="#3fb950" items={semver.fixes} />
+        )}
+        {(!semver.breaking_changes || semver.breaking_changes.length === 0) &&
+          (!semver.features || semver.features.length === 0) &&
+          (!semver.fixes || semver.fixes.length === 0) && (
+            <div style={{ color: '#8b949e', fontSize: '13px' }}>
+              No structural export surface changes detected.
+            </div>
+          )}
+      </div>
+    </div>
+  );
+}
+
+function SemverDetail({ title, color, items }: { title: string; color: string; items: string[] }) {
+  return (
+    <div>
+      <div style={{ color, fontSize: '12px', fontWeight: 'bold', marginBottom: '4px' }}>{title}</div>
+      {items.slice(0, 4).map(item => (
+        <div key={item} style={{ color: '#c9d1d9', fontSize: '13px' }}>
+          - {item}
+        </div>
+      ))}
+      {items.length > 4 && (
+        <div style={{ color: '#8b949e', fontSize: '12px', marginTop: '2px' }}>
+          +{items.length - 4} more
+        </div>
+      )}
+    </div>
+  );
+}
+
+type ImpactSummary = {
+  files: number;
+  entities: number;
+  added: number;
+  modified: number;
+  removed: number;
+};
+
+function summarizeDiff(files: DiffFile[]): ImpactSummary {
+  const summary: ImpactSummary = {
+    files: files.length,
+    entities: 0,
+    added: 0,
+    modified: 0,
+    removed: 0,
+  };
+  for (const file of files) {
+    for (const change of file.changes || []) {
+      summary.entities++;
+      if (change.type === 'added') summary.added++;
+      else if (change.type === 'modified') summary.modified++;
+      else if (change.type === 'removed') summary.removed++;
+    }
+  }
+  return summary;
+}
+
+function formatMentions(users: string[] | undefined): string {
+  if (!users || users.length === 0) return '';
+  return users.map(user => `@${user}`).join(', ');
+}
+
 function ConversationTab({ pr, comments, reviews, owner, repo, prNum, onCommentAdded, onReviewAdded, onError }: {
-  pr: any; comments: any[]; reviews: any[]; owner: string; repo: string; prNum: number;
-  onCommentAdded: (c: any) => void; onReviewAdded: (r: any) => void;
+  pr: PullRequest; comments: PRComment[]; reviews: PRReview[]; owner: string; repo: string; prNum: number;
+  onCommentAdded: (c: PRComment) => void; onReviewAdded: (r: PRReview) => void;
   onError: (message: string) => void;
 }) {
   const [body, setBody] = useState('');
@@ -218,7 +424,7 @@ function ConversationTab({ pr, comments, reviews, owner, repo, prNum, onCommentA
   };
 
   // Merge comments and reviews into a timeline
-  const timeline = [
+  const timeline: any[] = [
     ...comments.map(c => ({ ...c, kind: 'comment', time: c.created_at })),
     ...reviews.map(r => ({ ...r, kind: 'review', time: r.created_at })),
   ].sort((a, b) => (a.time || '').localeCompare(b.time || ''));

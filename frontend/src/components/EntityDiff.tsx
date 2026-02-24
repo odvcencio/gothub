@@ -1,8 +1,8 @@
 interface Change {
   type: string;
   key: string;
-  before?: { name: string; decl_kind: string };
-  after?: { name: string; decl_kind: string };
+  before?: { name?: string; decl_kind?: string };
+  after?: { name?: string; decl_kind?: string };
 }
 
 interface FileDiff {

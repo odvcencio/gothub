@@ -20,8 +20,19 @@ import (
 )
 
 type MergeGateResult struct {
-	Allowed bool     `json:"allowed"`
-	Reasons []string `json:"reasons,omitempty"`
+	Allowed              bool                      `json:"allowed"`
+	Reasons              []string                  `json:"reasons,omitempty"`
+	EntityOwnerApprovals []EntityOwnerApprovalGate `json:"entity_owner_approvals,omitempty"`
+}
+
+type EntityOwnerApprovalGate struct {
+	Path            string   `json:"path"`
+	EntityKey       string   `json:"entity_key"`
+	RequiredOwners  []string `json:"required_owners,omitempty"`
+	ApprovedBy      []string `json:"approved_by,omitempty"`
+	MissingOwners   []string `json:"missing_owners,omitempty"`
+	UnresolvedTeams []string `json:"unresolved_teams,omitempty"`
+	Satisfied       bool     `json:"satisfied"`
 }
 
 func (s *PRService) UpsertBranchProtectionRule(ctx context.Context, rule *models.BranchProtectionRule) error {
@@ -138,9 +149,12 @@ func (s *PRService) EvaluateMergeGate(ctx context.Context, repoID int64, pr *mod
 	}
 
 	if rule.RequireEntityOwnerApproval {
-		reasons, evalErr := s.evaluateEntityOwnerApprovals(ctx, repoID, pr, reviews)
+		reasons, approvals, evalErr := s.evaluateEntityOwnerApprovals(ctx, repoID, pr, reviews)
 		if evalErr != nil {
 			result.Reasons = append(result.Reasons, fmt.Sprintf("unable to evaluate entity owner approvals: %v", evalErr))
+		}
+		if len(approvals) > 0 {
+			result.EntityOwnerApprovals = approvals
 		}
 		result.Reasons = append(result.Reasons, reasons...)
 	}
@@ -184,26 +198,26 @@ func (s *PRService) EvaluateMergeGate(ctx context.Context, repoID int64, pr *mod
 	return result, nil
 }
 
-func (s *PRService) evaluateEntityOwnerApprovals(ctx context.Context, repoID int64, pr *models.PullRequest, reviews []models.PRReview) ([]string, error) {
+func (s *PRService) evaluateEntityOwnerApprovals(ctx context.Context, repoID int64, pr *models.PullRequest, reviews []models.PRReview) ([]string, []EntityOwnerApprovalGate, error) {
 	store, err := s.repoSvc.OpenStoreByID(ctx, repoID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	cfg, err := loadGotOwnersForBranch(store, pr.TargetBranch)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(cfg.rules) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	changes, err := listPREntityChanges(store, pr.SourceBranch, pr.TargetBranch)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(changes) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	approvedUsers := make(map[string]bool, len(reviews))
@@ -220,6 +234,7 @@ func (s *PRService) evaluateEntityOwnerApprovals(ctx context.Context, repoID int
 	}
 
 	reasons := make([]string, 0)
+	approvals := make([]EntityOwnerApprovalGate, 0, len(changes))
 	seenReasons := make(map[string]bool)
 	for _, ch := range changes {
 		owners := cfg.ownersForChange(ch)
@@ -228,6 +243,15 @@ func (s *PRService) evaluateEntityOwnerApprovals(ctx context.Context, repoID int
 		}
 
 		requiredUsers, unresolvedTeams := cfg.resolveOwners(owners)
+		sort.Strings(requiredUsers)
+		sort.Strings(unresolvedTeams)
+
+		approval := EntityOwnerApprovalGate{
+			Path:            ch.Path,
+			EntityKey:       ch.Key,
+			RequiredOwners:  append([]string(nil), requiredUsers...),
+			UnresolvedTeams: append([]string(nil), unresolvedTeams...),
+		}
 		if len(unresolvedTeams) > 0 {
 			reason := fmt.Sprintf("entity %q references undefined team(s): %s", ch.Key, formatTeamRefs(unresolvedTeams))
 			if !seenReasons[reason] {
@@ -235,18 +259,19 @@ func (s *PRService) evaluateEntityOwnerApprovals(ctx context.Context, repoID int
 				reasons = append(reasons, reason)
 			}
 		}
-		if len(requiredUsers) == 0 {
-			continue
-		}
-
-		hasOwnerApproval := false
 		for _, user := range requiredUsers {
 			if approvedUsers[user] {
-				hasOwnerApproval = true
-				break
+				approval.ApprovedBy = append(approval.ApprovedBy, user)
+				continue
 			}
+			approval.MissingOwners = append(approval.MissingOwners, user)
 		}
-		if hasOwnerApproval {
+		approval.Satisfied = len(approval.ApprovedBy) > 0
+		if len(approval.RequiredOwners) > 0 || len(approval.UnresolvedTeams) > 0 {
+			approvals = append(approvals, approval)
+		}
+
+		if len(requiredUsers) == 0 || approval.Satisfied {
 			continue
 		}
 
@@ -257,8 +282,14 @@ func (s *PRService) evaluateEntityOwnerApprovals(ctx context.Context, repoID int
 		}
 	}
 
+	sort.Slice(approvals, func(i, j int) bool {
+		if approvals[i].Path == approvals[j].Path {
+			return approvals[i].EntityKey < approvals[j].EntityKey
+		}
+		return approvals[i].Path < approvals[j].Path
+	})
 	sort.Strings(reasons)
-	return reasons, nil
+	return reasons, approvals, nil
 }
 
 func (s *PRService) evaluateLintPass(ctx context.Context, repoID int64, pr *models.PullRequest) ([]string, error) {
