@@ -7,7 +7,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"strconv"
 	"strings"
 
 	"github.com/odvcencio/gothub/internal/auth"
@@ -190,9 +189,8 @@ func (s *Server) handleCreateIssueComment(w http.ResponseWriter, r *http.Request
 
 func (s *Server) handleDeleteIssueComment(w http.ResponseWriter, r *http.Request) {
 	claims := auth.GetClaims(r.Context())
-	commentID, _ := strconv.ParseInt(r.PathValue("comment_id"), 10, 64)
-	if commentID == 0 {
-		jsonError(w, "invalid comment id", http.StatusBadRequest)
+	commentID, ok := parsePathPositiveInt64(w, r, "comment_id", "comment id")
+	if !ok {
 		return
 	}
 	if err := s.db.DeleteIssueComment(r.Context(), commentID, claims.UserID); err != nil {

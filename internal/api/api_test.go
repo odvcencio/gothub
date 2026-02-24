@@ -3839,6 +3839,99 @@ func TestNotificationsLifecycle(t *testing.T) {
 	}
 }
 
+func TestPRAndIssueEndpointsRejectInvalidNumbers(t *testing.T) {
+	server, _ := setupTestServer(t)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	token := registerAndGetToken(t, ts.URL, "alice")
+	createRepo(t, ts.URL, token, "repo", false)
+
+	cases := []struct {
+		name    string
+		path    string
+		wantErr string
+	}{
+		{
+			name:    "pull request not a number",
+			path:    "/api/v1/repos/alice/repo/pulls/not-a-number",
+			wantErr: "invalid pull request number",
+		},
+		{
+			name:    "pull request negative number",
+			path:    "/api/v1/repos/alice/repo/pulls/-1",
+			wantErr: "invalid pull request number",
+		},
+		{
+			name:    "issue not a number",
+			path:    "/api/v1/repos/alice/repo/issues/not-a-number",
+			wantErr: "invalid issue number",
+		},
+		{
+			name:    "issue zero",
+			path:    "/api/v1/repos/alice/repo/issues/0",
+			wantErr: "invalid issue number",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, err := http.Get(ts.URL + tc.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("expected 400 for %s, got %d", tc.path, resp.StatusCode)
+			}
+			if got := decodeAPIError(t, resp); got != tc.wantErr {
+				t.Fatalf("expected error %q, got %q", tc.wantErr, got)
+			}
+		})
+	}
+}
+
+func TestDeleteCommentEndpointsRejectInvalidCommentID(t *testing.T) {
+	server, _ := setupTestServer(t)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	token := registerAndGetToken(t, ts.URL, "alice")
+	createRepo(t, ts.URL, token, "repo", false)
+
+	cases := []struct {
+		name string
+		path string
+	}{
+		{
+			name: "pr comment negative id",
+			path: "/api/v1/repos/alice/repo/pulls/1/comments/-1",
+		},
+		{
+			name: "issue comment not a number",
+			path: "/api/v1/repos/alice/repo/issues/1/comments/not-a-number",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req, _ := http.NewRequest(http.MethodDelete, ts.URL+tc.path, nil)
+			req.Header.Set("Authorization", "Bearer "+token)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("expected 400 for %s, got %d", tc.path, resp.StatusCode)
+			}
+			if got := decodeAPIError(t, resp); got != "invalid comment id" {
+				t.Fatalf("expected non-leaky parse error, got %q", got)
+			}
+		})
+	}
+}
+
 func pushSimpleGoCommit(t *testing.T, baseURL, owner, repo string) string {
 	t.Helper()
 
@@ -3894,6 +3987,17 @@ func pushSimpleGoCommit(t *testing.T, baseURL, owner, repo string) string {
 	}
 
 	return string(commitHash)
+}
+
+func decodeAPIError(t *testing.T, resp *http.Response) string {
+	t.Helper()
+	var payload struct {
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode error payload: %v", err)
+	}
+	return payload.Error
 }
 
 func registerAndGetToken(t *testing.T, baseURL, username string) string {

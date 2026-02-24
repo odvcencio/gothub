@@ -32,3 +32,17 @@ func parsePathPositiveInt(w http.ResponseWriter, r *http.Request, key, label str
 	}
 	return value, true
 }
+
+func parsePathPositiveInt64(w http.ResponseWriter, r *http.Request, key, label string) (int64, bool) {
+	raw := strings.TrimSpace(r.PathValue(key))
+	if raw == "" {
+		jsonError(w, label+" is required", http.StatusBadRequest)
+		return 0, false
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || value <= 0 {
+		jsonError(w, "invalid "+label, http.StatusBadRequest)
+		return 0, false
+	}
+	return value, true
+}

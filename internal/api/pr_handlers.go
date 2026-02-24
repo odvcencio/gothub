@@ -214,15 +214,7 @@ func (s *Server) handleMergePR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mergerName := strings.TrimSpace(claims.Username)
-	if mergerName == "" {
-		user, err := s.db.GetUserByID(r.Context(), claims.UserID)
-		if err != nil {
-			jsonError(w, "internal error", http.StatusInternalServerError)
-			return
-		}
-		mergerName = user.Username
-	}
+	mergerName := s.resolveMergeActorName(r.Context(), claims)
 
 	mergeHash, err := s.prSvc.Merge(r.Context(), owner, repoName, pr, mergerName)
 	if err != nil {
@@ -294,9 +286,8 @@ func (s *Server) handleUpdatePR(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDeletePRComment(w http.ResponseWriter, r *http.Request) {
 	claims := auth.GetClaims(r.Context())
-	commentID, _ := strconv.ParseInt(r.PathValue("comment_id"), 10, 64)
-	if commentID == 0 {
-		jsonError(w, "invalid comment id", http.StatusBadRequest)
+	commentID, ok := parsePathPositiveInt64(w, r, "comment_id", "comment id")
+	if !ok {
 		return
 	}
 	if err := s.db.DeletePRComment(r.Context(), commentID, claims.UserID); err != nil {
@@ -304,6 +295,26 @@ func (s *Server) handleDeletePRComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) resolveMergeActorName(ctx context.Context, claims *auth.Claims) string {
+	if claims == nil {
+		return "user-unknown"
+	}
+	if mergerName := strings.TrimSpace(claims.Username); mergerName != "" {
+		return mergerName
+	}
+	if s.db != nil {
+		user, err := s.db.GetUserByID(ctx, claims.UserID)
+		if err != nil {
+			slog.Warn("merge actor lookup failed", "user_id", claims.UserID, "error", err)
+		} else if user == nil {
+			slog.Warn("merge actor lookup returned nil user", "user_id", claims.UserID)
+		} else if mergerName := strings.TrimSpace(user.Username); mergerName != "" {
+			return mergerName
+		}
+	}
+	return "user-" + strconv.FormatInt(claims.UserID, 10)
 }
 
 // PR Comments

@@ -3,17 +3,22 @@ package api
 import (
 	"context"
 	"log/slog"
+	"runtime/debug"
+	"strconv"
 	"time"
 )
 
 const asyncTaskTimeout = 20 * time.Second
 
 func (s *Server) runAsync(ctx context.Context, operation string, attrs []any, fn func(context.Context) error) {
+	safeAttrs := append([]any(nil), attrs...)
+
 	go func() {
 		defer func() {
 			if rec := recover(); rec != nil {
-				fields := append([]any{"operation", operation, "panic", rec}, attrs...)
-				slog.Error("async task panic", fields...)
+				logAttrs := asyncLogAttrs(operation, safeAttrs, "panic", rec)
+				logAttrs = append(logAttrs, slog.String("stack", string(debug.Stack())))
+				slog.LogAttrs(context.Background(), slog.LevelError, "async task panic", logAttrs...)
 			}
 		}()
 
@@ -21,8 +26,24 @@ func (s *Server) runAsync(ctx context.Context, operation string, attrs []any, fn
 		defer cancel()
 
 		if err := fn(taskCtx); err != nil {
-			fields := append([]any{"operation", operation, "error", err}, attrs...)
-			slog.Error("async task failed", fields...)
+			slog.LogAttrs(taskCtx, slog.LevelError, "async task failed", asyncLogAttrs(operation, safeAttrs, "error", err)...)
 		}
 	}()
+}
+
+func asyncLogAttrs(operation string, attrs []any, key string, value any) []slog.Attr {
+	logAttrs := make([]slog.Attr, 0, 2+(len(attrs)+1)/2)
+	logAttrs = append(logAttrs, slog.String("operation", operation), slog.Any(key, value))
+	for i := 0; i < len(attrs); i += 2 {
+		attrKey := "attr_" + strconv.Itoa(i/2)
+		if k, ok := attrs[i].(string); ok && k != "" {
+			attrKey = k
+		}
+		attrValue := any("(missing)")
+		if i+1 < len(attrs) {
+			attrValue = attrs[i+1]
+		}
+		logAttrs = append(logAttrs, slog.Any(attrKey, attrValue))
+	}
+	return logAttrs
 }
