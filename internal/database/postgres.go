@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 
 	"github.com/odvcencio/gothub/internal/models"
 
@@ -245,9 +246,19 @@ CREATE TABLE IF NOT EXISTS commit_indexes (
 	PRIMARY KEY (repo_id, commit_hash)
 );
 
+CREATE TABLE IF NOT EXISTS git_tree_entry_modes (
+	repo_id BIGINT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+	got_tree_hash TEXT NOT NULL,
+	entry_name TEXT NOT NULL,
+	mode TEXT NOT NULL,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	PRIMARY KEY (repo_id, got_tree_hash, entry_name)
+);
+
 CREATE INDEX IF NOT EXISTS idx_hash_mapping_git ON hash_mapping(repo_id, git_hash);
 CREATE INDEX IF NOT EXISTS idx_hash_mapping_got ON hash_mapping(repo_id, got_hash);
 CREATE INDEX IF NOT EXISTS idx_commit_indexes_repo ON commit_indexes(repo_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_tree_modes_repo_tree ON git_tree_entry_modes(repo_id, got_tree_hash);
 CREATE INDEX IF NOT EXISTS idx_branch_protection_repo_branch ON branch_protection_rules(repo_id, branch);
 CREATE INDEX IF NOT EXISTS idx_pr_check_runs_pr ON pr_check_runs(pr_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_issues_repo_number ON issues(repo_id, number DESC);
@@ -1147,6 +1158,59 @@ func (p *PostgresDB) GetCommitIndex(ctx context.Context, repoID int64, commitHas
 		`SELECT index_hash FROM commit_indexes WHERE repo_id = $1 AND commit_hash = $2`,
 		repoID, commitHash).Scan(&h)
 	return h, err
+}
+
+func (p *PostgresDB) SetGitTreeEntryModes(ctx context.Context, repoID int64, gotTreeHash string, modes map[string]string) error {
+	tx, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM git_tree_entry_modes WHERE repo_id = $1 AND got_tree_hash = $2`,
+		repoID, gotTreeHash); err != nil {
+		tx.Rollback()
+		return err
+	}
+	if len(modes) == 0 {
+		return tx.Commit()
+	}
+	stmt, err := tx.PrepareContext(ctx,
+		`INSERT INTO git_tree_entry_modes (repo_id, got_tree_hash, entry_name, mode) VALUES ($1, $2, $3, $4)
+		 ON CONFLICT (repo_id, got_tree_hash, entry_name) DO UPDATE SET mode = EXCLUDED.mode`)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	defer stmt.Close()
+	for entryName, mode := range modes {
+		if strings.TrimSpace(entryName) == "" || strings.TrimSpace(mode) == "" {
+			continue
+		}
+		if _, err := stmt.ExecContext(ctx, repoID, gotTreeHash, entryName, mode); err != nil {
+			tx.Rollback()
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (p *PostgresDB) GetGitTreeEntryModes(ctx context.Context, repoID int64, gotTreeHash string) (map[string]string, error) {
+	rows, err := p.db.QueryContext(ctx,
+		`SELECT entry_name, mode FROM git_tree_entry_modes WHERE repo_id = $1 AND got_tree_hash = $2`,
+		repoID, gotTreeHash)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	modes := make(map[string]string)
+	for rows.Next() {
+		var entryName, mode string
+		if err := rows.Scan(&entryName, &mode); err != nil {
+			return nil, err
+		}
+		modes[entryName] = mode
+	}
+	return modes, rows.Err()
 }
 
 // --- Organizations ---

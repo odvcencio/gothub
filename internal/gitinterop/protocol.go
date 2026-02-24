@@ -182,6 +182,11 @@ func (h *SmartHTTPHandler) handleReceivePack(w http.ResponseWriter, r *http.Requ
 
 		knownGotByGit := make(map[string]string, len(objects))
 		pendingMappings := make([]models.HashMapping, 0, len(objects))
+		type treeModeRecord struct {
+			gotTreeHash string
+			modes       map[string]string
+		}
+		pendingTreeModes := make([]treeModeRecord, 0, len(objects))
 		resolveGotHash := func(gitHash string) (string, error) {
 			if gotHash, ok := knownGotByGit[gitHash]; ok {
 				return gotHash, nil
@@ -225,7 +230,7 @@ func (h *SmartHTTPHandler) handleReceivePack(w http.ResponseWriter, r *http.Requ
 
 				switch obj.Type {
 				case OBJ_TREE:
-					gotTree, err := parseGitTree(obj.Data, resolveGotHash)
+					gotTree, treeModes, err := parseGitTree(obj.Data, resolveGotHash)
 					if err != nil {
 						if errors.Is(err, sql.ErrNoRows) {
 							nextDeferred = append(nextDeferred, obj)
@@ -242,6 +247,10 @@ func (h *SmartHTTPHandler) handleReceivePack(w http.ResponseWriter, r *http.Requ
 					knownGotByGit[string(gitHash)] = string(gotHash)
 					pendingMappings = append(pendingMappings, models.HashMapping{
 						RepoID: repoID, GotHash: string(gotHash), GitHash: string(gitHash), ObjectType: "tree",
+					})
+					pendingTreeModes = append(pendingTreeModes, treeModeRecord{
+						gotTreeHash: string(gotHash),
+						modes:       treeModes,
 					})
 					progress = true
 
@@ -278,6 +287,12 @@ func (h *SmartHTTPHandler) handleReceivePack(w http.ResponseWriter, r *http.Requ
 		if err := h.db.SetHashMappings(r.Context(), pendingMappings); err != nil {
 			h.sendReceivePackResult(w, fmt.Sprintf("unpack error: persist hash mappings: %v", err), nil, nil)
 			return
+		}
+		for _, tm := range pendingTreeModes {
+			if err := h.db.SetGitTreeEntryModes(r.Context(), repoID, tm.gotTreeHash, tm.modes); err != nil {
+				h.sendReceivePackResult(w, fmt.Sprintf("unpack error: persist tree modes: %v", err), nil, nil)
+				return
+			}
 		}
 
 		// Run entity extraction and rewrite trees/commits so entity lists are reachable.
@@ -406,7 +421,7 @@ func (h *SmartHTTPHandler) handleUploadPack(w http.ResponseWriter, r *http.Reque
 				continue
 			}
 			gitType := gotTypeToPackType(objType)
-			gitData, err := convertGotToGitData(objType, data, store.Objects, r.Context(), h.db, repoID)
+			gitData, err := convertGotToGitData(m, objType, data, store.Objects, r.Context(), h.db, repoID)
 			if err != nil {
 				continue
 			}
@@ -459,7 +474,7 @@ func (h *SmartHTTPHandler) extractEntitiesForCommits(ctx context.Context, store 
 		if err != nil {
 			continue
 		}
-		newCommitHash, changed, err := h.rewriteCommitWithEntities(ctx, store, object.Hash(gotHash))
+		newCommitHash, changed, err := h.rewriteCommitWithEntities(ctx, store, repoID, object.Hash(gotHash))
 		if err != nil {
 			return nil, err
 		}
@@ -476,12 +491,12 @@ func (h *SmartHTTPHandler) extractEntitiesForCommits(ctx context.Context, store 
 	return overrides, nil
 }
 
-func (h *SmartHTTPHandler) rewriteCommitWithEntities(ctx context.Context, store *gotstore.RepoStore, commitHash object.Hash) (object.Hash, bool, error) {
+func (h *SmartHTTPHandler) rewriteCommitWithEntities(ctx context.Context, store *gotstore.RepoStore, repoID int64, commitHash object.Hash) (object.Hash, bool, error) {
 	commit, err := store.Objects.ReadCommit(commitHash)
 	if err != nil {
 		return "", false, err
 	}
-	newTreeHash, changed, err := h.rewriteTreeWithEntities(ctx, store, commit.TreeHash, "")
+	newTreeHash, changed, err := h.rewriteTreeWithEntities(ctx, store, repoID, commit.TreeHash, "")
 	if err != nil {
 		return "", false, err
 	}
@@ -497,7 +512,7 @@ func (h *SmartHTTPHandler) rewriteCommitWithEntities(ctx context.Context, store 
 	return newCommitHash, true, nil
 }
 
-func (h *SmartHTTPHandler) rewriteTreeWithEntities(ctx context.Context, store *gotstore.RepoStore, treeHash object.Hash, prefix string) (object.Hash, bool, error) {
+func (h *SmartHTTPHandler) rewriteTreeWithEntities(ctx context.Context, store *gotstore.RepoStore, repoID int64, treeHash object.Hash, prefix string) (object.Hash, bool, error) {
 	tree, err := store.Objects.ReadTree(treeHash)
 	if err != nil {
 		return "", false, err
@@ -512,7 +527,7 @@ func (h *SmartHTTPHandler) rewriteTreeWithEntities(ctx context.Context, store *g
 			fullPath = prefix + "/" + e.Name
 		}
 		if e.IsDir {
-			newSubtreeHash, subtreeChanged, err := h.rewriteTreeWithEntities(ctx, store, e.SubtreeHash, fullPath)
+			newSubtreeHash, subtreeChanged, err := h.rewriteTreeWithEntities(ctx, store, repoID, e.SubtreeHash, fullPath)
 			if err != nil {
 				return "", false, err
 			}
@@ -566,6 +581,9 @@ func (h *SmartHTTPHandler) rewriteTreeWithEntities(ctx context.Context, store *g
 	if err != nil {
 		return "", false, err
 	}
+	if modes, err := h.db.GetGitTreeEntryModes(ctx, repoID, string(treeHash)); err == nil && len(modes) > 0 {
+		_ = h.db.SetGitTreeEntryModes(ctx, repoID, string(newTreeHash), modes)
+	}
 	return newTreeHash, true, nil
 }
 
@@ -586,9 +604,10 @@ func entityKindToString(k entity.EntityKind) string {
 
 // --- conversion helpers ---
 
-// parseGitTree converts git tree binary data to a Got TreeObj.
-func parseGitTree(data []byte, resolveGotHash func(gitHash string) (string, error)) (*object.TreeObj, error) {
+// parseGitTree converts git tree binary data to a Got TreeObj and returns git modes by entry name.
+func parseGitTree(data []byte, resolveGotHash func(gitHash string) (string, error)) (*object.TreeObj, map[string]string, error) {
 	var entries []object.TreeEntry
+	modes := make(map[string]string)
 	buf := bytes.NewReader(data)
 	for buf.Len() > 0 {
 		// Read mode
@@ -596,7 +615,7 @@ func parseGitTree(data []byte, resolveGotHash func(gitHash string) (string, erro
 		for {
 			b, err := buf.ReadByte()
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			if b == ' ' {
 				break
@@ -608,7 +627,7 @@ func parseGitTree(data []byte, resolveGotHash func(gitHash string) (string, erro
 		for {
 			b, err := buf.ReadByte()
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			if b == 0 {
 				break
@@ -618,14 +637,15 @@ func parseGitTree(data []byte, resolveGotHash func(gitHash string) (string, erro
 		// Read 20-byte hash
 		var hashBytes [20]byte
 		if _, err := io.ReadFull(buf, hashBytes[:]); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		gitHash := bytesToHex(hashBytes[:])
 
-		isDir := string(mode) == "40000"
+		modeStr := string(mode)
+		isDir := modeStr == "40000"
 		gotHash, err := resolveGotHash(gitHash)
 		if err != nil {
-			return nil, fmt.Errorf("missing hash mapping for tree entry %s: %w", gitHash, err)
+			return nil, nil, fmt.Errorf("missing hash mapping for tree entry %s: %w", gitHash, err)
 		}
 
 		entry := object.TreeEntry{
@@ -638,8 +658,9 @@ func parseGitTree(data []byte, resolveGotHash func(gitHash string) (string, erro
 			entry.BlobHash = object.Hash(gotHash)
 		}
 		entries = append(entries, entry)
+		modes[entry.Name] = modeStr
 	}
-	return &object.TreeObj{Entries: entries}, nil
+	return &object.TreeObj{Entries: entries}, modes, nil
 }
 
 // parseGitCommit converts git commit text to a Got CommitObj.
@@ -765,7 +786,7 @@ func walkGotObjects(store *object.Store, root object.Hash, has func(object.Hash)
 }
 
 // convertGotToGitData converts a Got object's data to git format.
-func convertGotToGitData(objType object.ObjectType, data []byte, store *object.Store, ctx context.Context, db database.DB, repoID int64) ([]byte, error) {
+func convertGotToGitData(gotHash object.Hash, objType object.ObjectType, data []byte, store *object.Store, ctx context.Context, db database.DB, repoID int64) ([]byte, error) {
 	switch objType {
 	case object.TypeBlob:
 		return data, nil // blob data is the same
@@ -796,7 +817,8 @@ func convertGotToGitData(objType object.ObjectType, data []byte, store *object.S
 			}
 			entryHashes[e.Name] = GitHash(getGitHash(ctx, db, repoID, string(h)))
 		}
-		_, gitData := GotToGitTree(tree, entryHashes)
+		modeMap, _ := db.GetGitTreeEntryModes(ctx, repoID, string(gotHash))
+		_, gitData := GotToGitTree(tree, entryHashes, modeMap)
 		return gitData, nil
 	default:
 		return data, nil

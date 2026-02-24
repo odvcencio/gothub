@@ -252,9 +252,19 @@ CREATE TABLE IF NOT EXISTS commit_indexes (
 	PRIMARY KEY (repo_id, commit_hash)
 );
 
+CREATE TABLE IF NOT EXISTS git_tree_entry_modes (
+	repo_id INTEGER NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+	got_tree_hash TEXT NOT NULL,
+	entry_name TEXT NOT NULL,
+	mode TEXT NOT NULL,
+	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (repo_id, got_tree_hash, entry_name)
+);
+
 CREATE INDEX IF NOT EXISTS idx_hash_mapping_git ON hash_mapping(repo_id, git_hash);
 CREATE INDEX IF NOT EXISTS idx_hash_mapping_got ON hash_mapping(repo_id, got_hash);
 CREATE INDEX IF NOT EXISTS idx_commit_indexes_repo ON commit_indexes(repo_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_tree_modes_repo_tree ON git_tree_entry_modes(repo_id, got_tree_hash);
 CREATE INDEX IF NOT EXISTS idx_branch_protection_repo_branch ON branch_protection_rules(repo_id, branch);
 CREATE INDEX IF NOT EXISTS idx_pr_check_runs_pr ON pr_check_runs(pr_id, updated_at);
 CREATE INDEX IF NOT EXISTS idx_issues_repo_number ON issues(repo_id, number DESC);
@@ -1256,6 +1266,59 @@ func (s *SQLiteDB) GetCommitIndex(ctx context.Context, repoID int64, commitHash 
 		`SELECT index_hash FROM commit_indexes WHERE repo_id = ? AND commit_hash = ?`,
 		repoID, commitHash).Scan(&h)
 	return h, err
+}
+
+func (s *SQLiteDB) SetGitTreeEntryModes(ctx context.Context, repoID int64, gotTreeHash string, modes map[string]string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM git_tree_entry_modes WHERE repo_id = ? AND got_tree_hash = ?`,
+		repoID, gotTreeHash); err != nil {
+		tx.Rollback()
+		return err
+	}
+	if len(modes) == 0 {
+		return tx.Commit()
+	}
+	stmt, err := tx.PrepareContext(ctx,
+		`INSERT INTO git_tree_entry_modes (repo_id, got_tree_hash, entry_name, mode) VALUES (?, ?, ?, ?)
+		 ON CONFLICT(repo_id, got_tree_hash, entry_name) DO UPDATE SET mode = excluded.mode`)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	defer stmt.Close()
+	for entryName, mode := range modes {
+		if strings.TrimSpace(entryName) == "" || strings.TrimSpace(mode) == "" {
+			continue
+		}
+		if _, err := stmt.ExecContext(ctx, repoID, gotTreeHash, entryName, mode); err != nil {
+			tx.Rollback()
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *SQLiteDB) GetGitTreeEntryModes(ctx context.Context, repoID int64, gotTreeHash string) (map[string]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT entry_name, mode FROM git_tree_entry_modes WHERE repo_id = ? AND got_tree_hash = ?`,
+		repoID, gotTreeHash)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	modes := make(map[string]string)
+	for rows.Next() {
+		var entryName, mode string
+		if err := rows.Scan(&entryName, &mode); err != nil {
+			return nil, err
+		}
+		modes[entryName] = mode
+	}
+	return modes, rows.Err()
 }
 
 // --- Organizations ---

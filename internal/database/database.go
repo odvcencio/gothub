@@ -99,6 +99,8 @@ type DB interface {
 	GetGitHash(ctx context.Context, repoID int64, gotHash string) (string, error)
 	SetCommitIndex(ctx context.Context, repoID int64, commitHash, indexHash string) error
 	GetCommitIndex(ctx context.Context, repoID int64, commitHash string) (string, error)
+	SetGitTreeEntryModes(ctx context.Context, repoID int64, gotTreeHash string, modes map[string]string) error
+	GetGitTreeEntryModes(ctx context.Context, repoID int64, gotTreeHash string) (map[string]string, error)
 
 	// Organizations
 	CreateOrg(ctx context.Context, o *models.Org) error

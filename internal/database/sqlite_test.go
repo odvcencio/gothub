@@ -323,6 +323,77 @@ func TestSQLiteCommitIndexUpsertAndGet(t *testing.T) {
 	}
 }
 
+func TestSQLiteGitTreeEntryModesReplaceAndGet(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	user := &models.User{Username: "alice", Email: "alice@example.com", PasswordHash: "x"}
+	if err := db.CreateUser(ctx, user); err != nil {
+		t.Fatal(err)
+	}
+	repo := &models.Repository{
+		OwnerUserID:   &user.ID,
+		Name:          "repo",
+		DefaultBranch: "main",
+		StoragePath:   "pending",
+	}
+	if err := db.CreateRepository(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+
+	treeHash := strings.Repeat("a", 64)
+	first := map[string]string{
+		"script.sh": "100755",
+		"main.go":   "100644",
+	}
+	if err := db.SetGitTreeEntryModes(ctx, repo.ID, treeHash, first); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := db.GetGitTreeEntryModes(ctx, repo.ID, treeHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(first) {
+		t.Fatalf("expected %d modes, got %d", len(first), len(got))
+	}
+	for k, want := range first {
+		if got[k] != want {
+			t.Fatalf("expected mode[%q]=%q, got %q", k, want, got[k])
+		}
+	}
+
+	second := map[string]string{
+		"script.sh": "100644",
+	}
+	if err := db.SetGitTreeEntryModes(ctx, repo.ID, treeHash, second); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err = db.GetGitTreeEntryModes(ctx, repo.ID, treeHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(second) {
+		t.Fatalf("expected replacement to leave %d mode rows, got %d", len(second), len(got))
+	}
+	if got["script.sh"] != "100644" {
+		t.Fatalf("expected updated script mode 100644, got %q", got["script.sh"])
+	}
+	if _, ok := got["main.go"]; ok {
+		t.Fatalf("expected stale entry main.go to be removed after replacement")
+	}
+}
+
 func TestSQLiteRepoStarsLifecycle(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	db, err := OpenSQLite(dbPath)

@@ -60,15 +60,18 @@ func GotToGitCommit(c *object.CommitObj, treeGitHash GitHash, parentGitHashes []
 
 // GotToGitTree converts a Got tree to a git tree object.
 // entryHashes maps entry names to their pre-resolved git hashes.
-func GotToGitTree(t *object.TreeObj, entryHashes map[string]GitHash) (GitHash, []byte) {
+// entryModes maps entry names to git modes (e.g. "100644", "100755", "120000", "160000", "40000").
+func GotToGitTree(t *object.TreeObj, entryHashes map[string]GitHash, entryModes map[string]string) (GitHash, []byte) {
 	var buf bytes.Buffer
 	for _, e := range t.Entries {
 		gh := entryHashes[e.Name]
-		var mode string
-		if e.IsDir {
-			mode = "40000"
-		} else {
-			mode = "100644"
+		mode := entryModes[e.Name]
+		if mode == "" {
+			if e.IsDir {
+				mode = "40000"
+			} else {
+				mode = "100644"
+			}
 		}
 		fmt.Fprintf(&buf, "%s %s\x00", mode, e.Name)
 		// Append raw 20-byte SHA-1
