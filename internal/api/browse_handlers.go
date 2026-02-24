@@ -72,11 +72,14 @@ func (s *Server) handleListCommits(w http.ResponseWriter, r *http.Request) {
 
 	page, perPage := parsePagination(r, 30, 200)
 	limit := page * perPage
-	if l := r.URL.Query().Get("limit"); l != "" {
-		if n, err := strconv.Atoi(l); err == nil && n > 0 {
-			perPage = n
-			limit = page * perPage
+	if l := strings.TrimSpace(r.URL.Query().Get("limit")); l != "" {
+		n, err := strconv.Atoi(l)
+		if err != nil || n <= 0 {
+			jsonError(w, "invalid limit query parameter", http.StatusBadRequest)
+			return
 		}
+		perPage = n
+		limit = page * perPage
 	}
 
 	commits, err := s.browseSvc.ListCommits(r.Context(), owner, repo, ref, limit)
@@ -136,9 +139,12 @@ func (s *Server) handleEntityHistory(w http.ResponseWriter, r *http.Request) {
 
 	page, perPage := parsePagination(r, 50, 200)
 	if l := strings.TrimSpace(r.URL.Query().Get("limit")); l != "" {
-		if n, err := strconv.Atoi(l); err == nil && n > 0 {
-			perPage = n
+		n, err := strconv.Atoi(l)
+		if err != nil || n <= 0 {
+			jsonError(w, "invalid limit query parameter", http.StatusBadRequest)
+			return
 		}
+		perPage = n
 	}
 	limit := page * perPage
 	hits, err := s.diffSvc.EntityHistory(r.Context(), owner, repo, ref, stableID, name, bodyHash, limit)

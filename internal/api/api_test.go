@@ -1989,6 +1989,52 @@ func TestEntityHistoryEndpointReturnsMatchesAcrossCommitHistory(t *testing.T) {
 	}
 }
 
+func TestEntityHistoryEndpointRejectsInvalidLimit(t *testing.T) {
+	server, _ := setupTestServer(t)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	token := registerAndGetToken(t, ts.URL, "owner")
+	createRepo(t, ts.URL, token, "repo", false)
+
+	resp, err := http.Get(ts.URL + "/api/v1/repos/owner/repo/entity-history/main?name=ProcessOrder&limit=abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("entity history invalid limit: expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestCallGraphEndpointRejectsInvalidDepth(t *testing.T) {
+	server, _ := setupTestServer(t)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	token := registerAndGetToken(t, ts.URL, "owner")
+	createRepo(t, ts.URL, token, "repo", false)
+
+	resp, err := http.Get(ts.URL + "/api/v1/repos/owner/repo/callgraph/main?symbol=ProcessOrder&depth=abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("call graph invalid depth: expected 400, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	resp, err = http.Get(ts.URL + "/api/v1/repos/owner/repo/callgraph/main?symbol=ProcessOrder&depth=99")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("call graph depth above max: expected 400, got %d", resp.StatusCode)
+	}
+}
+
 func TestSemverRecommendationEndpoint(t *testing.T) {
 	server, db := setupTestServer(t)
 	ts := httptest.NewServer(server)

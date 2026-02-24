@@ -72,9 +72,16 @@ func (s *Server) handleCallGraph(w http.ResponseWriter, r *http.Request) {
 
 	depth := 3
 	if d := r.URL.Query().Get("depth"); d != "" {
-		if v, err := strconv.Atoi(d); err == nil && v > 0 {
-			depth = v
+		v, err := strconv.Atoi(d)
+		if err != nil || v <= 0 {
+			jsonError(w, "invalid depth query parameter", http.StatusBadRequest)
+			return
 		}
+		if v > 16 {
+			jsonError(w, "depth query parameter exceeds maximum of 16", http.StatusBadRequest)
+			return
+		}
+		depth = v
 	}
 
 	reverse := r.URL.Query().Get("reverse") == "true"
