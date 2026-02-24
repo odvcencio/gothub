@@ -8,6 +8,7 @@ interface Props {
 export function ChangePasswordView({ path }: Props) {
   const loggedIn = !!getToken();
   const [passwordAuthEnabled, setPasswordAuthEnabled] = useState<boolean | null>(null);
+  const [authSettingsNotice, setAuthSettingsNotice] = useState('');
 
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -18,9 +19,13 @@ export function ChangePasswordView({ path }: Props) {
 
   useEffect(() => {
     if (!loggedIn) return;
+    setAuthSettingsNotice('');
     getAuthCapabilities()
       .then((caps) => setPasswordAuthEnabled(!!caps.password_auth_enabled))
-      .catch(() => setPasswordAuthEnabled(false));
+      .catch((err: any) => {
+        setPasswordAuthEnabled(false);
+        setAuthSettingsNotice(err?.message || 'Unable to verify auth settings right now. Showing safe fallback.');
+      });
   }, [loggedIn]);
 
   if (!loggedIn) {
@@ -42,6 +47,11 @@ export function ChangePasswordView({ path }: Props) {
   if (passwordAuthEnabled === false) {
     return (
       <div style={{ maxWidth: '600px', margin: '60px auto', textAlign: 'center' }}>
+        {authSettingsNotice && (
+          <div style={{ color: '#d29922', marginBottom: '16px', padding: '12px', background: '#2b230f', border: '1px solid #d29922', borderRadius: '6px', textAlign: 'left' }}>
+            {authSettingsNotice}
+          </div>
+        )}
         <p style={{ color: '#8b949e', fontSize: '16px' }}>
           Password auth is disabled on this instance.
         </p>

@@ -250,6 +250,16 @@ function Dashboard() {
   const [demoStepIndex, setDemoStepIndex] = useState(0);
   const [demoLoading, setDemoLoading] = useState(false);
   const [demoError, setDemoError] = useState('');
+  const [demoNotice, setDemoNotice] = useState('');
+  const appendDemoNotice = (message: string) => {
+    const next = message.trim();
+    if (!next) return;
+    setDemoNotice((current) => {
+      if (!current) return next;
+      if (current.includes(next)) return current;
+      return `${current} • ${next}`;
+    });
+  };
 
   useEffect(() => {
     listUserRepos()
@@ -261,9 +271,10 @@ function Dashboard() {
     if (demoLoading) return;
     setShowOnboarding(true);
     setDemoError('');
+    setDemoNotice('');
     setDemoLoading(true);
     try {
-      const context = await resolveDemoContext(repos);
+      const context = await resolveDemoContext(repos, appendDemoNotice);
       if (!context) {
         setDemo(null);
         setDemoSteps([]);
@@ -357,6 +368,11 @@ function Dashboard() {
           {demoError && (
             <div style={{ marginTop: '12px', color: '#f85149', padding: '10px 12px', background: '#1c1214', border: '1px solid #f85149', borderRadius: '6px', fontSize: '13px' }}>
               {demoError}
+            </div>
+          )}
+          {demoNotice && (
+            <div style={{ marginTop: '12px', color: '#d29922', padding: '10px 12px', background: '#2b230f', border: '1px solid #d29922', borderRadius: '6px', fontSize: '13px' }}>
+              {demoNotice}
             </div>
           )}
 
@@ -497,7 +513,10 @@ function markOnboardingDemoSeen() {
   window.localStorage.setItem(ONBOARDING_DEMO_KEY, '1');
 }
 
-async function resolveDemoContext(repos: Repository[]): Promise<DemoContext | null> {
+async function resolveDemoContext(
+  repos: Repository[],
+  onNotice?: (message: string) => void,
+): Promise<DemoContext | null> {
   const candidates = repos
     .map((repo) => {
       const owner = getRepoOwner(repo);
@@ -513,7 +532,7 @@ async function resolveDemoContext(repos: Repository[]): Promise<DemoContext | nu
   let selectedPR: PullRequest | null = null;
 
   for (const candidate of repoSample) {
-    const pr = await findOnboardingPR(candidate.owner, candidate.repo);
+    const pr = await findOnboardingPR(candidate.owner, candidate.repo, onNotice);
     if (pr) {
       selected = candidate;
       selectedPR = pr;
@@ -526,14 +545,15 @@ async function resolveDemoContext(repos: Repository[]): Promise<DemoContext | nu
     try {
       const repo = await getRepo(selected.owner, selected.repo);
       if (repo.default_branch) ref = repo.default_branch;
-    } catch {
+    } catch (err: any) {
+      onNotice?.(err?.message || `Failed to resolve default branch for ${selected.owner}/${selected.repo}; using main.`);
       ref = 'main';
     }
   }
 
   const [filePath, symbol] = await Promise.all([
-    findOnboardingFile(selected.owner, selected.repo, ref),
-    findOnboardingSymbol(selected.owner, selected.repo, ref),
+    findOnboardingFile(selected.owner, selected.repo, ref, onNotice),
+    findOnboardingSymbol(selected.owner, selected.repo, ref, onNotice),
   ]);
 
   return {
@@ -593,27 +613,42 @@ function buildDemoSteps(context: DemoContext): DemoStep[] {
   ];
 }
 
-async function findOnboardingPR(owner: string, repo: string): Promise<PullRequest | null> {
+async function findOnboardingPR(
+  owner: string,
+  repo: string,
+  onNotice?: (message: string) => void,
+): Promise<PullRequest | null> {
   try {
     const open = await listPRs(owner, repo, 'open', 1, 10);
     if (open.length > 0) return open[0];
     const recent = await listPRs(owner, repo, undefined, 1, 10);
     return recent[0] || null;
-  } catch {
+  } catch (err: any) {
+    onNotice?.(err?.message || `Failed to inspect pull requests for ${owner}/${repo}.`);
     return null;
   }
 }
 
-async function findOnboardingFile(owner: string, repo: string, ref: string): Promise<string | null> {
+async function findOnboardingFile(
+  owner: string,
+  repo: string,
+  ref: string,
+  onNotice?: (message: string) => void,
+): Promise<string | null> {
   const queue: string[] = [''];
   let scanned = 0;
+  let warnedListTreeFailure = false;
 
   while (queue.length > 0 && scanned < 12) {
     const current = queue.shift() || '';
     let entries: TreeEntry[];
     try {
       entries = await listTree(owner, repo, ref, current || undefined);
-    } catch {
+    } catch (err: any) {
+      if (!warnedListTreeFailure) {
+        warnedListTreeFailure = true;
+        onNotice?.(err?.message || `Failed to inspect files for ${owner}/${repo}; demo hints may be limited.`);
+      }
       continue;
     }
     scanned++;
@@ -634,7 +669,12 @@ async function findOnboardingFile(owner: string, repo: string, ref: string): Pro
   return null;
 }
 
-async function findOnboardingSymbol(owner: string, repo: string, ref: string): Promise<string | null> {
+async function findOnboardingSymbol(
+  owner: string,
+  repo: string,
+  ref: string,
+  onNotice?: (message: string) => void,
+): Promise<string | null> {
   try {
     const symbols = await searchSymbols(owner, repo, ref);
     if (!symbols || symbols.length === 0) return null;
@@ -645,7 +685,8 @@ async function findOnboardingSymbol(owner: string, repo: string, ref: string): P
     if (preferred?.name) return preferred.name;
     const fallback = symbols.find((sym) => typeof sym.name === 'string' && sym.name.trim().length > 0);
     return fallback?.name || null;
-  } catch {
+  } catch (err: any) {
+    onNotice?.(err?.message || `Failed to inspect symbols for ${owner}/${repo}; call-graph hint may be limited.`);
     return null;
   }
 }
