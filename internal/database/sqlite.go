@@ -261,10 +261,41 @@ CREATE TABLE IF NOT EXISTS git_tree_entry_modes (
 	PRIMARY KEY (repo_id, got_tree_hash, entry_name)
 );
 
+CREATE TABLE IF NOT EXISTS entity_identities (
+	repo_id INTEGER NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+	stable_id TEXT NOT NULL,
+	name TEXT NOT NULL,
+	decl_kind TEXT NOT NULL DEFAULT '',
+	receiver TEXT NOT NULL DEFAULT '',
+	first_seen_commit TEXT NOT NULL,
+	last_seen_commit TEXT NOT NULL,
+	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (repo_id, stable_id)
+);
+
+CREATE TABLE IF NOT EXISTS entity_versions (
+	repo_id INTEGER NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+	stable_id TEXT NOT NULL,
+	commit_hash TEXT NOT NULL,
+	path TEXT NOT NULL,
+	entity_hash TEXT NOT NULL,
+	body_hash TEXT NOT NULL DEFAULT '',
+	name TEXT NOT NULL,
+	decl_kind TEXT NOT NULL DEFAULT '',
+	receiver TEXT NOT NULL DEFAULT '',
+	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (repo_id, commit_hash, path, entity_hash),
+	FOREIGN KEY (repo_id, stable_id) REFERENCES entity_identities(repo_id, stable_id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_hash_mapping_git ON hash_mapping(repo_id, git_hash);
 CREATE INDEX IF NOT EXISTS idx_hash_mapping_got ON hash_mapping(repo_id, got_hash);
 CREATE INDEX IF NOT EXISTS idx_commit_indexes_repo ON commit_indexes(repo_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_tree_modes_repo_tree ON git_tree_entry_modes(repo_id, got_tree_hash);
+CREATE INDEX IF NOT EXISTS idx_entity_versions_repo_commit ON entity_versions(repo_id, commit_hash);
+CREATE INDEX IF NOT EXISTS idx_entity_versions_repo_stable ON entity_versions(repo_id, stable_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_entity_versions_repo_bodyhash ON entity_versions(repo_id, body_hash);
 CREATE INDEX IF NOT EXISTS idx_branch_protection_repo_branch ON branch_protection_rules(repo_id, branch);
 CREATE INDEX IF NOT EXISTS idx_pr_check_runs_pr ON pr_check_runs(pr_id, updated_at);
 CREATE INDEX IF NOT EXISTS idx_issues_repo_number ON issues(repo_id, number DESC);
@@ -1319,6 +1350,73 @@ func (s *SQLiteDB) GetGitTreeEntryModes(ctx context.Context, repoID int64, gotTr
 		modes[entryName] = mode
 	}
 	return modes, rows.Err()
+}
+
+func (s *SQLiteDB) UpsertEntityIdentity(ctx context.Context, identity *models.EntityIdentity) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO entity_identities
+			(repo_id, stable_id, name, decl_kind, receiver, first_seen_commit, last_seen_commit)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(repo_id, stable_id) DO UPDATE SET
+			 name = excluded.name,
+			 decl_kind = excluded.decl_kind,
+			 receiver = excluded.receiver,
+			 last_seen_commit = excluded.last_seen_commit,
+			 updated_at = CURRENT_TIMESTAMP`,
+		identity.RepoID, identity.StableID, identity.Name, identity.DeclKind, identity.Receiver, identity.FirstSeenCommit, identity.LastSeenCommit)
+	return err
+}
+
+func (s *SQLiteDB) SetEntityVersion(ctx context.Context, version *models.EntityVersion) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO entity_versions
+			(repo_id, stable_id, commit_hash, path, entity_hash, body_hash, name, decl_kind, receiver)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(repo_id, commit_hash, path, entity_hash) DO UPDATE SET
+			 stable_id = excluded.stable_id,
+			 body_hash = excluded.body_hash,
+			 name = excluded.name,
+			 decl_kind = excluded.decl_kind,
+			 receiver = excluded.receiver`,
+		version.RepoID, version.StableID, version.CommitHash, version.Path, version.EntityHash, version.BodyHash, version.Name, version.DeclKind, version.Receiver)
+	return err
+}
+
+func (s *SQLiteDB) ListEntityVersionsByCommit(ctx context.Context, repoID int64, commitHash string) ([]models.EntityVersion, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT repo_id, stable_id, commit_hash, path, entity_hash, body_hash, name, decl_kind, receiver, created_at
+		 FROM entity_versions
+		 WHERE repo_id = ? AND commit_hash = ?
+		 ORDER BY path, entity_hash`,
+		repoID, commitHash)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	versions := make([]models.EntityVersion, 0)
+	for rows.Next() {
+		var v models.EntityVersion
+		if err := rows.Scan(&v.RepoID, &v.StableID, &v.CommitHash, &v.Path, &v.EntityHash, &v.BodyHash, &v.Name, &v.DeclKind, &v.Receiver, &v.CreatedAt); err != nil {
+			return nil, err
+		}
+		versions = append(versions, v)
+	}
+	return versions, rows.Err()
+}
+
+func (s *SQLiteDB) HasEntityVersionsForCommit(ctx context.Context, repoID int64, commitHash string) (bool, error) {
+	var one int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT 1 FROM entity_versions WHERE repo_id = ? AND commit_hash = ? LIMIT 1`,
+		repoID, commitHash).Scan(&one)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // --- Organizations ---

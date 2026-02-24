@@ -122,7 +122,7 @@ func (s *Server) handleListEntities(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, entities)
 }
 
-// GET /api/v1/repos/{owner}/{repo}/entity-history/{ref}?name=...&body_hash=...
+// GET /api/v1/repos/{owner}/{repo}/entity-history/{ref}?stable_id=...&name=...&body_hash=...
 func (s *Server) handleEntityHistory(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.authorizeRepoRequest(w, r, false); !ok {
 		return
@@ -130,6 +130,7 @@ func (s *Server) handleEntityHistory(w http.ResponseWriter, r *http.Request) {
 	owner := r.PathValue("owner")
 	repo := r.PathValue("repo")
 	ref := r.PathValue("ref")
+	stableID := strings.TrimSpace(r.URL.Query().Get("stable_id"))
 	name := strings.TrimSpace(r.URL.Query().Get("name"))
 	bodyHash := strings.TrimSpace(r.URL.Query().Get("body_hash"))
 
@@ -140,7 +141,7 @@ func (s *Server) handleEntityHistory(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	limit := page * perPage
-	hits, err := s.diffSvc.EntityHistory(r.Context(), owner, repo, ref, name, bodyHash, limit)
+	hits, err := s.diffSvc.EntityHistory(r.Context(), owner, repo, ref, stableID, name, bodyHash, limit)
 	if err != nil {
 		status := http.StatusInternalServerError
 		if strings.Contains(err.Error(), "required") {

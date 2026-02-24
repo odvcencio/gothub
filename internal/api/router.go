@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/odvcencio/got/pkg/object"
 	"github.com/odvcencio/gothub/internal/auth"
 	"github.com/odvcencio/gothub/internal/database"
 	"github.com/odvcencio/gothub/internal/gitinterop"
@@ -26,17 +27,19 @@ type Server struct {
 	webhookSvc   *service.WebhookService
 	notifySvc    *service.NotificationService
 	codeIntelSvc *service.CodeIntelService
+	lineageSvc   *service.EntityLineageService
 	mux          *http.ServeMux
 }
 
 func NewServer(db database.DB, authSvc *auth.Service, repoSvc *service.RepoService) *Server {
 	browseSvc := service.NewBrowseService(repoSvc)
-	diffSvc := service.NewDiffService(repoSvc, browseSvc)
+	diffSvc := service.NewDiffService(repoSvc, browseSvc, db)
 	prSvc := service.NewPRService(db, repoSvc, browseSvc)
 	issueSvc := service.NewIssueService(db)
 	webhookSvc := service.NewWebhookService(db)
 	notifySvc := service.NewNotificationService(db)
 	codeIntelSvc := service.NewCodeIntelService(db, repoSvc, browseSvc)
+	lineageSvc := service.NewEntityLineageService(db)
 	s := &Server{
 		db:           db,
 		authSvc:      authSvc,
@@ -48,6 +51,7 @@ func NewServer(db database.DB, authSvc *auth.Service, repoSvc *service.RepoServi
 		webhookSvc:   webhookSvc,
 		notifySvc:    notifySvc,
 		codeIntelSvc: codeIntelSvc,
+		lineageSvc:   lineageSvc,
 		mux:          http.NewServeMux(),
 	}
 	s.routes()
@@ -154,7 +158,17 @@ func (s *Server) routes() {
 	// Got protocol
 	gotProto := gotprotocol.NewHandler(func(owner, repo string) (*gotstore.RepoStore, error) {
 		return s.repoSvc.OpenStore(context.Background(), owner, repo)
-	}, s.authorizeProtocolRepoAccess)
+	}, s.authorizeProtocolRepoAccess, func(ctx context.Context, owner, repo string, commitHash object.Hash) error {
+		repoModel, err := s.repoSvc.Get(ctx, owner, repo)
+		if err != nil {
+			return err
+		}
+		store, err := s.repoSvc.OpenStore(ctx, owner, repo)
+		if err != nil {
+			return err
+		}
+		return s.lineageSvc.IndexCommit(ctx, repoModel.ID, store, commitHash)
+	})
 	gotProto.RegisterRoutes(s.mux)
 
 	// Git smart HTTP protocol
@@ -174,6 +188,9 @@ func (s *Server) routes() {
 			return r.ID, nil
 		},
 		s.authorizeProtocolRepoAccess,
+		func(ctx context.Context, repoID int64, store *gotstore.RepoStore, commitHash object.Hash) error {
+			return s.lineageSvc.IndexCommit(ctx, repoID, store, commitHash)
+		},
 	)
 	gitHandler.RegisterRoutes(s.mux)
 

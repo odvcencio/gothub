@@ -8,6 +8,7 @@ import (
 	"github.com/odvcencio/got/pkg/diff"
 	"github.com/odvcencio/got/pkg/entity"
 	"github.com/odvcencio/got/pkg/object"
+	"github.com/odvcencio/gothub/internal/database"
 )
 
 // EntityInfo represents a single entity for API responses.
@@ -52,6 +53,7 @@ type DiffResponse struct {
 // EntityHistoryHit is one entity occurrence in commit history.
 type EntityHistoryHit struct {
 	CommitHash string `json:"commit_hash"`
+	StableID   string `json:"stable_id,omitempty"`
 	Author     string `json:"author"`
 	Timestamp  int64  `json:"timestamp"`
 	Message    string `json:"message"`
@@ -68,10 +70,11 @@ type EntityHistoryHit struct {
 type DiffService struct {
 	repoSvc   *RepoService
 	browseSvc *BrowseService
+	db        database.DB
 }
 
-func NewDiffService(repoSvc *RepoService, browseSvc *BrowseService) *DiffService {
-	return &DiffService{repoSvc: repoSvc, browseSvc: browseSvc}
+func NewDiffService(repoSvc *RepoService, browseSvc *BrowseService, db database.DB) *DiffService {
+	return &DiffService{repoSvc: repoSvc, browseSvc: browseSvc, db: db}
 }
 
 // ExtractEntities extracts entities from a file at the given ref/path.
@@ -185,15 +188,20 @@ func (s *DiffService) DiffRefs(ctx context.Context, owner, repo, baseRef, headRe
 }
 
 // EntityHistory returns commits (newest-first graph walk) where matching entities occur.
-// At least one of name or bodyHash must be provided.
-func (s *DiffService) EntityHistory(ctx context.Context, owner, repo, ref, name, bodyHash string, limit int) ([]EntityHistoryHit, error) {
+// At least one of stableID, name, or bodyHash must be provided.
+func (s *DiffService) EntityHistory(ctx context.Context, owner, repo, ref, stableID, name, bodyHash string, limit int) ([]EntityHistoryHit, error) {
+	stableID = strings.TrimSpace(stableID)
 	name = strings.TrimSpace(name)
 	bodyHash = strings.TrimSpace(bodyHash)
-	if name == "" && bodyHash == "" {
-		return nil, fmt.Errorf("name or body_hash query is required")
+	if stableID == "" && name == "" && bodyHash == "" {
+		return nil, fmt.Errorf("stable_id, name, or body_hash query is required")
 	}
 
 	store, err := s.repoSvc.OpenStore(ctx, owner, repo)
+	if err != nil {
+		return nil, err
+	}
+	repoModel, err := s.repoSvc.Get(ctx, owner, repo)
 	if err != nil {
 		return nil, err
 	}
@@ -219,14 +227,33 @@ func (s *DiffService) EntityHistory(ctx context.Context, owner, repo, ref, name,
 
 		commit, err := store.Objects.ReadCommit(h)
 		if err == nil {
-			var commitHits []EntityHistoryHit
-			_ = collectEntityHistoryHits(store.Objects, commit.TreeHash, "", name, bodyHash, &commitHits)
-			for i := range commitHits {
-				commitHits[i].CommitHash = string(h)
-				commitHits[i].Author = commit.Author
-				commitHits[i].Timestamp = commit.Timestamp
-				commitHits[i].Message = commit.Message
-				hits = append(hits, commitHits[i])
+			versions, err := s.db.ListEntityVersionsByCommit(ctx, repoModel.ID, string(h))
+			if err != nil {
+				return nil, err
+			}
+			for _, v := range versions {
+				if stableID != "" && v.StableID != stableID {
+					continue
+				}
+				if name != "" && v.Name != name {
+					continue
+				}
+				if bodyHash != "" && !strings.EqualFold(v.BodyHash, bodyHash) {
+					continue
+				}
+				hits = append(hits, EntityHistoryHit{
+					CommitHash: string(h),
+					StableID:   v.StableID,
+					Author:     commit.Author,
+					Timestamp:  commit.Timestamp,
+					Message:    commit.Message,
+					Path:       v.Path,
+					EntityHash: v.EntityHash,
+					Name:       v.Name,
+					DeclKind:   v.DeclKind,
+					Receiver:   v.Receiver,
+					BodyHash:   v.BodyHash,
+				})
 				if len(hits) >= limit {
 					break
 				}
@@ -310,76 +337,4 @@ func fileDiffToResponse(fd *diff.FileDiff) FileDiffResponse {
 		Path:    fd.Path,
 		Changes: changes,
 	}
-}
-
-func collectEntityHistoryHits(store *object.Store, treeHash object.Hash, prefix, name, bodyHash string, out *[]EntityHistoryHit) error {
-	tree, err := store.ReadTree(treeHash)
-	if err != nil {
-		return err
-	}
-	for _, e := range tree.Entries {
-		fullPath := e.Name
-		if prefix != "" {
-			fullPath = prefix + "/" + e.Name
-		}
-		if e.IsDir {
-			if err := collectEntityHistoryHits(store, e.SubtreeHash, fullPath, name, bodyHash, out); err != nil {
-				return err
-			}
-			continue
-		}
-		if e.EntityListHash == "" {
-			blob, err := store.ReadBlob(e.BlobHash)
-			if err != nil {
-				continue
-			}
-			el, err := entity.Extract(fullPath, blob.Data)
-			if err != nil {
-				continue
-			}
-			for _, ent := range el.Entities {
-				if name != "" && ent.Name != name {
-					continue
-				}
-				if bodyHash != "" && !strings.EqualFold(ent.BodyHash, bodyHash) {
-					continue
-				}
-				*out = append(*out, EntityHistoryHit{
-					Path:     fullPath,
-					Kind:     kindNames[ent.Kind],
-					Name:     ent.Name,
-					DeclKind: ent.DeclKind,
-					Receiver: ent.Receiver,
-					BodyHash: ent.BodyHash,
-				})
-			}
-			continue
-		}
-		el, err := store.ReadEntityList(e.EntityListHash)
-		if err != nil {
-			continue
-		}
-		for _, ref := range el.EntityRefs {
-			ent, err := store.ReadEntity(ref)
-			if err != nil {
-				continue
-			}
-			if name != "" && ent.Name != name {
-				continue
-			}
-			if bodyHash != "" && !strings.EqualFold(string(ent.BodyHash), bodyHash) {
-				continue
-			}
-			*out = append(*out, EntityHistoryHit{
-				Path:       fullPath,
-				EntityHash: string(ref),
-				Kind:       ent.Kind,
-				Name:       ent.Name,
-				DeclKind:   ent.DeclKind,
-				Receiver:   ent.Receiver,
-				BodyHash:   string(ent.BodyHash),
-			})
-		}
-	}
-	return nil
 }

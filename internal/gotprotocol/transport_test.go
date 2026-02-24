@@ -18,7 +18,7 @@ func TestPushObjectsRejectsCommitWithMissingTree(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := NewHandler(func(owner, repo string) (*gotstore.RepoStore, error) { return store, nil }, nil)
+	h := NewHandler(func(owner, repo string) (*gotstore.RepoStore, error) { return store, nil }, nil, nil)
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
 	ts := httptest.NewServer(mux)
@@ -61,7 +61,7 @@ func TestUpdateRefsExtractsEntitiesForCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := NewHandler(func(owner, repo string) (*gotstore.RepoStore, error) { return store, nil }, nil)
+	h := NewHandler(func(owner, repo string) (*gotstore.RepoStore, error) { return store, nil }, nil, nil)
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
 	ts := httptest.NewServer(mux)
@@ -207,7 +207,7 @@ func TestBatchObjectsUsesWantHaveNegotiation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := NewHandler(func(owner, repo string) (*gotstore.RepoStore, error) { return store, nil }, nil)
+	h := NewHandler(func(owner, repo string) (*gotstore.RepoStore, error) { return store, nil }, nil, nil)
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
 	ts := httptest.NewServer(mux)

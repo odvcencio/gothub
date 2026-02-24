@@ -1175,6 +1175,7 @@ func TestEntityHistoryEndpointReturnsMatchesAcrossCommitHistory(t *testing.T) {
 	}
 	var hits []struct {
 		CommitHash string `json:"commit_hash"`
+		StableID   string `json:"stable_id"`
 		Path       string `json:"path"`
 		Name       string `json:"name"`
 	}
@@ -1186,9 +1187,13 @@ func TestEntityHistoryEndpointReturnsMatchesAcrossCommitHistory(t *testing.T) {
 	if len(hits) < 2 {
 		t.Fatalf("expected at least 2 entity history hits, got %+v", hits)
 	}
+	seenStable := map[string]struct{}{}
 	for i, hit := range hits {
 		if strings.TrimSpace(hit.CommitHash) == "" {
 			t.Fatalf("hit %d missing commit hash: %+v", i, hit)
+		}
+		if strings.TrimSpace(hit.StableID) == "" {
+			t.Fatalf("hit %d missing stable id: %+v", i, hit)
 		}
 		if hit.Path != "main.go" {
 			t.Fatalf("hit %d unexpected path: %+v", i, hit)
@@ -1196,6 +1201,10 @@ func TestEntityHistoryEndpointReturnsMatchesAcrossCommitHistory(t *testing.T) {
 		if hit.Name != "ProcessOrder" {
 			t.Fatalf("hit %d unexpected entity name: %+v", i, hit)
 		}
+		seenStable[hit.StableID] = struct{}{}
+	}
+	if len(seenStable) != 1 {
+		t.Fatalf("expected all hits to share one stable id, got %#v", seenStable)
 	}
 }
 

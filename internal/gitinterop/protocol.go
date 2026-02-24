@@ -20,10 +20,11 @@ import (
 
 // SmartHTTPHandler implements the git smart HTTP protocol.
 type SmartHTTPHandler struct {
-	getStore  func(owner, repo string) (*gotstore.RepoStore, error)
-	db        database.DB
-	getRepo   func(ctx context.Context, owner, repo string) (int64, error) // returns repo ID
-	authorize func(r *http.Request, owner, repo string, write bool) (int, error)
+	getStore     func(owner, repo string) (*gotstore.RepoStore, error)
+	db           database.DB
+	getRepo      func(ctx context.Context, owner, repo string) (int64, error) // returns repo ID
+	authorize    func(r *http.Request, owner, repo string, write bool) (int, error)
+	indexLineage func(ctx context.Context, repoID int64, store *gotstore.RepoStore, commitHash object.Hash) error
 }
 
 type refUpdate struct {
@@ -42,8 +43,15 @@ func NewSmartHTTPHandler(
 	db database.DB,
 	getRepo func(ctx context.Context, owner, repo string) (int64, error),
 	authorize func(r *http.Request, owner, repo string, write bool) (int, error),
+	indexLineage func(ctx context.Context, repoID int64, store *gotstore.RepoStore, commitHash object.Hash) error,
 ) *SmartHTTPHandler {
-	return &SmartHTTPHandler{getStore: getStore, db: db, getRepo: getRepo, authorize: authorize}
+	return &SmartHTTPHandler{
+		getStore:     getStore,
+		db:           db,
+		getRepo:      getRepo,
+		authorize:    authorize,
+		indexLineage: indexLineage,
+	}
 }
 
 // RegisterRoutes sets up git smart HTTP protocol routes.
@@ -352,6 +360,12 @@ func (h *SmartHTTPHandler) handleReceivePack(w http.ResponseWriter, r *http.Requ
 		if err != nil {
 			refErrors[u.refName] = "missing object mapping"
 			continue
+		}
+		if h.indexLineage != nil {
+			if err := h.indexLineage(r.Context(), repoID, store, object.Hash(gotHash)); err != nil {
+				refErrors[u.refName] = "lineage index failed"
+				continue
+			}
 		}
 		if err := store.Refs.Set(u.storageRef, object.Hash(gotHash)); err != nil {
 			refErrors[u.refName] = err.Error()

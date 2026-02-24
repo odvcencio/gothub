@@ -394,6 +394,80 @@ func TestSQLiteGitTreeEntryModesReplaceAndGet(t *testing.T) {
 	}
 }
 
+func TestSQLiteEntityLineageStorage(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	user := &models.User{Username: "alice", Email: "alice@example.com", PasswordHash: "x"}
+	if err := db.CreateUser(ctx, user); err != nil {
+		t.Fatal(err)
+	}
+	repo := &models.Repository{
+		OwnerUserID:   &user.ID,
+		Name:          "repo",
+		DefaultBranch: "main",
+		StoragePath:   "pending",
+	}
+	if err := db.CreateRepository(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+
+	id := &models.EntityIdentity{
+		RepoID:          repo.ID,
+		StableID:        "stable-1",
+		Name:            "ProcessOrder",
+		DeclKind:        "function",
+		Receiver:        "",
+		FirstSeenCommit: strings.Repeat("a", 64),
+		LastSeenCommit:  strings.Repeat("a", 64),
+	}
+	if err := db.UpsertEntityIdentity(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+
+	v1 := &models.EntityVersion{
+		RepoID:     repo.ID,
+		StableID:   id.StableID,
+		CommitHash: strings.Repeat("a", 64),
+		Path:       "main.go",
+		EntityHash: strings.Repeat("b", 64),
+		BodyHash:   strings.Repeat("c", 64),
+		Name:       "ProcessOrder",
+		DeclKind:   "function",
+	}
+	if err := db.SetEntityVersion(ctx, v1); err != nil {
+		t.Fatal(err)
+	}
+
+	ok, err := db.HasEntityVersionsForCommit(ctx, repo.ID, v1.CommitHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatalf("expected commit %s to have entity versions", v1.CommitHash)
+	}
+
+	versions, err := db.ListEntityVersionsByCommit(ctx, repo.ID, v1.CommitHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(versions) != 1 {
+		t.Fatalf("expected 1 entity version, got %d", len(versions))
+	}
+	if versions[0].StableID != id.StableID {
+		t.Fatalf("expected stable id %q, got %q", id.StableID, versions[0].StableID)
+	}
+}
+
 func TestSQLiteRepoStarsLifecycle(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	db, err := OpenSQLite(dbPath)

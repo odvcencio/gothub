@@ -101,6 +101,10 @@ type DB interface {
 	GetCommitIndex(ctx context.Context, repoID int64, commitHash string) (string, error)
 	SetGitTreeEntryModes(ctx context.Context, repoID int64, gotTreeHash string, modes map[string]string) error
 	GetGitTreeEntryModes(ctx context.Context, repoID int64, gotTreeHash string) (map[string]string, error)
+	UpsertEntityIdentity(ctx context.Context, identity *models.EntityIdentity) error
+	SetEntityVersion(ctx context.Context, version *models.EntityVersion) error
+	ListEntityVersionsByCommit(ctx context.Context, repoID int64, commitHash string) ([]models.EntityVersion, error)
+	HasEntityVersionsForCommit(ctx context.Context, repoID int64, commitHash string) (bool, error)
 
 	// Organizations
 	CreateOrg(ctx context.Context, o *models.Org) error

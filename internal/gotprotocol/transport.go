@@ -1,6 +1,7 @@
 package gotprotocol
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,15 +26,17 @@ const (
 
 // Handler provides HTTP endpoints for the Got protocol (push/pull).
 type Handler struct {
-	getStore  func(owner, repo string) (*gotstore.RepoStore, error)
-	authorize func(r *http.Request, owner, repo string, write bool) (int, error)
+	getStore    func(owner, repo string) (*gotstore.RepoStore, error)
+	authorize   func(r *http.Request, owner, repo string, write bool) (int, error)
+	indexCommit func(ctx context.Context, owner, repo string, commitHash object.Hash) error
 }
 
 func NewHandler(
 	getStore func(owner, repo string) (*gotstore.RepoStore, error),
 	authorize func(r *http.Request, owner, repo string, write bool) (int, error),
+	indexCommit func(ctx context.Context, owner, repo string, commitHash object.Hash) error,
 ) *Handler {
-	return &Handler{getStore: getStore, authorize: authorize}
+	return &Handler{getStore: getStore, authorize: authorize, indexCommit: indexCommit}
 }
 
 // RegisterRoutes sets up Got protocol routes on the given mux.
@@ -269,6 +272,8 @@ func (h *Handler) handleUpdateRefs(w http.ResponseWriter, r *http.Request) {
 	if ok := h.authorizeRequest(w, r, true); !ok {
 		return
 	}
+	owner := r.PathValue("owner")
+	repo := r.PathValue("repo")
 	store, err := h.repoStore(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
@@ -303,6 +308,12 @@ func (h *Handler) handleUpdateRefs(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				http.Error(w, fmt.Sprintf("set ref %s: entity extraction failed: %v", name, err), http.StatusInternalServerError)
 				return
+			}
+			if h.indexCommit != nil {
+				if err := h.indexCommit(r.Context(), owner, repo, enrichedHash); err != nil {
+					http.Error(w, fmt.Sprintf("set ref %s: lineage indexing failed: %v", name, err), http.StatusInternalServerError)
+					return
+				}
 			}
 			if err := store.Refs.Set(name, enrichedHash); err != nil {
 				http.Error(w, fmt.Sprintf("set ref %s: %v", name, err), http.StatusInternalServerError)

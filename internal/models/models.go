@@ -195,3 +195,28 @@ type HashMapping struct {
 	GitHash    string `json:"git_hash"`
 	ObjectType string `json:"object_type"`
 }
+
+type EntityIdentity struct {
+	RepoID          int64     `json:"repo_id"`
+	StableID        string    `json:"stable_id"`
+	Name            string    `json:"name"`
+	DeclKind        string    `json:"decl_kind"`
+	Receiver        string    `json:"receiver,omitempty"`
+	FirstSeenCommit string    `json:"first_seen_commit"`
+	LastSeenCommit  string    `json:"last_seen_commit"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
+}
+
+type EntityVersion struct {
+	RepoID     int64     `json:"repo_id"`
+	StableID   string    `json:"stable_id"`
+	CommitHash string    `json:"commit_hash"`
+	Path       string    `json:"path"`
+	EntityHash string    `json:"entity_hash"`
+	BodyHash   string    `json:"body_hash"`
+	Name       string    `json:"name"`
+	DeclKind   string    `json:"decl_kind"`
+	Receiver   string    `json:"receiver,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+}
