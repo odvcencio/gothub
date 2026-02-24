@@ -3,7 +3,9 @@ package service
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/odvcencio/got/pkg/diff"
 	"github.com/odvcencio/got/pkg/entity"
@@ -48,6 +50,16 @@ type DiffResponse struct {
 	Base  string             `json:"base"`
 	Head  string             `json:"head"`
 	Files []FileDiffResponse `json:"files"`
+}
+
+// SemverRecommendation suggests the semantic-version bump between two refs.
+type SemverRecommendation struct {
+	Base            string   `json:"base"`
+	Head            string   `json:"head"`
+	Bump            string   `json:"bump"` // "none", "patch", "minor", "major"
+	BreakingChanges []string `json:"breaking_changes,omitempty"`
+	Features        []string `json:"features,omitempty"`
+	Fixes           []string `json:"fixes,omitempty"`
 }
 
 // EntityHistoryHit is one entity occurrence in commit history.
@@ -186,6 +198,137 @@ func (s *DiffService) DiffRefs(ctx context.Context, owner, repo, baseRef, headRe
 		Head:  string(headHash),
 		Files: fileDiffs,
 	}, nil
+}
+
+// RecommendSemver analyzes structural changes and suggests a semver bump.
+func (s *DiffService) RecommendSemver(ctx context.Context, owner, repo, baseRef, headRef string) (*SemverRecommendation, error) {
+	store, err := s.repoSvc.OpenStore(ctx, owner, repo)
+	if err != nil {
+		return nil, err
+	}
+	baseHash, err := s.browseSvc.ResolveRef(ctx, owner, repo, baseRef)
+	if err != nil {
+		return nil, fmt.Errorf("resolve base ref: %w", err)
+	}
+	headHash, err := s.browseSvc.ResolveRef(ctx, owner, repo, headRef)
+	if err != nil {
+		return nil, fmt.Errorf("resolve head ref: %w", err)
+	}
+
+	baseCommit, err := store.Objects.ReadCommit(baseHash)
+	if err != nil {
+		return nil, fmt.Errorf("read base commit: %w", err)
+	}
+	headCommit, err := store.Objects.ReadCommit(headHash)
+	if err != nil {
+		return nil, fmt.Errorf("read head commit: %w", err)
+	}
+
+	baseFiles, err := flattenTree(store.Objects, baseCommit.TreeHash, "")
+	if err != nil {
+		return nil, fmt.Errorf("flatten base tree: %w", err)
+	}
+	headFiles, err := flattenTree(store.Objects, headCommit.TreeHash, "")
+	if err != nil {
+		return nil, fmt.Errorf("flatten head tree: %w", err)
+	}
+
+	baseMap := make(map[string]FileEntry, len(baseFiles))
+	for _, f := range baseFiles {
+		baseMap[f.Path] = f
+	}
+	headMap := make(map[string]FileEntry, len(headFiles))
+	for _, f := range headFiles {
+		headMap[f.Path] = f
+	}
+
+	rec := &SemverRecommendation{
+		Base: baseRef,
+		Head: headRef,
+		Bump: "none",
+	}
+	impact := semverNone
+	seenBreaking := make(map[string]bool)
+	seenFeatures := make(map[string]bool)
+	seenFixes := make(map[string]bool)
+
+	classify := func(path string, fd *diff.FileDiff) {
+		for _, c := range fd.Changes {
+			label := formatEntityChangeLabel(path, c)
+			exported := isExportedEntity(c.Before) || isExportedEntity(c.After)
+
+			switch c.Type {
+			case diff.Removed:
+				if exported {
+					impact = maxSemverImpact(impact, semverMajor)
+					addUniqueStringSlice(&rec.BreakingChanges, seenBreaking, "removed "+label)
+				} else {
+					impact = maxSemverImpact(impact, semverPatch)
+					addUniqueStringSlice(&rec.Fixes, seenFixes, "removed internal "+label)
+				}
+			case diff.Added:
+				if exported {
+					impact = maxSemverImpact(impact, semverMinor)
+					addUniqueStringSlice(&rec.Features, seenFeatures, "added "+label)
+				} else {
+					impact = maxSemverImpact(impact, semverPatch)
+					addUniqueStringSlice(&rec.Fixes, seenFixes, "added internal "+label)
+				}
+			case diff.Modified:
+				if exported && isBreakingSignatureChange(c.Before, c.After) {
+					impact = maxSemverImpact(impact, semverMajor)
+					addUniqueStringSlice(&rec.BreakingChanges, seenBreaking, "changed signature "+label)
+				} else {
+					impact = maxSemverImpact(impact, semverPatch)
+					addUniqueStringSlice(&rec.Fixes, seenFixes, "modified "+label)
+				}
+			}
+		}
+	}
+
+	for path, headEntry := range headMap {
+		baseEntry, exists := baseMap[path]
+		if exists && baseEntry.BlobHash == headEntry.BlobHash {
+			continue
+		}
+		var baseData, headData []byte
+		if exists {
+			baseData, err = readBlobData(store.Objects, object.Hash(baseEntry.BlobHash))
+			if err != nil {
+				continue
+			}
+		}
+		headData, err = readBlobData(store.Objects, object.Hash(headEntry.BlobHash))
+		if err != nil {
+			continue
+		}
+		fd, err := diff.DiffFiles(path, baseData, headData)
+		if err != nil {
+			continue
+		}
+		classify(path, fd)
+	}
+
+	for path, baseEntry := range baseMap {
+		if _, exists := headMap[path]; exists {
+			continue
+		}
+		baseData, err := readBlobData(store.Objects, object.Hash(baseEntry.BlobHash))
+		if err != nil {
+			continue
+		}
+		fd, err := diff.DiffFiles(path, baseData, nil)
+		if err != nil {
+			continue
+		}
+		classify(path, fd)
+	}
+
+	rec.Bump = impact.String()
+	sort.Strings(rec.BreakingChanges)
+	sort.Strings(rec.Features)
+	sort.Strings(rec.Fixes)
+	return rec, nil
 }
 
 // EntityHistory returns commits (newest-first graph walk) where matching entities occur.
@@ -349,4 +492,100 @@ func fileDiffToResponse(fd *diff.FileDiff) FileDiffResponse {
 		Path:    fd.Path,
 		Changes: changes,
 	}
+}
+
+type semverImpact uint8
+
+const (
+	semverNone semverImpact = iota
+	semverPatch
+	semverMinor
+	semverMajor
+)
+
+func (i semverImpact) String() string {
+	switch i {
+	case semverPatch:
+		return "patch"
+	case semverMinor:
+		return "minor"
+	case semverMajor:
+		return "major"
+	default:
+		return "none"
+	}
+}
+
+func maxSemverImpact(a, b semverImpact) semverImpact {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func addUniqueStringSlice(out *[]string, seen map[string]bool, value string) {
+	if value == "" || seen[value] {
+		return
+	}
+	seen[value] = true
+	*out = append(*out, value)
+}
+
+func formatEntityChangeLabel(path string, c diff.EntityChange) string {
+	name := ""
+	switch {
+	case c.After != nil && strings.TrimSpace(c.After.Name) != "":
+		name = c.After.Name
+	case c.Before != nil && strings.TrimSpace(c.Before.Name) != "":
+		name = c.Before.Name
+	default:
+		name = c.Key
+	}
+	return fmt.Sprintf("%s (%s)", name, path)
+}
+
+func isExportedEntity(e *entity.Entity) bool {
+	if e == nil {
+		return false
+	}
+	if isExportedName(e.Name) {
+		return true
+	}
+	sig := strings.ToLower(firstEntitySignatureLine(e))
+	return strings.HasPrefix(sig, "export ") || strings.Contains(sig, " public ")
+}
+
+func isExportedName(name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	for _, r := range name {
+		return unicode.IsUpper(r)
+	}
+	return false
+}
+
+func firstEntitySignatureLine(e *entity.Entity) string {
+	if e == nil || len(e.Body) == 0 {
+		return ""
+	}
+	for _, line := range strings.Split(string(e.Body), "\n") {
+		l := strings.TrimSpace(line)
+		if l == "" || strings.HasPrefix(l, "//") || strings.HasPrefix(l, "/*") || strings.HasPrefix(l, "*") {
+			continue
+		}
+		return l
+	}
+	return ""
+}
+
+func isBreakingSignatureChange(before, after *entity.Entity) bool {
+	if before == nil || after == nil {
+		return false
+	}
+	if before.DeclKind != after.DeclKind || before.Receiver != after.Receiver || before.Name != after.Name {
+		return true
+	}
+	return firstEntitySignatureLine(before) != firstEntitySignatureLine(after)
 }

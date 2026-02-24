@@ -121,6 +121,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/entities/{ref}/{path...}", s.handleListEntities)
 	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/entity-history/{ref}", s.handleEntityHistory)
 	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/diff/{spec}", s.handleDiff)
+	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/semver/{spec}", s.handleSemver)
 
 	// Pull requests
 	s.mux.HandleFunc("POST /api/v1/repos/{owner}/{repo}/pulls", s.requireAuth(s.handleCreatePR))

@@ -178,3 +178,27 @@ func (s *Server) handleDiff(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonResponse(w, http.StatusOK, result)
 }
+
+// GET /api/v1/repos/{owner}/{repo}/semver/{spec}
+// spec is "base...head" where base and head are refs or commit hashes.
+func (s *Server) handleSemver(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.authorizeRepoRequest(w, r, false); !ok {
+		return
+	}
+	owner := r.PathValue("owner")
+	repo := r.PathValue("repo")
+	spec := r.PathValue("spec")
+
+	parts := strings.SplitN(spec, "...", 2)
+	if len(parts) != 2 {
+		jsonError(w, "semver spec must be base...head", http.StatusBadRequest)
+		return
+	}
+
+	result, err := s.diffSvc.RecommendSemver(r.Context(), owner, repo, parts[0], parts[1])
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonResponse(w, http.StatusOK, result)
+}

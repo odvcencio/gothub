@@ -1411,6 +1411,95 @@ func TestEntityHistoryEndpointReturnsMatchesAcrossCommitHistory(t *testing.T) {
 	}
 }
 
+func TestSemverRecommendationEndpoint(t *testing.T) {
+	server, db := setupTestServer(t)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	token := registerAndGetToken(t, ts.URL, "alice")
+	createRepo(t, ts.URL, token, "repo", false)
+
+	repo, err := db.GetRepository(context.Background(), "alice", "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := gotstore.Open(repo.StoragePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	baseBlobHash, err := store.Objects.WriteBlob(&object.Blob{Data: []byte("package main\n\nfunc ProcessOrder(input string) int { return 1 }\n")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseTreeHash, err := store.Objects.WriteTree(&object.TreeObj{
+		Entries: []object.TreeEntry{{Name: "main.go", BlobHash: baseBlobHash}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseCommitHash, err := store.Objects.WriteCommit(&object.CommitObj{
+		TreeHash:  baseTreeHash,
+		Author:    "alice",
+		Timestamp: 1700000000,
+		Message:   "base",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	headBlobHash, err := store.Objects.WriteBlob(&object.Blob{Data: []byte("package main\n\nfunc ProcessOrder(input string, retries int) int { return 1 }\n")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	headTreeHash, err := store.Objects.WriteTree(&object.TreeObj{
+		Entries: []object.TreeEntry{{Name: "main.go", BlobHash: headBlobHash}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	headCommitHash, err := store.Objects.WriteCommit(&object.CommitObj{
+		TreeHash:  headTreeHash,
+		Parents:   []object.Hash{baseCommitHash},
+		Author:    "alice",
+		Timestamp: 1700000100,
+		Message:   "feature",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Refs.Set("heads/main", baseCommitHash); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Refs.Set("heads/feature", headCommitHash); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := http.Get(ts.URL + "/api/v1/repos/alice/repo/semver/main...feature")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("semver endpoint: expected 200, got %d", resp.StatusCode)
+	}
+	var semverResp struct {
+		Base            string   `json:"base"`
+		Head            string   `json:"head"`
+		Bump            string   `json:"bump"`
+		BreakingChanges []string `json:"breaking_changes"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&semverResp); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if semverResp.Bump != "major" {
+		t.Fatalf("expected major bump recommendation, got %+v", semverResp)
+	}
+	if len(semverResp.BreakingChanges) == 0 {
+		t.Fatalf("expected breaking change details, got %+v", semverResp)
+	}
+}
+
 func TestMergeBlockedByBranchProtectionApprovalRequirement(t *testing.T) {
 	server, _ := setupTestServer(t)
 	ts := httptest.NewServer(server)
