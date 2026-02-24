@@ -536,6 +536,8 @@ func TestForkRepoCopiesStoreAndMetadata(t *testing.T) {
 		ID           int64  `json:"id"`
 		Name         string `json:"name"`
 		ParentRepoID *int64 `json:"parent_repo_id"`
+		ParentOwner  string `json:"parent_owner"`
+		ParentName   string `json:"parent_name"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&forkResp); err != nil {
 		t.Fatal(err)
@@ -546,6 +548,12 @@ func TestForkRepoCopiesStoreAndMetadata(t *testing.T) {
 	}
 	if forkResp.ParentRepoID == nil || *forkResp.ParentRepoID != sourceRepo.ID {
 		t.Fatalf("expected parent_repo_id %d, got %+v", sourceRepo.ID, forkResp.ParentRepoID)
+	}
+	if forkResp.ParentOwner != "alice" {
+		t.Fatalf("expected parent owner alice, got %q", forkResp.ParentOwner)
+	}
+	if forkResp.ParentName != "repo" {
+		t.Fatalf("expected parent name repo, got %q", forkResp.ParentName)
 	}
 
 	forkRepo, err := db.GetRepository(ctx, "bob", "repo")
@@ -604,6 +612,58 @@ func TestForkRepoCopiesStoreAndMetadata(t *testing.T) {
 		t.Fatalf("expected copied entity index entries, got %+v", entries)
 	}
 
+	resp, err = http.Get(ts.URL + "/api/v1/repos/bob/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("get fork repo: expected 200, got %d", resp.StatusCode)
+	}
+	var getForkResp struct {
+		ParentRepoID *int64 `json:"parent_repo_id"`
+		ParentOwner  string `json:"parent_owner"`
+		ParentName   string `json:"parent_name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&getForkResp); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if getForkResp.ParentRepoID == nil || *getForkResp.ParentRepoID != sourceRepo.ID {
+		t.Fatalf("get fork repo: expected parent_repo_id %d, got %+v", sourceRepo.ID, getForkResp.ParentRepoID)
+	}
+	if getForkResp.ParentOwner != "alice" || getForkResp.ParentName != "repo" {
+		t.Fatalf("get fork repo: expected parent alice/repo, got %q/%q", getForkResp.ParentOwner, getForkResp.ParentName)
+	}
+
+	req, _ = http.NewRequest(http.MethodGet, ts.URL+"/api/v1/user/repos", nil)
+	req.Header.Set("Authorization", "Bearer "+forkerToken)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("list user repos: expected 200, got %d", resp.StatusCode)
+	}
+	var userRepos []struct {
+		Name         string `json:"name"`
+		ParentRepoID *int64 `json:"parent_repo_id"`
+		ParentOwner  string `json:"parent_owner"`
+		ParentName   string `json:"parent_name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&userRepos); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if len(userRepos) != 1 {
+		t.Fatalf("expected exactly one user repo before second fork, got %+v", userRepos)
+	}
+	if userRepos[0].ParentRepoID == nil || *userRepos[0].ParentRepoID != sourceRepo.ID {
+		t.Fatalf("list user repos: expected parent_repo_id %d, got %+v", sourceRepo.ID, userRepos[0].ParentRepoID)
+	}
+	if userRepos[0].ParentOwner != "alice" || userRepos[0].ParentName != "repo" {
+		t.Fatalf("list user repos: expected parent alice/repo, got %q/%q", userRepos[0].ParentOwner, userRepos[0].ParentName)
+	}
+
 	// A second fork by the same user should auto-suffix to avoid name collisions.
 	req, _ = http.NewRequest("POST", ts.URL+"/api/v1/repos/alice/repo/forks", nil)
 	req.Header.Set("Authorization", "Bearer "+forkerToken)
@@ -633,9 +693,11 @@ func TestForkRepoCopiesStoreAndMetadata(t *testing.T) {
 		t.Fatalf("list forks: expected 200, got %d", resp.StatusCode)
 	}
 	var forks []struct {
-		Name       string `json:"name"`
-		OwnerName  string `json:"owner_name"`
-		ParentRepo *int64 `json:"parent_repo_id"`
+		Name        string `json:"name"`
+		OwnerName   string `json:"owner_name"`
+		ParentRepo  *int64 `json:"parent_repo_id"`
+		ParentOwner string `json:"parent_owner"`
+		ParentName  string `json:"parent_name"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&forks); err != nil {
 		t.Fatal(err)
@@ -646,6 +708,11 @@ func TestForkRepoCopiesStoreAndMetadata(t *testing.T) {
 	}
 	if forks[0].ParentRepo == nil || *forks[0].ParentRepo != sourceRepo.ID {
 		t.Fatalf("expected parent repo id %d on fork listing, got %+v", sourceRepo.ID, forks[0].ParentRepo)
+	}
+	for _, fork := range forks {
+		if fork.ParentOwner != "alice" || fork.ParentName != "repo" {
+			t.Fatalf("expected parent alice/repo on fork listing, got %q/%q", fork.ParentOwner, fork.ParentName)
+		}
 	}
 }
 

@@ -866,11 +866,18 @@ func (s *SQLiteDB) CloneRepoMetadata(ctx context.Context, sourceRepoID, targetRe
 func (s *SQLiteDB) GetRepository(ctx context.Context, ownerName, repoName string) (*models.Repository, error) {
 	r := &models.Repository{}
 	err := s.db.QueryRowContext(ctx,
-		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.parent_repo_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at, u.username
+		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.parent_repo_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at,
+		 u.username, COALESCE(pu.username, po.name, ''), COALESCE(pr.name, '')
 		 FROM repositories r
 		 JOIN users u ON u.id = r.owner_user_id
+		 LEFT JOIN repositories pr ON pr.id = r.parent_repo_id
+		 LEFT JOIN users pu ON pu.id = pr.owner_user_id
+		 LEFT JOIN orgs po ON po.id = pr.owner_org_id
 		 WHERE u.username = ? AND r.name = ?`, ownerName, repoName).
-		Scan(&r.ID, &r.OwnerUserID, &r.OwnerOrgID, &r.ParentRepoID, &r.Name, &r.Description, &r.DefaultBranch, &r.IsPrivate, &r.StoragePath, &r.CreatedAt, &r.OwnerName)
+		Scan(
+			&r.ID, &r.OwnerUserID, &r.OwnerOrgID, &r.ParentRepoID, &r.Name, &r.Description, &r.DefaultBranch, &r.IsPrivate, &r.StoragePath, &r.CreatedAt,
+			&r.OwnerName, &r.ParentOwner, &r.ParentName,
+		)
 	if err == nil {
 		return r, nil
 	}
@@ -879,11 +886,18 @@ func (s *SQLiteDB) GetRepository(ctx context.Context, ownerName, repoName string
 	}
 	// Fallback to org-owned repositories.
 	err = s.db.QueryRowContext(ctx,
-		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.parent_repo_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at, o.name
+		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.parent_repo_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at,
+		 o.name, COALESCE(pu.username, po.name, ''), COALESCE(pr.name, '')
 		 FROM repositories r
 		 JOIN orgs o ON o.id = r.owner_org_id
+		 LEFT JOIN repositories pr ON pr.id = r.parent_repo_id
+		 LEFT JOIN users pu ON pu.id = pr.owner_user_id
+		 LEFT JOIN orgs po ON po.id = pr.owner_org_id
 		 WHERE o.name = ? AND r.name = ?`, ownerName, repoName).
-		Scan(&r.ID, &r.OwnerUserID, &r.OwnerOrgID, &r.ParentRepoID, &r.Name, &r.Description, &r.DefaultBranch, &r.IsPrivate, &r.StoragePath, &r.CreatedAt, &r.OwnerName)
+		Scan(
+			&r.ID, &r.OwnerUserID, &r.OwnerOrgID, &r.ParentRepoID, &r.Name, &r.Description, &r.DefaultBranch, &r.IsPrivate, &r.StoragePath, &r.CreatedAt,
+			&r.OwnerName, &r.ParentOwner, &r.ParentName,
+		)
 	if err != nil {
 		return nil, err
 	}
@@ -894,12 +908,18 @@ func (s *SQLiteDB) GetRepositoryByID(ctx context.Context, id int64) (*models.Rep
 	r := &models.Repository{}
 	err := s.db.QueryRowContext(ctx,
 		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.parent_repo_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at,
-		 COALESCE(u.username, o.name, '')
+		 COALESCE(u.username, o.name, ''), COALESCE(pu.username, po.name, ''), COALESCE(pr.name, '')
 		 FROM repositories r
 		 LEFT JOIN users u ON u.id = r.owner_user_id
 		 LEFT JOIN orgs o ON o.id = r.owner_org_id
+		 LEFT JOIN repositories pr ON pr.id = r.parent_repo_id
+		 LEFT JOIN users pu ON pu.id = pr.owner_user_id
+		 LEFT JOIN orgs po ON po.id = pr.owner_org_id
 		 WHERE r.id = ?`, id).
-		Scan(&r.ID, &r.OwnerUserID, &r.OwnerOrgID, &r.ParentRepoID, &r.Name, &r.Description, &r.DefaultBranch, &r.IsPrivate, &r.StoragePath, &r.CreatedAt, &r.OwnerName)
+		Scan(
+			&r.ID, &r.OwnerUserID, &r.OwnerOrgID, &r.ParentRepoID, &r.Name, &r.Description, &r.DefaultBranch, &r.IsPrivate, &r.StoragePath, &r.CreatedAt,
+			&r.OwnerName, &r.ParentOwner, &r.ParentName,
+		)
 	if err != nil {
 		return nil, err
 	}
@@ -918,9 +938,13 @@ func (s *SQLiteDB) ListUserRepositoriesPage(ctx context.Context, userID int64, l
 		offset = 0
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.parent_repo_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at, u.username
+		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.parent_repo_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at,
+		 u.username, COALESCE(pu.username, po.name, ''), COALESCE(pr.name, '')
 		 FROM repositories r
 		 JOIN users u ON u.id = r.owner_user_id
+		 LEFT JOIN repositories pr ON pr.id = r.parent_repo_id
+		 LEFT JOIN users pu ON pu.id = pr.owner_user_id
+		 LEFT JOIN orgs po ON po.id = pr.owner_org_id
 		 WHERE r.owner_user_id = ?
 		 ORDER BY r.created_at DESC, r.id DESC
 		 LIMIT ? OFFSET ?`, userID, limit, offset)
@@ -931,7 +955,10 @@ func (s *SQLiteDB) ListUserRepositoriesPage(ctx context.Context, userID int64, l
 	var repos []models.Repository
 	for rows.Next() {
 		var r models.Repository
-		if err := rows.Scan(&r.ID, &r.OwnerUserID, &r.OwnerOrgID, &r.ParentRepoID, &r.Name, &r.Description, &r.DefaultBranch, &r.IsPrivate, &r.StoragePath, &r.CreatedAt, &r.OwnerName); err != nil {
+		if err := rows.Scan(
+			&r.ID, &r.OwnerUserID, &r.OwnerOrgID, &r.ParentRepoID, &r.Name, &r.Description, &r.DefaultBranch, &r.IsPrivate, &r.StoragePath, &r.CreatedAt,
+			&r.OwnerName, &r.ParentOwner, &r.ParentName,
+		); err != nil {
 			return nil, err
 		}
 		repos = append(repos, r)
@@ -952,10 +979,13 @@ func (s *SQLiteDB) ListRepositoryForksPage(ctx context.Context, parentRepoID int
 	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.parent_repo_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at,
-		 COALESCE(u.username, o.name, '')
+		 COALESCE(u.username, o.name, ''), COALESCE(pu.username, po.name, ''), COALESCE(pr.name, '')
 		 FROM repositories r
 		 LEFT JOIN users u ON u.id = r.owner_user_id
 		 LEFT JOIN orgs o ON o.id = r.owner_org_id
+		 LEFT JOIN repositories pr ON pr.id = r.parent_repo_id
+		 LEFT JOIN users pu ON pu.id = pr.owner_user_id
+		 LEFT JOIN orgs po ON po.id = pr.owner_org_id
 		 WHERE r.parent_repo_id = ?
 		 ORDER BY r.created_at DESC, r.id DESC
 		 LIMIT ? OFFSET ?`, parentRepoID, limit, offset)
@@ -967,7 +997,10 @@ func (s *SQLiteDB) ListRepositoryForksPage(ctx context.Context, parentRepoID int
 	var repos []models.Repository
 	for rows.Next() {
 		var r models.Repository
-		if err := rows.Scan(&r.ID, &r.OwnerUserID, &r.OwnerOrgID, &r.ParentRepoID, &r.Name, &r.Description, &r.DefaultBranch, &r.IsPrivate, &r.StoragePath, &r.CreatedAt, &r.OwnerName); err != nil {
+		if err := rows.Scan(
+			&r.ID, &r.OwnerUserID, &r.OwnerOrgID, &r.ParentRepoID, &r.Name, &r.Description, &r.DefaultBranch, &r.IsPrivate, &r.StoragePath, &r.CreatedAt,
+			&r.OwnerName, &r.ParentOwner, &r.ParentName,
+		); err != nil {
 			return nil, err
 		}
 		repos = append(repos, r)

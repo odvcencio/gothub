@@ -44,7 +44,7 @@ func (s *Server) handleGetRepo(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if repo.ParentRepoID != nil && *repo.ParentRepoID > 0 {
+	if repo.ParentRepoID != nil && *repo.ParentRepoID > 0 && (repo.ParentOwner == "" || repo.ParentName == "") {
 		if parent, err := s.repoSvc.GetByID(r.Context(), *repo.ParentRepoID); err == nil {
 			repo.ParentOwner = parent.OwnerName
 			repo.ParentName = parent.Name

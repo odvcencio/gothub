@@ -182,6 +182,78 @@ func TestSQLiteRepositoryPersistsParentRepoID(t *testing.T) {
 	}
 }
 
+func TestSQLiteForkRepositoryIncludesParentMetadata(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	alice := &models.User{Username: "alice", Email: "alice@example.com", PasswordHash: "x"}
+	bob := &models.User{Username: "bob", Email: "bob@example.com", PasswordHash: "x"}
+	if err := db.CreateUser(ctx, alice); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateUser(ctx, bob); err != nil {
+		t.Fatal(err)
+	}
+
+	parent := &models.Repository{
+		OwnerUserID:   &alice.ID,
+		Name:          "repo",
+		DefaultBranch: "main",
+		StoragePath:   "pending",
+	}
+	if err := db.CreateRepository(ctx, parent); err != nil {
+		t.Fatal(err)
+	}
+
+	fork := &models.Repository{
+		OwnerUserID:   &bob.ID,
+		ParentRepoID:  &parent.ID,
+		Name:          "repo",
+		DefaultBranch: "main",
+		StoragePath:   "pending",
+	}
+	if err := db.CreateRepository(ctx, fork); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := db.GetRepository(ctx, "bob", "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ParentRepoID == nil || *got.ParentRepoID != parent.ID {
+		t.Fatalf("expected parent repo id %d, got %+v", parent.ID, got.ParentRepoID)
+	}
+	if got.ParentOwner != "alice" {
+		t.Fatalf("expected parent owner alice, got %q", got.ParentOwner)
+	}
+	if got.ParentName != "repo" {
+		t.Fatalf("expected parent name repo, got %q", got.ParentName)
+	}
+
+	repos, err := db.ListUserRepositories(ctx, bob.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repos) != 1 {
+		t.Fatalf("expected 1 repo, got %+v", repos)
+	}
+	if repos[0].ParentOwner != "alice" {
+		t.Fatalf("expected list parent owner alice, got %q", repos[0].ParentOwner)
+	}
+	if repos[0].ParentName != "repo" {
+		t.Fatalf("expected list parent name repo, got %q", repos[0].ParentName)
+	}
+}
+
 func TestSQLiteCloneRepoMetadataCopiesRecords(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	db, err := OpenSQLite(dbPath)
@@ -446,6 +518,12 @@ func TestSQLiteListRepositoryForks(t *testing.T) {
 		}
 		if fork.OwnerName != "bob" {
 			t.Fatalf("expected owner bob, got %+v", fork)
+		}
+		if fork.ParentOwner != "alice" {
+			t.Fatalf("expected parent owner alice, got %+v", fork)
+		}
+		if fork.ParentName != "repo" {
+			t.Fatalf("expected parent name repo, got %+v", fork)
 		}
 	}
 }
