@@ -81,6 +81,9 @@ Updated: 2026-02-24
 | 40 | complete | gothub | `d298656` | `go test ./...`, `cd frontend && npm run build` |
 | 41 | complete | gothub | `d298656` | `go test ./...`, `cd frontend && npm run build` |
 | 42 | complete | gothub | `d298656` | `go test ./...`, `cd frontend && npm run build` |
+| 43 | complete | got | `5178221` | `go test ./cmd/got ./pkg/repo` |
+| 44 | complete | got | `b655d12` | `go test ./cmd/got ./pkg/repo` |
+| 48 | complete | gothub | `1f2a7bb` | `go test ./...`, `cd frontend && npm run build` |
 
 ### In Progress
 
@@ -91,7 +94,7 @@ Updated: 2026-02-24
 ### Remaining (Not Yet Implemented)
 
 - Tasks 8-34 are pending.
-- Tasks 43-50 are queued structural-differentiation work.
+- Tasks 45-47 and 49-50 are queued structural-differentiation work.
 - Tasks 35-39 are queued post-Phase-1 cloud multi-tenancy work.
 
 ---
@@ -2217,38 +2220,54 @@ tenant_id = current_setting('app.tenant_id')::bigint
 
 ---
 
-## Queued Structural Differentiation Workstream (CLI + UX)
+## Structural Differentiation Workstream (CLI + UX)
 
-These items come from the latest capability audit and are queued as post-core execution slices.
+These items come from the latest capability audit and are being executed as post-core slices.
 
 ### Task 43: Structural Blame (`got blame --entity`)
+
+**Status:** Complete (`5178221`)
 
 **Goal:** attribute entity-level ownership in blame output (`func ProcessOrder last touched by <author> in <commit>`), not line-level only.
 
 ### Task 44: Entity-Level Log (`got log --entity`)
 
+**Status:** Complete (`b655d12`)
+
 **Goal:** filter commit history to only commits that changed a selected entity key/path.
 
 ### Task 45: Rename-Aware Entity Tracking
+
+**Status:** Queued
 
 **Goal:** connect entity identity across rename/move operations so blame/log history survives refactors.
 
 ### Task 46: Entity Cherry-Pick (`got cherry-pick --entity`)
 
+**Status:** Queued
+
 **Goal:** apply a single entity delta from another commit/branch without cherry-picking whole commits.
 
 ### Task 47: Structural Blame Panel in GotHub Code View
+
+**Status:** Queued
 
 **Goal:** expose entity-last-touch metadata in the web code browser, anchored to selected entity.
 
 ### Task 48: Visual Call Graph in GotHub
 
+**Status:** Complete (`1f2a7bb`)
+
 **Goal:** replace callgraph table-only presentation with interactive graph rendering and click-through navigation.
 
 ### Task 49: Inline Code Intelligence in Blob Viewer
 
+**Status:** Queued
+
 **Goal:** add hover/click definition and reference navigation in code view using existing symbol/reference endpoints.
 
 ### Task 50: Onboarding Demo Repository
+
+**Status:** Queued
 
 **Goal:** add first-run "Try Gothub" seeded repo/flow that demonstrates structural merge, impact diff, semver, and merge gate behavior.
