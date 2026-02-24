@@ -41,7 +41,7 @@ const (
 )
 
 const (
-	gitUploadPackCapabilities  = "multi_ack_detailed side-band-64k ofs-delta"
+	gitUploadPackCapabilities  = "side-band-64k ofs-delta"
 	gitReceivePackCapabilities = "report-status delete-refs side-band-64k ofs-delta"
 )
 

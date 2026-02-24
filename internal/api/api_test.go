@@ -904,7 +904,7 @@ func TestGitUploadPackAdvertisementIncludesSidebandCapability(t *testing.T) {
 	if !strings.Contains(bodyStr, "side-band-64k") {
 		t.Fatalf("expected side-band-64k capability in advertisement: %q", bodyStr)
 	}
-	if !strings.Contains(bodyStr, "multi_ack_detailed") {
+	if !strings.Contains(bodyStr, "side-band-64k ofs-delta") {
 		t.Fatalf("expected upload-pack capability set, got body %q", bodyStr)
 	}
 	if strings.Contains(bodyStr, "report-status") {
