@@ -216,7 +216,7 @@ func TestEntityHistoryLazyIndexesLineageWhenMissing(t *testing.T) {
 	lineageSvc := NewEntityLineageService(db)
 	diffSvc := NewDiffService(repoSvc, browseSvc, db, lineageSvc)
 
-	hits, err := diffSvc.EntityHistory(ctx, "alice", "repo", "main", "", "ProcessOrder", "", 10)
+	hits, err := diffSvc.EntityHistory(ctx, "alice", "repo", "main", "", "ProcessOrder", "", 10, 0)
 	if err != nil {
 		t.Fatalf("entity history: %v", err)
 	}

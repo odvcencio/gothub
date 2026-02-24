@@ -2317,6 +2317,73 @@ func (s *SQLiteDB) ListEntityVersionsByCommit(ctx context.Context, repoID int64,
 	return versions, rows.Err()
 }
 
+func (s *SQLiteDB) CountEntityVersionsByCommitFiltered(ctx context.Context, repoID int64, commitHash, stableID, name, bodyHash string) (int, error) {
+	query := `SELECT COUNT(*) FROM entity_versions WHERE repo_id = ? AND commit_hash = ?`
+	args := []any{repoID, commitHash}
+	if strings.TrimSpace(stableID) != "" {
+		query += ` AND stable_id = ?`
+		args = append(args, stableID)
+	}
+	if strings.TrimSpace(name) != "" {
+		query += ` AND name = ?`
+		args = append(args, name)
+	}
+	if strings.TrimSpace(bodyHash) != "" {
+		query += ` AND lower(body_hash) = lower(?)`
+		args = append(args, bodyHash)
+	}
+
+	var count int
+	if err := s.db.QueryRowContext(ctx, query, args...).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+func (s *SQLiteDB) ListEntityVersionsByCommitFilteredPage(ctx context.Context, repoID int64, commitHash, stableID, name, bodyHash string, limit, offset int) ([]models.EntityVersion, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	query := `SELECT repo_id, stable_id, commit_hash, path, entity_hash, body_hash, name, decl_kind, receiver, created_at
+		 FROM entity_versions
+		 WHERE repo_id = ? AND commit_hash = ?`
+	args := []any{repoID, commitHash}
+	if strings.TrimSpace(stableID) != "" {
+		query += ` AND stable_id = ?`
+		args = append(args, stableID)
+	}
+	if strings.TrimSpace(name) != "" {
+		query += ` AND name = ?`
+		args = append(args, name)
+	}
+	if strings.TrimSpace(bodyHash) != "" {
+		query += ` AND lower(body_hash) = lower(?)`
+		args = append(args, bodyHash)
+	}
+	query += ` ORDER BY path, entity_hash LIMIT ? OFFSET ?`
+	args = append(args, limit, offset)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	versions := make([]models.EntityVersion, 0, limit)
+	for rows.Next() {
+		var v models.EntityVersion
+		if err := rows.Scan(&v.RepoID, &v.StableID, &v.CommitHash, &v.Path, &v.EntityHash, &v.BodyHash, &v.Name, &v.DeclKind, &v.Receiver, &v.CreatedAt); err != nil {
+			return nil, err
+		}
+		versions = append(versions, v)
+	}
+	return versions, rows.Err()
+}
+
 func (s *SQLiteDB) HasEntityVersionsForCommit(ctx context.Context, repoID int64, commitHash string) (bool, error) {
 	var one int
 	err := s.db.QueryRowContext(ctx,

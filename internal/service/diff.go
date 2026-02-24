@@ -360,7 +360,7 @@ func (s *DiffService) RecommendSemver(ctx context.Context, owner, repo, baseRef,
 
 // EntityHistory returns commits (newest-first graph walk) where matching entities occur.
 // At least one of stableID, name, or bodyHash must be provided.
-func (s *DiffService) EntityHistory(ctx context.Context, owner, repo, ref, stableID, name, bodyHash string, limit int) ([]EntityHistoryHit, error) {
+func (s *DiffService) EntityHistory(ctx context.Context, owner, repo, ref, stableID, name, bodyHash string, limit, offset int) ([]EntityHistoryHit, error) {
 	stableID = strings.TrimSpace(stableID)
 	name = strings.TrimSpace(name)
 	bodyHash = strings.TrimSpace(bodyHash)
@@ -394,12 +394,17 @@ func (s *DiffService) EntityHistory(ctx context.Context, owner, repo, ref, stabl
 	if limit <= 0 {
 		limit = 50
 	}
+	if offset < 0 {
+		offset = 0
+	}
 
 	hits := make([]EntityHistoryHit, 0, limit)
 	queue := []object.Hash{head}
 	seen := map[object.Hash]bool{}
+	remainingTake := limit
+	remainingSkip := offset
 
-	for len(queue) > 0 && len(hits) < limit {
+	for len(queue) > 0 && remainingTake > 0 {
 		h := queue[0]
 		queue = queue[1:]
 		if seen[h] {
@@ -408,21 +413,21 @@ func (s *DiffService) EntityHistory(ctx context.Context, owner, repo, ref, stabl
 		seen[h] = true
 
 		commit, err := store.Objects.ReadCommit(h)
-		if err == nil {
-			versions, err := s.db.ListEntityVersionsByCommit(ctx, repoModel.ID, string(h))
+		if err != nil {
+			continue
+		}
+
+		matchedCount, err := s.db.CountEntityVersionsByCommitFiltered(ctx, repoModel.ID, string(h), stableID, name, bodyHash)
+		if err != nil {
+			return nil, err
+		}
+		if matchedCount > remainingSkip {
+			versions, err := s.db.ListEntityVersionsByCommitFilteredPage(ctx, repoModel.ID, string(h), stableID, name, bodyHash, remainingTake, remainingSkip)
 			if err != nil {
 				return nil, err
 			}
+			remainingSkip = 0
 			for _, v := range versions {
-				if stableID != "" && v.StableID != stableID {
-					continue
-				}
-				if name != "" && v.Name != name {
-					continue
-				}
-				if bodyHash != "" && !strings.EqualFold(v.BodyHash, bodyHash) {
-					continue
-				}
 				hits = append(hits, EntityHistoryHit{
 					CommitHash: string(h),
 					StableID:   v.StableID,
@@ -436,14 +441,15 @@ func (s *DiffService) EntityHistory(ctx context.Context, owner, repo, ref, stabl
 					Receiver:   v.Receiver,
 					BodyHash:   v.BodyHash,
 				})
-				if len(hits) >= limit {
-					break
-				}
 			}
-			for _, p := range commit.Parents {
-				if !seen[p] {
-					queue = append(queue, p)
-				}
+			remainingTake -= len(versions)
+		} else {
+			remainingSkip -= matchedCount
+		}
+
+		for _, p := range commit.Parents {
+			if !seen[p] {
+				queue = append(queue, p)
 			}
 		}
 	}

@@ -185,7 +185,7 @@ func (s *BrowseService) GetCommit(ctx context.Context, owner, repo, hash string)
 }
 
 // ListCommits returns the commit log starting from a ref, walking parents.
-func (s *BrowseService) ListCommits(ctx context.Context, owner, repo, ref string, limit int) ([]CommitInfo, error) {
+func (s *BrowseService) ListCommits(ctx context.Context, owner, repo, ref string, limit, offset int) ([]CommitInfo, error) {
 	store, err := s.repoSvc.OpenStore(ctx, owner, repo)
 	if err != nil {
 		return nil, err
@@ -197,10 +197,14 @@ func (s *BrowseService) ListCommits(ctx context.Context, owner, repo, ref string
 	if limit <= 0 {
 		limit = 30
 	}
+	if offset < 0 {
+		offset = 0
+	}
 
-	var commits []CommitInfo
+	commits := make([]CommitInfo, 0, limit)
 	queue := []object.Hash{head}
 	seen := map[object.Hash]bool{}
+	skipped := 0
 
 	for len(queue) > 0 && len(commits) < limit {
 		h := queue[0]
@@ -214,11 +218,15 @@ func (s *BrowseService) ListCommits(ctx context.Context, owner, repo, ref string
 		if err != nil {
 			continue
 		}
-		info := commitToInfo(string(h), commit)
-		verified, signer, _ := verifyCommitSignature(ctx, s.repoSvc.db, commit)
-		info.Verified = verified
-		info.Signer = signer
-		commits = append(commits, *info)
+		if skipped < offset {
+			skipped++
+		} else {
+			info := commitToInfo(string(h), commit)
+			verified, signer, _ := verifyCommitSignature(ctx, s.repoSvc.db, commit)
+			info.Verified = verified
+			info.Signer = signer
+			commits = append(commits, *info)
+		}
 		for _, p := range commit.Parents {
 			if !seen[p] {
 				queue = append(queue, p)

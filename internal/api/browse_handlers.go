@@ -74,7 +74,6 @@ func (s *Server) handleListCommits(w http.ResponseWriter, r *http.Request) {
 	ref := r.PathValue("ref")
 
 	page, perPage := parsePagination(r, 30, 200)
-	limit := page * perPage
 	if l := strings.TrimSpace(r.URL.Query().Get("limit")); l != "" {
 		n, err := strconv.Atoi(l)
 		if err != nil || n <= 0 {
@@ -82,15 +81,18 @@ func (s *Server) handleListCommits(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		perPage = n
-		limit = page * perPage
 	}
+	offset := (page - 1) * perPage
 
-	commits, err := s.browseSvc.ListCommits(r.Context(), owner, repo, ref, limit)
+	commits, err := s.browseSvc.ListCommits(r.Context(), owner, repo, ref, perPage, offset)
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	jsonResponse(w, http.StatusOK, paginateSlice(commits, page, perPage))
+	if commits == nil {
+		commits = []service.CommitInfo{}
+	}
+	jsonResponse(w, http.StatusOK, commits)
 }
 
 // GET /api/v1/repos/{owner}/{repo}/commit/{hash}
@@ -149,8 +151,8 @@ func (s *Server) handleEntityHistory(w http.ResponseWriter, r *http.Request) {
 		}
 		perPage = n
 	}
-	limit := page * perPage
-	hits, err := s.diffSvc.EntityHistory(r.Context(), owner, repo, ref, stableID, name, bodyHash, limit)
+	offset := (page - 1) * perPage
+	hits, err := s.diffSvc.EntityHistory(r.Context(), owner, repo, ref, stableID, name, bodyHash, perPage, offset)
 	if err != nil {
 		status := http.StatusInternalServerError
 		if strings.Contains(err.Error(), "required") {
@@ -161,7 +163,10 @@ func (s *Server) handleEntityHistory(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, err.Error(), status)
 		return
 	}
-	jsonResponse(w, http.StatusOK, paginateSlice(hits, page, perPage))
+	if hits == nil {
+		hits = []service.EntityHistoryHit{}
+	}
+	jsonResponse(w, http.StatusOK, hits)
 }
 
 // GET /api/v1/repos/{owner}/{repo}/entity-log/{ref}?key=...&path=...&limit=...

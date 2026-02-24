@@ -138,6 +138,8 @@ type DB interface {
 	UpsertEntityIdentity(ctx context.Context, identity *models.EntityIdentity) error
 	SetEntityVersion(ctx context.Context, version *models.EntityVersion) error
 	ListEntityVersionsByCommit(ctx context.Context, repoID int64, commitHash string) ([]models.EntityVersion, error)
+	CountEntityVersionsByCommitFiltered(ctx context.Context, repoID int64, commitHash, stableID, name, bodyHash string) (int, error)
+	ListEntityVersionsByCommitFilteredPage(ctx context.Context, repoID int64, commitHash, stableID, name, bodyHash string, limit, offset int) ([]models.EntityVersion, error)
 	HasEntityVersionsForCommit(ctx context.Context, repoID int64, commitHash string) (bool, error)
 	SetEntityIndexEntries(ctx context.Context, repoID int64, commitHash string, entries []models.EntityIndexEntry) error
 	ListEntityIndexEntriesByCommit(ctx context.Context, repoID int64, commitHash, kind string, limit int) ([]models.EntityIndexEntry, error)

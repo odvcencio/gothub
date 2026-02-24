@@ -2267,6 +2267,132 @@ func TestEntityHistoryEndpointReturnsMatchesAcrossCommitHistory(t *testing.T) {
 	if len(seenStable) != 1 {
 		t.Fatalf("expected all hits to share one stable id, got %#v", seenStable)
 	}
+
+	resp, err = http.Get(ts.URL + "/api/v1/repos/owner/repo/entity-history/main?name=ProcessOrder&page=2&per_page=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("entity history page/per_page: expected 200, got %d", resp.StatusCode)
+	}
+	var pageTwo []struct {
+		CommitHash string `json:"commit_hash"`
+		StableID   string `json:"stable_id"`
+		Path       string `json:"path"`
+		Name       string `json:"name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&pageTwo); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if len(pageTwo) != 1 {
+		t.Fatalf("expected 1 paged entity history hit, got %+v", pageTwo)
+	}
+	if pageTwo[0].CommitHash != hits[1].CommitHash {
+		t.Fatalf("expected paged hit commit %q, got %+v", hits[1].CommitHash, pageTwo[0])
+	}
+	if pageTwo[0].StableID != hits[1].StableID || pageTwo[0].Path != hits[1].Path || pageTwo[0].Name != hits[1].Name {
+		t.Fatalf("expected paged hit to match baseline second hit, got %+v baseline=%+v", pageTwo[0], hits[1])
+	}
+}
+
+func TestCommitsEndpointPaginationHonorsPageAndLimit(t *testing.T) {
+	server, db := setupTestServer(t)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	token := registerAndGetToken(t, ts.URL, "owner")
+	createRepo(t, ts.URL, token, "repo", false)
+
+	repo, err := db.GetRepository(context.Background(), "owner", "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := gotstore.Open(repo.StoragePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hashes := make([]string, 0, 5)
+	var parent object.Hash
+	for i := 1; i <= 5; i++ {
+		blobHash, err := store.Objects.WriteBlob(&object.Blob{
+			Data: []byte(fmt.Sprintf("package main\n\nfunc v%d() {}\n", i)),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		treeHash, err := store.Objects.WriteTree(&object.TreeObj{
+			Entries: []object.TreeEntry{{Name: "main.go", BlobHash: blobHash}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		commit := &object.CommitObj{
+			TreeHash:  treeHash,
+			Author:    "Owner <owner@example.com>",
+			Timestamp: 1700000000 + int64(i),
+			Message:   fmt.Sprintf("commit-%d", i),
+		}
+		if parent != "" {
+			commit.Parents = []object.Hash{parent}
+		}
+		hash, err := store.Objects.WriteCommit(commit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		parent = hash
+		hashes = append(hashes, string(hash))
+	}
+	if err := store.Refs.Set("heads/main", parent); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := http.Get(ts.URL + "/api/v1/repos/owner/repo/commits/main?page=2&per_page=2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("list commits page/per_page: expected 200, got %d", resp.StatusCode)
+	}
+	var paged []struct {
+		Hash    string `json:"hash"`
+		Message string `json:"message"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&paged); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if len(paged) != 2 {
+		t.Fatalf("expected 2 paged commits, got %+v", paged)
+	}
+	if paged[0].Hash != hashes[2] || paged[0].Message != "commit-3" {
+		t.Fatalf("expected first paged commit to be commit-3, got %+v", paged[0])
+	}
+	if paged[1].Hash != hashes[1] || paged[1].Message != "commit-2" {
+		t.Fatalf("expected second paged commit to be commit-2, got %+v", paged[1])
+	}
+
+	resp, err = http.Get(ts.URL + "/api/v1/repos/owner/repo/commits/main?page=2&limit=2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("list commits with limit override: expected 200, got %d", resp.StatusCode)
+	}
+	var limited []struct {
+		Hash string `json:"hash"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&limited); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if len(limited) != 2 {
+		t.Fatalf("expected 2 commits with limit override, got %+v", limited)
+	}
+	if limited[0].Hash != hashes[2] || limited[1].Hash != hashes[1] {
+		t.Fatalf("unexpected commits for limit override page 2: %+v", limited)
+	}
 }
 
 func TestEntityHistoryEndpointRejectsInvalidLimit(t *testing.T) {

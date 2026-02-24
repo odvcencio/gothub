@@ -107,7 +107,7 @@ func TestBrowseServiceGetCommitVerifiesSignedCommit(t *testing.T) {
 		t.Fatalf("expected signature in commit info")
 	}
 
-	commits, err := browse.ListCommits(ctx, "alice", "repo", "main", 10)
+	commits, err := browse.ListCommits(ctx, "alice", "repo", "main", 10, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

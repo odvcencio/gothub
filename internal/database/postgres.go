@@ -2122,6 +2122,75 @@ func (p *PostgresDB) ListEntityVersionsByCommit(ctx context.Context, repoID int6
 	return versions, rows.Err()
 }
 
+func (p *PostgresDB) CountEntityVersionsByCommitFiltered(ctx context.Context, repoID int64, commitHash, stableID, name, bodyHash string) (int, error) {
+	query := `SELECT COUNT(*) FROM entity_versions WHERE repo_id = $1 AND commit_hash = $2`
+	args := []any{repoID, commitHash}
+	if strings.TrimSpace(stableID) != "" {
+		args = append(args, stableID)
+		query += fmt.Sprintf(` AND stable_id = $%d`, len(args))
+	}
+	if strings.TrimSpace(name) != "" {
+		args = append(args, name)
+		query += fmt.Sprintf(` AND name = $%d`, len(args))
+	}
+	if strings.TrimSpace(bodyHash) != "" {
+		args = append(args, bodyHash)
+		query += fmt.Sprintf(` AND lower(body_hash) = lower($%d)`, len(args))
+	}
+
+	var count int
+	if err := p.db.QueryRowContext(ctx, query, args...).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+func (p *PostgresDB) ListEntityVersionsByCommitFilteredPage(ctx context.Context, repoID int64, commitHash, stableID, name, bodyHash string, limit, offset int) ([]models.EntityVersion, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	query := `SELECT repo_id, stable_id, commit_hash, path, entity_hash, body_hash, name, decl_kind, receiver, created_at
+		 FROM entity_versions
+		 WHERE repo_id = $1 AND commit_hash = $2`
+	args := []any{repoID, commitHash}
+	if strings.TrimSpace(stableID) != "" {
+		args = append(args, stableID)
+		query += fmt.Sprintf(` AND stable_id = $%d`, len(args))
+	}
+	if strings.TrimSpace(name) != "" {
+		args = append(args, name)
+		query += fmt.Sprintf(` AND name = $%d`, len(args))
+	}
+	if strings.TrimSpace(bodyHash) != "" {
+		args = append(args, bodyHash)
+		query += fmt.Sprintf(` AND lower(body_hash) = lower($%d)`, len(args))
+	}
+	args = append(args, limit)
+	query += fmt.Sprintf(` ORDER BY path, entity_hash LIMIT $%d`, len(args))
+	args = append(args, offset)
+	query += fmt.Sprintf(` OFFSET $%d`, len(args))
+
+	rows, err := p.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	versions := make([]models.EntityVersion, 0, limit)
+	for rows.Next() {
+		var v models.EntityVersion
+		if err := rows.Scan(&v.RepoID, &v.StableID, &v.CommitHash, &v.Path, &v.EntityHash, &v.BodyHash, &v.Name, &v.DeclKind, &v.Receiver, &v.CreatedAt); err != nil {
+			return nil, err
+		}
+		versions = append(versions, v)
+	}
+	return versions, rows.Err()
+}
+
 func (p *PostgresDB) HasEntityVersionsForCommit(ctx context.Context, repoID int64, commitHash string) (bool, error) {
 	var one int
 	err := p.db.QueryRowContext(ctx,

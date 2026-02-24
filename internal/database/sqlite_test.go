@@ -784,6 +784,111 @@ func TestSQLiteEntityLineageStorage(t *testing.T) {
 	}
 }
 
+func TestSQLiteEntityVersionFilteredPagination(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	user := &models.User{Username: "alice", Email: "alice@example.com", PasswordHash: "x"}
+	if err := db.CreateUser(ctx, user); err != nil {
+		t.Fatal(err)
+	}
+	repo := &models.Repository{
+		OwnerUserID:   &user.ID,
+		Name:          "repo",
+		DefaultBranch: "main",
+		StoragePath:   "pending",
+	}
+	if err := db.CreateRepository(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+
+	commitHash := strings.Repeat("a", 64)
+	for _, stable := range []string{"stable-1", "stable-2"} {
+		if err := db.UpsertEntityIdentity(ctx, &models.EntityIdentity{
+			RepoID:          repo.ID,
+			StableID:        stable,
+			Name:            "ProcessOrder",
+			DeclKind:        "function",
+			FirstSeenCommit: commitHash,
+			LastSeenCommit:  commitHash,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	versions := []models.EntityVersion{
+		{
+			RepoID: repo.ID, StableID: "stable-1", CommitHash: commitHash, Path: "a.go",
+			EntityHash: strings.Repeat("1", 64), BodyHash: "deadbeef", Name: "ProcessOrder", DeclKind: "function",
+		},
+		{
+			RepoID: repo.ID, StableID: "stable-1", CommitHash: commitHash, Path: "b.go",
+			EntityHash: strings.Repeat("2", 64), BodyHash: "DEADBEEF", Name: "ProcessOrder", DeclKind: "function",
+		},
+		{
+			RepoID: repo.ID, StableID: "stable-1", CommitHash: commitHash, Path: "c.go",
+			EntityHash: strings.Repeat("3", 64), BodyHash: "cafebabe", Name: "ProcessOrder", DeclKind: "function",
+		},
+		{
+			RepoID: repo.ID, StableID: "stable-2", CommitHash: commitHash, Path: "d.go",
+			EntityHash: strings.Repeat("4", 64), BodyHash: "feedface", Name: "ValidateOrder", DeclKind: "function",
+		},
+	}
+	for i := range versions {
+		v := versions[i]
+		if err := db.SetEntityVersion(ctx, &v); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	count, err := db.CountEntityVersionsByCommitFiltered(ctx, repo.ID, commitHash, "", "ProcessOrder", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 3 {
+		t.Fatalf("expected 3 ProcessOrder versions, got %d", count)
+	}
+
+	count, err = db.CountEntityVersionsByCommitFiltered(ctx, repo.ID, commitHash, "", "ProcessOrder", "DeAdBeEf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("expected body_hash filter to match 2 rows case-insensitively, got %d", count)
+	}
+
+	paged, err := db.ListEntityVersionsByCommitFilteredPage(ctx, repo.ID, commitHash, "", "ProcessOrder", "", 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paged) != 1 {
+		t.Fatalf("expected one paged row, got %+v", paged)
+	}
+	if paged[0].Path != "b.go" {
+		t.Fatalf("expected second ProcessOrder row by path order to be b.go, got %+v", paged[0])
+	}
+
+	unfiltered, err := db.ListEntityVersionsByCommitFilteredPage(ctx, repo.ID, commitHash, "", "", "", 2, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unfiltered) != 2 {
+		t.Fatalf("expected two unfiltered paged rows, got %+v", unfiltered)
+	}
+	if unfiltered[0].Path != "b.go" || unfiltered[1].Path != "c.go" {
+		t.Fatalf("expected unfiltered page to return b.go,c.go, got %+v", unfiltered)
+	}
+}
+
 func TestSQLiteXRefGraphStorageAndQueries(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	db, err := OpenSQLite(dbPath)
