@@ -355,6 +355,29 @@ func TestForkRepoCopiesStoreAndMetadata(t *testing.T) {
 	if secondFork.Name != "repo-fork-1" {
 		t.Fatalf("expected auto-suffixed fork name repo-fork-1, got %q", secondFork.Name)
 	}
+
+	resp, err = http.Get(ts.URL + "/api/v1/repos/alice/repo/forks")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("list forks: expected 200, got %d", resp.StatusCode)
+	}
+	var forks []struct {
+		Name       string `json:"name"`
+		OwnerName  string `json:"owner_name"`
+		ParentRepo *int64 `json:"parent_repo_id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&forks); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if len(forks) != 2 {
+		t.Fatalf("expected 2 forks, got %+v", forks)
+	}
+	if forks[0].ParentRepo == nil || *forks[0].ParentRepo != sourceRepo.ID {
+		t.Fatalf("expected parent repo id %d on fork listing, got %+v", sourceRepo.ID, forks[0].ParentRepo)
+	}
 }
 
 func TestUnauthenticatedAccess(t *testing.T) {

@@ -297,6 +297,76 @@ func TestSQLiteCloneRepoMetadataCopiesRecords(t *testing.T) {
 	}
 }
 
+func TestSQLiteListRepositoryForks(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	alice := &models.User{Username: "alice", Email: "alice@example.com", PasswordHash: "x"}
+	bob := &models.User{Username: "bob", Email: "bob@example.com", PasswordHash: "x"}
+	if err := db.CreateUser(ctx, alice); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateUser(ctx, bob); err != nil {
+		t.Fatal(err)
+	}
+
+	parent := &models.Repository{
+		OwnerUserID:   &alice.ID,
+		Name:          "repo",
+		DefaultBranch: "main",
+		StoragePath:   "pending",
+	}
+	if err := db.CreateRepository(ctx, parent); err != nil {
+		t.Fatal(err)
+	}
+
+	forkA := &models.Repository{
+		OwnerUserID:   &bob.ID,
+		ParentRepoID:  &parent.ID,
+		Name:          "repo",
+		DefaultBranch: "main",
+		StoragePath:   "pending",
+	}
+	forkB := &models.Repository{
+		OwnerUserID:   &bob.ID,
+		ParentRepoID:  &parent.ID,
+		Name:          "repo-fork-1",
+		DefaultBranch: "main",
+		StoragePath:   "pending",
+	}
+	if err := db.CreateRepository(ctx, forkA); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateRepository(ctx, forkB); err != nil {
+		t.Fatal(err)
+	}
+
+	forks, err := db.ListRepositoryForks(ctx, parent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(forks) != 2 {
+		t.Fatalf("expected 2 forks, got %+v", forks)
+	}
+	for _, fork := range forks {
+		if fork.ParentRepoID == nil || *fork.ParentRepoID != parent.ID {
+			t.Fatalf("expected parent repo id %d, got %+v", parent.ID, fork.ParentRepoID)
+		}
+		if fork.OwnerName != "bob" {
+			t.Fatalf("expected owner bob, got %+v", fork)
+		}
+	}
+}
+
 func TestSQLiteCreatePullRequestAssignsUniqueNumbersConcurrently(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	db, err := OpenSQLite(dbPath)

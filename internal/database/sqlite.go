@@ -580,6 +580,31 @@ func (s *SQLiteDB) ListUserRepositories(ctx context.Context, userID int64) ([]mo
 	return repos, rows.Err()
 }
 
+func (s *SQLiteDB) ListRepositoryForks(ctx context.Context, parentRepoID int64) ([]models.Repository, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.parent_repo_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at,
+		 COALESCE(u.username, o.name, '')
+		 FROM repositories r
+		 LEFT JOIN users u ON u.id = r.owner_user_id
+		 LEFT JOIN orgs o ON o.id = r.owner_org_id
+		 WHERE r.parent_repo_id = ?
+		 ORDER BY r.created_at DESC, r.id DESC`, parentRepoID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var repos []models.Repository
+	for rows.Next() {
+		var r models.Repository
+		if err := rows.Scan(&r.ID, &r.OwnerUserID, &r.OwnerOrgID, &r.ParentRepoID, &r.Name, &r.Description, &r.DefaultBranch, &r.IsPrivate, &r.StoragePath, &r.CreatedAt, &r.OwnerName); err != nil {
+			return nil, err
+		}
+		repos = append(repos, r)
+	}
+	return repos, rows.Err()
+}
+
 func (s *SQLiteDB) DeleteRepository(ctx context.Context, id int64) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM repositories WHERE id = ?`, id)
 	return err

@@ -104,6 +104,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/repos", s.requireAuth(s.handleCreateRepo))
 	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}", s.handleGetRepo)
 	s.mux.HandleFunc("POST /api/v1/repos/{owner}/{repo}/forks", s.requireAuth(s.handleForkRepo))
+	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/forks", s.handleListRepoForks)
 	s.mux.HandleFunc("GET /api/v1/user/repos", s.requireAuth(s.handleListUserRepos))
 	s.mux.HandleFunc("DELETE /api/v1/repos/{owner}/{repo}", s.requireAuth(s.handleDeleteRepo))
 	s.mux.HandleFunc("POST /api/v1/repos/{owner}/{repo}/collaborators", s.requireAuth(s.handleAddCollaborator))

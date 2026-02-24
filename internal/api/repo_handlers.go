@@ -100,3 +100,17 @@ func (s *Server) handleForkRepo(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonResponse(w, http.StatusCreated, fork)
 }
+
+func (s *Server) handleListRepoForks(w http.ResponseWriter, r *http.Request) {
+	sourceRepo, ok := s.authorizeRepoRequest(w, r, false)
+	if !ok {
+		return
+	}
+	forks, err := s.repoSvc.ListForks(r.Context(), sourceRepo.ID)
+	if err != nil {
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	page, perPage := parsePagination(r, 30, 200)
+	jsonResponse(w, http.StatusOK, paginateSlice(forks, page, perPage))
+}

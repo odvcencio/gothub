@@ -31,6 +31,7 @@ type DB interface {
 	GetRepository(ctx context.Context, ownerName, repoName string) (*models.Repository, error)
 	GetRepositoryByID(ctx context.Context, id int64) (*models.Repository, error)
 	ListUserRepositories(ctx context.Context, userID int64) ([]models.Repository, error)
+	ListRepositoryForks(ctx context.Context, parentRepoID int64) ([]models.Repository, error)
 	DeleteRepository(ctx context.Context, id int64) error
 
 	// Stars

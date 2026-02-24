@@ -56,6 +56,13 @@ export const createRepo = (name: string, description: string, isPrivate: boolean
   request<any>('POST', '/repos', { name, description, private: isPrivate });
 export const forkRepo = (owner: string, repo: string, name?: string) =>
   request<any>('POST', `/repos/${owner}/${repo}/forks`, name ? { name } : undefined);
+export const listRepoForks = (owner: string, repo: string, page?: number, perPage?: number) => {
+  const query = new URLSearchParams();
+  if (page && page > 0) query.set('page', String(page));
+  if (perPage && perPage > 0) query.set('per_page', String(perPage));
+  const suffix = query.toString();
+  return request<any[]>('GET', `/repos/${owner}/${repo}/forks${suffix ? '?' + suffix : ''}`);
+};
 export const getRepo = (owner: string, repo: string) =>
   request<any>('GET', `/repos/${owner}/${repo}`);
 export const listUserRepos = () => request<any[]>('GET', '/user/repos');

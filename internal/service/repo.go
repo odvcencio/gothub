@@ -144,6 +144,10 @@ func (s *RepoService) List(ctx context.Context, userID int64) ([]models.Reposito
 	return s.db.ListUserRepositories(ctx, userID)
 }
 
+func (s *RepoService) ListForks(ctx context.Context, parentRepoID int64) ([]models.Repository, error) {
+	return s.db.ListRepositoryForks(ctx, parentRepoID)
+}
+
 func (s *RepoService) Delete(ctx context.Context, id int64) error {
 	return s.db.DeleteRepository(ctx, id)
 }
