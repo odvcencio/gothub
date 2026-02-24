@@ -1,4 +1,5 @@
-import { useMemo, useState } from 'preact/hooks';
+import type { JSX } from 'preact';
+import { useMemo, useRef, useState } from 'preact/hooks';
 import { type CallGraphEdge, type SymbolResult, getCallGraph } from '../api/client';
 
 interface Props {
@@ -51,12 +52,16 @@ const HORIZONTAL_GAP = 240;
 const VERTICAL_GAP = 84;
 const PADDING_X = 92;
 const PADDING_Y = 68;
+const MIN_GRAPH_SCALE = 0.6;
+const MAX_GRAPH_SCALE = 1.8;
+const GRAPH_SCALE_STEP = 0.1;
 
 interface GraphNode {
   id: string;
   name: string;
   file: string;
   kind?: string;
+  line?: number;
 }
 
 interface GraphEdge {
@@ -77,6 +82,15 @@ interface GraphLayout {
   nodes: PositionedNode[];
 }
 
+interface PanState {
+  pointerId: number;
+  startX: number;
+  startY: number;
+  scrollLeft: number;
+  scrollTop: number;
+  moved: boolean;
+}
+
 function kindColor(kind?: string): string {
   if (!kind) return COLORS.muted;
   const lower = kind.toLowerCase();
@@ -92,6 +106,23 @@ function truncateLabel(label: string, max = 22): string {
   return `${label.slice(0, max - 1)}\u2026`;
 }
 
+function validLine(line: unknown): number | undefined {
+  if (typeof line !== 'number' || !Number.isFinite(line) || line <= 0) return undefined;
+  return Math.floor(line);
+}
+
+function buildBlobHref(
+  owner: string | undefined,
+  repo: string | undefined,
+  gitRef: string | undefined,
+  file: string,
+  line?: number,
+): string {
+  if (!owner || !repo || !gitRef || !file) return '#';
+  const base = `/${owner}/${repo}/blob/${gitRef}/${file}`;
+  return line && line > 0 ? `${base}#L${line}` : base;
+}
+
 function buildGraph(definitions: SymbolResult[], edges: CallGraphEdge[]) {
   const nodesById = new Map<string, GraphNode>();
 
@@ -101,6 +132,7 @@ function buildGraph(definitions: SymbolResult[], edges: CallGraphEdge[]) {
       name: def.name,
       file: def.file,
       kind: def.kind,
+      line: validLine(def.start_line),
     });
   }
 
@@ -326,9 +358,14 @@ export function CallGraphView({ owner, repo, ref: gitRef }: Props) {
   const [definitions, setDefinitions] = useState<SymbolResult[]>([]);
   const [edges, setEdges] = useState<CallGraphEdge[]>([]);
   const [focusedNodeId, setFocusedNodeId] = useState<string | null>(null);
+  const [resultView, setResultView] = useState<'graph' | 'table'>('graph');
+  const [graphScale, setGraphScale] = useState(1);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [searched, setSearched] = useState(false);
+  const graphViewportRef = useRef<HTMLDivElement | null>(null);
+  const panStateRef = useRef<PanState | null>(null);
+  const suppressNodeClickRef = useRef(false);
 
   const graphData = useMemo(() => buildGraph(definitions, edges), [definitions, edges]);
   const layout = useMemo(
@@ -345,27 +382,106 @@ export function CallGraphView({ owner, repo, ref: gitRef }: Props) {
   const focusInfo = useMemo(() => {
     const inbound = new Set<string>();
     const outbound = new Set<string>();
-    const edgeIds = new Set<string>();
 
     if (!focusedNodeId) {
-      return { inbound, outbound, edgeIds };
+      return { inbound, outbound };
     }
 
     for (const edge of graphData.edges) {
       if (edge.target === focusedNodeId) {
         inbound.add(edge.source);
-        edgeIds.add(edge.id);
       }
       if (edge.source === focusedNodeId) {
         outbound.add(edge.target);
-        edgeIds.add(edge.id);
       }
     }
 
-    return { inbound, outbound, edgeIds };
+    return { inbound, outbound };
   }, [focusedNodeId, graphData.edges]);
 
   const hasResults = definitions.length > 0 || edges.length > 0;
+  const graphAvailable = layout.nodes.length > 0 && graphData.edges.length > 0;
+  const showGraph = resultView === 'graph' && graphAvailable;
+  const showTable = resultView === 'table' || !graphAvailable;
+
+  const clampGraphScale = (next: number) =>
+    Math.max(MIN_GRAPH_SCALE, Math.min(MAX_GRAPH_SCALE, Math.round(next * 100) / 100));
+
+  const zoomGraph = (delta: number) => {
+    setGraphScale((prev) => clampGraphScale(prev + delta));
+  };
+
+  const resetGraphViewport = () => {
+    setGraphScale(1);
+    const viewport = graphViewportRef.current;
+    if (viewport) viewport.scrollTo({ left: 0, top: 0 });
+  };
+
+  const handleGraphPointerDown = (e: JSX.TargetedPointerEvent<HTMLDivElement>) => {
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+
+    const target = e.target as Element | null;
+    if (target?.closest('a[data-callgraph-node="true"]')) return;
+
+    const viewport = e.currentTarget as HTMLDivElement;
+    suppressNodeClickRef.current = false;
+    panStateRef.current = {
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startY: e.clientY,
+      scrollLeft: viewport.scrollLeft,
+      scrollTop: viewport.scrollTop,
+      moved: false,
+    };
+
+    viewport.style.cursor = 'grabbing';
+    viewport.style.userSelect = 'none';
+    viewport.setPointerCapture(e.pointerId);
+  };
+
+  const handleGraphPointerMove = (e: JSX.TargetedPointerEvent<HTMLDivElement>) => {
+    const pan = panStateRef.current;
+    if (!pan || pan.pointerId !== e.pointerId) return;
+
+    const viewport = e.currentTarget as HTMLDivElement;
+    const deltaX = e.clientX - pan.startX;
+    const deltaY = e.clientY - pan.startY;
+
+    if (!pan.moved && (Math.abs(deltaX) > 2 || Math.abs(deltaY) > 2)) {
+      pan.moved = true;
+    }
+
+    viewport.scrollLeft = pan.scrollLeft - deltaX;
+    viewport.scrollTop = pan.scrollTop - deltaY;
+  };
+
+  const finishGraphPan = (e: JSX.TargetedPointerEvent<HTMLDivElement>) => {
+    const pan = panStateRef.current;
+    if (!pan || pan.pointerId !== e.pointerId) return;
+
+    const viewport = e.currentTarget as HTMLDivElement;
+    if (viewport.hasPointerCapture(e.pointerId)) {
+      viewport.releasePointerCapture(e.pointerId);
+    }
+    viewport.style.cursor = 'grab';
+    viewport.style.userSelect = '';
+
+    if (pan.moved) suppressNodeClickRef.current = true;
+    panStateRef.current = null;
+  };
+
+  const handleNodeClick = (e: JSX.TargetedMouseEvent<Element>, node: PositionedNode) => {
+    if (suppressNodeClickRef.current) {
+      suppressNodeClickRef.current = false;
+      e.preventDefault();
+      return;
+    }
+
+    if (e.shiftKey) {
+      e.preventDefault();
+      setFocusedNodeId((prev) => (prev === node.id ? null : node.id));
+    }
+  };
 
   const doSearch = (e?: Event) => {
     if (e) e.preventDefault();
@@ -383,12 +499,16 @@ export function CallGraphView({ owner, repo, ref: gitRef }: Props) {
         setDefinitions(nextDefinitions);
         setEdges(nextEdges);
         setFocusedNodeId(defaultFocusNodeId(symbol, nextDefinitions, nextEdges));
+        setResultView(nextEdges.length > 0 ? 'graph' : 'table');
+        setGraphScale(1);
       })
       .catch((err) => {
         setError(err.message || 'Failed to load call graph');
         setDefinitions([]);
         setEdges([]);
         setFocusedNodeId(null);
+        setResultView('table');
+        setGraphScale(1);
       })
       .finally(() => setLoading(false));
   };
@@ -398,6 +518,8 @@ export function CallGraphView({ owner, repo, ref: gitRef }: Props) {
   };
 
   const clearFocus = () => setFocusedNodeId(null);
+  const scaledGraphWidth = Math.max(560, Math.round(layout.width * graphScale));
+  const scaledGraphHeight = Math.max(300, Math.round(layout.height * graphScale));
 
   return (
     <div style={{ color: COLORS.text }}>
@@ -478,7 +600,7 @@ export function CallGraphView({ owner, repo, ref: gitRef }: Props) {
 
           <span style={{ color: COLORS.muted, fontSize: '13px' }}>Depth: {depth}</span>
 
-          {focusedNodeId && (
+          {showGraph && focusedNodeId && (
             <button
               type="button"
               onClick={clearFocus}
@@ -529,269 +651,420 @@ export function CallGraphView({ owner, repo, ref: gitRef }: Props) {
         <div>
           <div
             style={{
-              border: `1px solid ${COLORS.border}`,
-              borderRadius: '10px',
-              background: COLORS.surface,
-              overflowX: 'auto',
-              marginBottom: '14px',
-            }}
-          >
-            <svg
-              width={layout.width}
-              height={layout.height}
-              viewBox={`0 0 ${layout.width} ${layout.height}`}
-              role="img"
-              aria-label="Interactive call graph"
-              style={{ display: 'block', minWidth: '100%', background: COLORS.bg }}
-            >
-              <defs>
-                <marker
-                  id="callgraph-arrow-default"
-                  viewBox="0 0 10 10"
-                  refX="9"
-                  refY="5"
-                  markerWidth="8"
-                  markerHeight="8"
-                  orient="auto-start-reverse"
-                >
-                  <path d="M 0 0 L 10 5 L 0 10 z" fill={COLORS.edgeDefault} />
-                </marker>
-                <marker
-                  id="callgraph-arrow-dim"
-                  viewBox="0 0 10 10"
-                  refX="9"
-                  refY="5"
-                  markerWidth="8"
-                  markerHeight="8"
-                  orient="auto-start-reverse"
-                >
-                  <path d="M 0 0 L 10 5 L 0 10 z" fill={COLORS.edgeDim} />
-                </marker>
-                <marker
-                  id="callgraph-arrow-inbound"
-                  viewBox="0 0 10 10"
-                  refX="9"
-                  refY="5"
-                  markerWidth="8"
-                  markerHeight="8"
-                  orient="auto-start-reverse"
-                >
-                  <path d="M 0 0 L 10 5 L 0 10 z" fill={COLORS.edgeInbound} />
-                </marker>
-                <marker
-                  id="callgraph-arrow-outbound"
-                  viewBox="0 0 10 10"
-                  refX="9"
-                  refY="5"
-                  markerWidth="8"
-                  markerHeight="8"
-                  orient="auto-start-reverse"
-                >
-                  <path d="M 0 0 L 10 5 L 0 10 z" fill={COLORS.edgeOutbound} />
-                </marker>
-              </defs>
-
-              {graphData.edges.map((edge) => {
-                const source = nodesById.get(edge.source);
-                const target = nodesById.get(edge.target);
-                if (!source || !target) return null;
-
-                let styleKind: 'default' | 'inbound' | 'outbound' | 'dim' = 'default';
-                if (focusedNodeId) {
-                  if (edge.source === focusedNodeId) styleKind = 'outbound';
-                  else if (edge.target === focusedNodeId) styleKind = 'inbound';
-                  else styleKind = 'dim';
-                }
-
-                const strokeColor =
-                  styleKind === 'outbound'
-                    ? COLORS.edgeOutbound
-                    : styleKind === 'inbound'
-                      ? COLORS.edgeInbound
-                      : styleKind === 'dim'
-                        ? COLORS.edgeDim
-                        : COLORS.edgeDefault;
-
-                return (
-                  <g key={edge.id}>
-                    <path
-                      d={edgePath(source, target)}
-                      fill="none"
-                      stroke={strokeColor}
-                      strokeWidth={styleKind === 'dim' ? 1.2 : 1.8}
-                      opacity={styleKind === 'dim' ? 0.35 : 0.9}
-                      markerEnd={`url(#${markerIdForEdge(styleKind)})`}
-                    />
-                    {edge.count && edge.count > 1 && (
-                      <text
-                        x={(source.x + target.x) / 2}
-                        y={(source.y + target.y) / 2 - 6}
-                        textAnchor="middle"
-                        fontSize="10"
-                        fill={COLORS.muted}
-                      >
-                        {edge.count}x
-                      </text>
-                    )}
-                  </g>
-                );
-              })}
-
-              {layout.nodes.map((node) => {
-                const isFocused = focusedNodeId === node.id;
-                const isInbound = focusInfo.inbound.has(node.id);
-                const isOutbound = focusInfo.outbound.has(node.id);
-                const isRelated = isFocused || isInbound || isOutbound;
-                const shouldDim = focusedNodeId != null && !isRelated;
-
-                const fill = isFocused
-                  ? COLORS.active
-                  : isRelated
-                    ? COLORS.nodeRelated
-                    : shouldDim
-                      ? COLORS.nodeDim
-                      : COLORS.nodeFill;
-
-                const stroke = isFocused ? '#9ecbff' : COLORS.nodeStroke;
-
-                return (
-                  <g
-                    key={node.id}
-                    transform={`translate(${node.x}, ${node.y})`}
-                    role="button"
-                    tabIndex={0}
-                    style={{ cursor: 'pointer' }}
-                    onClick={() => setFocusedNodeId((prev) => (prev === node.id ? null : node.id))}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' || e.key === ' ') {
-                        e.preventDefault();
-                        setFocusedNodeId((prev) => (prev === node.id ? null : node.id));
-                      }
-                    }}
-                  >
-                    <title>{`${node.name}\n${node.file}`}</title>
-                    <rect
-                      x={-NODE_WIDTH / 2}
-                      y={-NODE_HEIGHT / 2}
-                      width={NODE_WIDTH}
-                      height={NODE_HEIGHT}
-                      rx={10}
-                      ry={10}
-                      fill={fill}
-                      stroke={stroke}
-                      strokeWidth={isFocused ? 2.2 : 1.2}
-                      opacity={shouldDim ? 0.55 : 1}
-                    />
-                    <text
-                      x="0"
-                      y="-2"
-                      textAnchor="middle"
-                      fill={COLORS.heading}
-                      fontSize="12"
-                      fontWeight="600"
-                    >
-                      {truncateLabel(node.name)}
-                    </text>
-                    <text
-                      x="0"
-                      y="13"
-                      textAnchor="middle"
-                      fill={kindColor(node.kind)}
-                      fontSize="10"
-                    >
-                      {truncateLabel(node.file, 24)}
-                    </text>
-                  </g>
-                );
-              })}
-            </svg>
-          </div>
-
-          <div
-            style={{
               display: 'flex',
-              gap: '14px',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: '12px',
               flexWrap: 'wrap',
-              fontSize: '12px',
-              marginBottom: '16px',
-              color: COLORS.muted,
+              marginBottom: '10px',
             }}
           >
-            <span>
-              <span style={{ color: COLORS.edgeOutbound, fontWeight: 700 }}>Outbound</span> edges from focused node
-            </span>
-            <span>
-              <span style={{ color: COLORS.edgeInbound, fontWeight: 700 }}>Inbound</span> edges into focused node
-            </span>
-            <span>Click a node to focus or unfocus</span>
-          </div>
-
-          <div
-            style={{
-              border: `1px solid ${COLORS.border}`,
-              borderRadius: '8px',
-              padding: '12px 14px',
-              background: COLORS.surface,
-            }}
-          >
-            <h2 style={{ fontSize: '15px', color: COLORS.heading, margin: '0 0 8px 0' }}>Text fallback</h2>
-
-            {definitions.length > 0 && (
-              <div style={{ marginBottom: '10px' }}>
-                <div style={{ color: COLORS.muted, fontSize: '12px', marginBottom: '4px' }}>
-                  Definitions ({definitions.length})
-                </div>
-                <ul style={{ margin: 0, paddingLeft: '18px' }}>
-                  {definitions.map((def, idx) => (
-                    <li key={def.id || `${def.name}-${def.file}-${idx}`} style={{ marginBottom: '2px' }}>
-                      <a
-                        href={`/${owner}/${repo}/blob/${gitRef}/${def.file}`}
-                        style={{ color: COLORS.link, textDecoration: 'none' }}
-                      >
-                        {def.name}
-                      </a>{' '}
-                      <span style={{ color: COLORS.muted }}>({def.kind}, {def.file})</span>
-                    </li>
-                  ))}
-                </ul>
+            {graphAvailable ? (
+              <div style={{ display: 'flex', gap: '4px' }}>
+                <button
+                  type="button"
+                  onClick={() => setResultView('graph')}
+                  style={{
+                    background: resultView === 'graph' ? COLORS.active : COLORS.surface,
+                    color: COLORS.text,
+                    border: `1px solid ${COLORS.border}`,
+                    borderRadius: '6px 0 0 6px',
+                    padding: '6px 12px',
+                    cursor: 'pointer',
+                    fontSize: '12px',
+                  }}
+                >
+                  Graph view
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setResultView('table')}
+                  style={{
+                    background: resultView === 'table' ? COLORS.active : COLORS.surface,
+                    color: COLORS.text,
+                    border: `1px solid ${COLORS.border}`,
+                    borderRadius: '0 6px 6px 0',
+                    padding: '6px 12px',
+                    cursor: 'pointer',
+                    fontSize: '12px',
+                  }}
+                >
+                  Table view
+                </button>
               </div>
+            ) : (
+              <span style={{ color: COLORS.muted, fontSize: '12px' }}>
+                Graph data is missing for this result. Showing table fallback.
+              </span>
             )}
 
-            {graphData.edges.length > 0 && (
-              <div>
-                <div style={{ color: COLORS.muted, fontSize: '12px', marginBottom: '4px' }}>
-                  Directed edges ({graphData.edges.length})
-                </div>
-                <ul style={{ margin: 0, paddingLeft: '18px' }}>
-                  {graphData.edges.map((edge, idx) => {
+            {showGraph && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <button
+                  type="button"
+                  onClick={() => zoomGraph(-GRAPH_SCALE_STEP)}
+                  disabled={graphScale <= MIN_GRAPH_SCALE}
+                  style={{
+                    background: COLORS.surface,
+                    color: COLORS.text,
+                    border: `1px solid ${COLORS.border}`,
+                    borderRadius: '6px',
+                    padding: '4px 8px',
+                    cursor: graphScale <= MIN_GRAPH_SCALE ? 'not-allowed' : 'pointer',
+                    opacity: graphScale <= MIN_GRAPH_SCALE ? 0.5 : 1,
+                  }}
+                  aria-label="Zoom out graph"
+                >
+                  -
+                </button>
+                <span style={{ color: COLORS.muted, fontSize: '12px', minWidth: '44px', textAlign: 'center' }}>
+                  {Math.round(graphScale * 100)}%
+                </span>
+                <button
+                  type="button"
+                  onClick={() => zoomGraph(GRAPH_SCALE_STEP)}
+                  disabled={graphScale >= MAX_GRAPH_SCALE}
+                  style={{
+                    background: COLORS.surface,
+                    color: COLORS.text,
+                    border: `1px solid ${COLORS.border}`,
+                    borderRadius: '6px',
+                    padding: '4px 8px',
+                    cursor: graphScale >= MAX_GRAPH_SCALE ? 'not-allowed' : 'pointer',
+                    opacity: graphScale >= MAX_GRAPH_SCALE ? 0.5 : 1,
+                  }}
+                  aria-label="Zoom in graph"
+                >
+                  +
+                </button>
+                <button
+                  type="button"
+                  onClick={resetGraphViewport}
+                  style={{
+                    background: COLORS.surface,
+                    color: COLORS.text,
+                    border: `1px solid ${COLORS.border}`,
+                    borderRadius: '6px',
+                    padding: '4px 8px',
+                    cursor: 'pointer',
+                    fontSize: '12px',
+                  }}
+                >
+                  Reset
+                </button>
+              </div>
+            )}
+          </div>
+
+          {showGraph && (
+            <>
+              <div
+                ref={graphViewportRef}
+                onPointerDown={handleGraphPointerDown}
+                onPointerMove={handleGraphPointerMove}
+                onPointerUp={finishGraphPan}
+                onPointerCancel={finishGraphPan}
+                style={{
+                  border: `1px solid ${COLORS.border}`,
+                  borderRadius: '10px',
+                  background: COLORS.surface,
+                  overflow: 'auto',
+                  maxHeight: '70vh',
+                  marginBottom: '14px',
+                  cursor: 'grab',
+                  touchAction: 'none',
+                }}
+              >
+                <svg
+                  width={scaledGraphWidth}
+                  height={scaledGraphHeight}
+                  viewBox={`0 0 ${layout.width} ${layout.height}`}
+                  role="img"
+                  aria-label="Interactive call graph"
+                  style={{ display: 'block', background: COLORS.bg }}
+                >
+                  <defs>
+                    <marker
+                      id="callgraph-arrow-default"
+                      viewBox="0 0 10 10"
+                      refX="9"
+                      refY="5"
+                      markerWidth="8"
+                      markerHeight="8"
+                      orient="auto-start-reverse"
+                    >
+                      <path d="M 0 0 L 10 5 L 0 10 z" fill={COLORS.edgeDefault} />
+                    </marker>
+                    <marker
+                      id="callgraph-arrow-dim"
+                      viewBox="0 0 10 10"
+                      refX="9"
+                      refY="5"
+                      markerWidth="8"
+                      markerHeight="8"
+                      orient="auto-start-reverse"
+                    >
+                      <path d="M 0 0 L 10 5 L 0 10 z" fill={COLORS.edgeDim} />
+                    </marker>
+                    <marker
+                      id="callgraph-arrow-inbound"
+                      viewBox="0 0 10 10"
+                      refX="9"
+                      refY="5"
+                      markerWidth="8"
+                      markerHeight="8"
+                      orient="auto-start-reverse"
+                    >
+                      <path d="M 0 0 L 10 5 L 0 10 z" fill={COLORS.edgeInbound} />
+                    </marker>
+                    <marker
+                      id="callgraph-arrow-outbound"
+                      viewBox="0 0 10 10"
+                      refX="9"
+                      refY="5"
+                      markerWidth="8"
+                      markerHeight="8"
+                      orient="auto-start-reverse"
+                    >
+                      <path d="M 0 0 L 10 5 L 0 10 z" fill={COLORS.edgeOutbound} />
+                    </marker>
+                  </defs>
+
+                  {graphData.edges.map((edge) => {
                     const source = nodesById.get(edge.source);
                     const target = nodesById.get(edge.target);
                     if (!source || !target) return null;
 
+                    let styleKind: 'default' | 'inbound' | 'outbound' | 'dim' = 'default';
+                    if (focusedNodeId) {
+                      if (edge.source === focusedNodeId) styleKind = 'outbound';
+                      else if (edge.target === focusedNodeId) styleKind = 'inbound';
+                      else styleKind = 'dim';
+                    }
+
+                    const strokeColor =
+                      styleKind === 'outbound'
+                        ? COLORS.edgeOutbound
+                        : styleKind === 'inbound'
+                          ? COLORS.edgeInbound
+                          : styleKind === 'dim'
+                            ? COLORS.edgeDim
+                            : COLORS.edgeDefault;
+
                     return (
-                      <li key={`${edge.id}-text-${idx}`} style={{ marginBottom: '2px' }}>
-                        <a
-                          href={`/${owner}/${repo}/blob/${gitRef}/${source.file}`}
-                          style={{ color: COLORS.link, textDecoration: 'none' }}
-                        >
-                          {source.name}
-                        </a>{' '}
-                        <span style={{ color: COLORS.muted }}>({source.file})</span>
-                        <span style={{ color: COLORS.muted }}> {'\u2192'} </span>
-                        <a
-                          href={`/${owner}/${repo}/blob/${gitRef}/${target.file}`}
-                          style={{ color: COLORS.link, textDecoration: 'none' }}
-                        >
-                          {target.name}
-                        </a>{' '}
-                        <span style={{ color: COLORS.muted }}>({target.file})</span>
-                      </li>
+                      <g key={edge.id}>
+                        <path
+                          d={edgePath(source, target)}
+                          fill="none"
+                          stroke={strokeColor}
+                          strokeWidth={styleKind === 'dim' ? 1.2 : 1.8}
+                          opacity={styleKind === 'dim' ? 0.35 : 0.9}
+                          markerEnd={`url(#${markerIdForEdge(styleKind)})`}
+                        />
+                        {edge.count && edge.count > 1 && (
+                          <text
+                            x={(source.x + target.x) / 2}
+                            y={(source.y + target.y) / 2 - 6}
+                            textAnchor="middle"
+                            fontSize="10"
+                            fill={COLORS.muted}
+                          >
+                            {edge.count}x
+                          </text>
+                        )}
+                      </g>
                     );
                   })}
-                </ul>
+
+                  {layout.nodes.map((node) => {
+                    const isFocused = focusedNodeId === node.id;
+                    const isInbound = focusInfo.inbound.has(node.id);
+                    const isOutbound = focusInfo.outbound.has(node.id);
+                    const isRelated = isFocused || isInbound || isOutbound;
+                    const shouldDim = focusedNodeId != null && !isRelated;
+
+                    const fill = isFocused
+                      ? COLORS.active
+                      : isRelated
+                        ? COLORS.nodeRelated
+                        : shouldDim
+                          ? COLORS.nodeDim
+                          : COLORS.nodeFill;
+
+                    const stroke = isFocused ? '#9ecbff' : COLORS.nodeStroke;
+                    const href = buildBlobHref(owner, repo, gitRef, node.file, node.line);
+
+                    return (
+                      <a
+                        key={node.id}
+                        href={href}
+                        data-callgraph-node="true"
+                        onClick={(e) => handleNodeClick(e, node)}
+                      >
+                        <g transform={`translate(${node.x}, ${node.y})`} style={{ cursor: 'pointer' }}>
+                          <title>{`${node.name}\n${node.file}`}</title>
+                          <rect
+                            x={-NODE_WIDTH / 2}
+                            y={-NODE_HEIGHT / 2}
+                            width={NODE_WIDTH}
+                            height={NODE_HEIGHT}
+                            rx={10}
+                            ry={10}
+                            fill={fill}
+                            stroke={stroke}
+                            strokeWidth={isFocused ? 2.2 : 1.2}
+                            opacity={shouldDim ? 0.55 : 1}
+                          />
+                          <text
+                            x="0"
+                            y="-2"
+                            textAnchor="middle"
+                            fill={COLORS.heading}
+                            fontSize="12"
+                            fontWeight="600"
+                          >
+                            {truncateLabel(node.name)}
+                          </text>
+                          <text
+                            x="0"
+                            y="13"
+                            textAnchor="middle"
+                            fill={kindColor(node.kind)}
+                            fontSize="10"
+                          >
+                            {truncateLabel(node.file, 24)}
+                          </text>
+                        </g>
+                      </a>
+                    );
+                  })}
+                </svg>
               </div>
-            )}
-          </div>
+
+              <div
+                style={{
+                  display: 'flex',
+                  gap: '14px',
+                  flexWrap: 'wrap',
+                  fontSize: '12px',
+                  marginBottom: '16px',
+                  color: COLORS.muted,
+                }}
+              >
+                <span>
+                  <span style={{ color: COLORS.edgeOutbound, fontWeight: 700 }}>Outbound</span> edges from focused node
+                </span>
+                <span>
+                  <span style={{ color: COLORS.edgeInbound, fontWeight: 700 }}>Inbound</span> edges into focused node
+                </span>
+                <span>Drag background to pan. Click nodes to open file location.</span>
+                <span>Hold Shift and click a node to focus or unfocus.</span>
+              </div>
+            </>
+          )}
+
+          {showTable && (
+            <div
+              style={{
+                border: `1px solid ${COLORS.border}`,
+                borderRadius: '8px',
+                padding: '12px 14px',
+                background: COLORS.surface,
+              }}
+            >
+              <h2 style={{ fontSize: '15px', color: COLORS.heading, margin: '0 0 8px 0' }}>
+                Table fallback
+              </h2>
+
+              {definitions.length > 0 && (
+                <div style={{ marginBottom: graphData.edges.length > 0 ? '12px' : 0, overflowX: 'auto' }}>
+                  <div style={{ color: COLORS.muted, fontSize: '12px', marginBottom: '6px' }}>
+                    Definitions ({definitions.length})
+                  </div>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+                    <thead>
+                      <tr>
+                        <th style={{ textAlign: 'left', borderBottom: `1px solid ${COLORS.border}`, padding: '6px' }}>Symbol</th>
+                        <th style={{ textAlign: 'left', borderBottom: `1px solid ${COLORS.border}`, padding: '6px' }}>Kind</th>
+                        <th style={{ textAlign: 'left', borderBottom: `1px solid ${COLORS.border}`, padding: '6px' }}>Location</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {definitions.map((def, idx) => (
+                        <tr key={def.id || `${def.name}-${def.file}-${idx}`}>
+                          <td style={{ padding: '6px', borderBottom: `1px solid ${COLORS.border}` }}>{def.name}</td>
+                          <td style={{ padding: '6px', borderBottom: `1px solid ${COLORS.border}`, color: kindColor(def.kind) }}>
+                            {def.kind || '-'}
+                          </td>
+                          <td style={{ padding: '6px', borderBottom: `1px solid ${COLORS.border}` }}>
+                            <a
+                              href={buildBlobHref(owner, repo, gitRef, def.file, validLine(def.start_line))}
+                              style={{ color: COLORS.link, textDecoration: 'none' }}
+                            >
+                              {def.file}
+                            </a>
+                            <span style={{ color: COLORS.muted }}>
+                              {validLine(def.start_line) ? `:L${validLine(def.start_line)}` : ''}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {graphData.edges.length > 0 && (
+                <div style={{ overflowX: 'auto' }}>
+                  <div style={{ color: COLORS.muted, fontSize: '12px', marginBottom: '6px' }}>
+                    Directed edges ({graphData.edges.length})
+                  </div>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+                    <thead>
+                      <tr>
+                        <th style={{ textAlign: 'left', borderBottom: `1px solid ${COLORS.border}`, padding: '6px' }}>Caller</th>
+                        <th style={{ textAlign: 'center', borderBottom: `1px solid ${COLORS.border}`, padding: '6px', width: '40px' }}>{'\u2192'}</th>
+                        <th style={{ textAlign: 'left', borderBottom: `1px solid ${COLORS.border}`, padding: '6px' }}>Callee</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {graphData.edges.map((edge, idx) => {
+                        const source = nodesById.get(edge.source);
+                        const target = nodesById.get(edge.target);
+                        if (!source || !target) return null;
+
+                        return (
+                          <tr key={`${edge.id}-table-${idx}`}>
+                            <td style={{ padding: '6px', borderBottom: `1px solid ${COLORS.border}` }}>
+                              <a
+                                href={buildBlobHref(owner, repo, gitRef, source.file, source.line)}
+                                style={{ color: COLORS.link, textDecoration: 'none' }}
+                              >
+                                {source.name}
+                              </a>
+                              <span style={{ color: COLORS.muted }}> ({source.file})</span>
+                            </td>
+                            <td style={{ padding: '6px', borderBottom: `1px solid ${COLORS.border}`, color: COLORS.muted, textAlign: 'center' }}>
+                              {'\u2192'}
+                            </td>
+                            <td style={{ padding: '6px', borderBottom: `1px solid ${COLORS.border}` }}>
+                              <a
+                                href={buildBlobHref(owner, repo, gitRef, target.file, target.line)}
+                                style={{ color: COLORS.link, textDecoration: 'none' }}
+                              >
+                                {target.name}
+                              </a>
+                              <span style={{ color: COLORS.muted }}> ({target.file})</span>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
