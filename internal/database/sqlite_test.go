@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/odvcencio/gothub/internal/models"
 )
@@ -45,6 +46,45 @@ func TestSQLiteGetRepositoryFallsBackToOrgOwner(t *testing.T) {
 	}
 	if got.OwnerOrgID == nil || *got.OwnerOrgID != org.ID {
 		t.Fatalf("expected owner org id %d, got %#v", org.ID, got.OwnerOrgID)
+	}
+}
+
+func TestSQLiteGetRepositoryByIDSupportsOrgOwner(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	org := &models.Org{Name: "acme", DisplayName: "Acme Corp"}
+	if err := db.CreateOrg(ctx, org); err != nil {
+		t.Fatal(err)
+	}
+
+	repo := &models.Repository{
+		OwnerOrgID:    &org.ID,
+		Name:          "platform",
+		Description:   "",
+		DefaultBranch: "main",
+		IsPrivate:     false,
+		StoragePath:   "pending",
+	}
+	if err := db.CreateRepository(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := db.GetRepositoryByID(ctx, repo.ID)
+	if err != nil {
+		t.Fatalf("expected org-owned repository by ID lookup to work: %v", err)
+	}
+	if got.OwnerName != "acme" {
+		t.Fatalf("expected owner name acme, got %q", got.OwnerName)
 	}
 }
 
@@ -170,5 +210,407 @@ func TestSQLiteCreatePullRequestAssignsUniqueNumbersConcurrently(t *testing.T) {
 		if !seen[i] {
 			t.Fatalf("missing PR number %d", i)
 		}
+	}
+}
+
+func TestSQLiteRepoStarsLifecycle(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	alice := &models.User{Username: "alice", Email: "alice@example.com", PasswordHash: "x"}
+	if err := db.CreateUser(ctx, alice); err != nil {
+		t.Fatal(err)
+	}
+	bob := &models.User{Username: "bob", Email: "bob@example.com", PasswordHash: "x"}
+	if err := db.CreateUser(ctx, bob); err != nil {
+		t.Fatal(err)
+	}
+
+	repo := &models.Repository{
+		OwnerUserID:   &alice.ID,
+		Name:          "repo",
+		DefaultBranch: "main",
+		StoragePath:   "pending",
+	}
+	if err := db.CreateRepository(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := db.AddRepoStar(ctx, repo.ID, bob.ID); err != nil {
+		t.Fatal(err)
+	}
+	starred, err := db.IsRepoStarred(ctx, repo.ID, bob.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !starred {
+		t.Fatal("expected repo to be starred by bob")
+	}
+
+	count, err := db.CountRepoStars(ctx, repo.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 star, got %d", count)
+	}
+
+	stargazers, err := db.ListRepoStargazers(ctx, repo.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stargazers) != 1 || stargazers[0].Username != "bob" {
+		t.Fatalf("unexpected stargazers: %+v", stargazers)
+	}
+
+	starredRepos, err := db.ListUserStarredRepositories(ctx, bob.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(starredRepos) != 1 || starredRepos[0].Name != "repo" || starredRepos[0].OwnerName != "alice" {
+		t.Fatalf("unexpected starred repositories: %+v", starredRepos)
+	}
+
+	if err := db.RemoveRepoStar(ctx, repo.ID, bob.ID); err != nil {
+		t.Fatal(err)
+	}
+	starred, err = db.IsRepoStarred(ctx, repo.ID, bob.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if starred {
+		t.Fatal("expected repo to be unstarred")
+	}
+}
+
+func TestSQLiteBranchProtectionRuleCRUD(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	user := &models.User{Username: "alice", Email: "alice@example.com", PasswordHash: "x"}
+	if err := db.CreateUser(ctx, user); err != nil {
+		t.Fatal(err)
+	}
+	repo := &models.Repository{
+		OwnerUserID:   &user.ID,
+		Name:          "repo",
+		DefaultBranch: "main",
+		StoragePath:   "pending",
+	}
+	if err := db.CreateRepository(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+
+	rule := &models.BranchProtectionRule{
+		RepoID:              repo.ID,
+		Branch:              "main",
+		Enabled:             true,
+		RequireApprovals:    true,
+		RequiredApprovals:   2,
+		RequireStatusChecks: true,
+		RequiredChecksCSV:   "ci/test,lint",
+	}
+	if err := db.UpsertBranchProtectionRule(ctx, rule); err != nil {
+		t.Fatal(err)
+	}
+	if rule.ID == 0 {
+		t.Fatal("expected rule ID to be set")
+	}
+
+	got, err := db.GetBranchProtectionRule(ctx, repo.ID, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.RequireApprovals || got.RequiredApprovals != 2 {
+		t.Fatalf("unexpected approval settings: %+v", got)
+	}
+	if !got.RequireStatusChecks || got.RequiredChecksCSV != "ci/test,lint" {
+		t.Fatalf("unexpected status check settings: %+v", got)
+	}
+
+	if err := db.DeleteBranchProtectionRule(ctx, repo.ID, "main"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.GetBranchProtectionRule(ctx, repo.ID, "main"); err == nil {
+		t.Fatal("expected deleted branch protection rule lookup to fail")
+	}
+}
+
+func TestSQLitePRCheckRunUpsertAndList(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	user := &models.User{Username: "alice", Email: "alice@example.com", PasswordHash: "x"}
+	if err := db.CreateUser(ctx, user); err != nil {
+		t.Fatal(err)
+	}
+	repo := &models.Repository{
+		OwnerUserID:   &user.ID,
+		Name:          "repo",
+		DefaultBranch: "main",
+		StoragePath:   "pending",
+	}
+	if err := db.CreateRepository(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	pr := &models.PullRequest{
+		RepoID:       repo.ID,
+		Title:        "PR",
+		Body:         "",
+		State:        "open",
+		AuthorID:     user.ID,
+		SourceBranch: "feature",
+		TargetBranch: "main",
+	}
+	if err := db.CreatePullRequest(ctx, pr); err != nil {
+		t.Fatal(err)
+	}
+
+	run := &models.PRCheckRun{
+		PRID:       pr.ID,
+		Name:       "ci/test",
+		Status:     "queued",
+		Conclusion: "",
+	}
+	if err := db.UpsertPRCheckRun(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+	if run.ID == 0 {
+		t.Fatal("expected check run ID to be set")
+	}
+
+	run.Status = "completed"
+	run.Conclusion = "success"
+	if err := db.UpsertPRCheckRun(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+
+	runs, err := db.ListPRCheckRuns(ctx, pr.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("expected 1 check run, got %d", len(runs))
+	}
+	if runs[0].Status != "completed" || runs[0].Conclusion != "success" {
+		t.Fatalf("unexpected check run state: %+v", runs[0])
+	}
+}
+
+func TestSQLiteWebhookCRUDAndDeliveries(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	user := &models.User{Username: "alice", Email: "alice@example.com", PasswordHash: "x"}
+	if err := db.CreateUser(ctx, user); err != nil {
+		t.Fatal(err)
+	}
+	repo := &models.Repository{
+		OwnerUserID:   &user.ID,
+		Name:          "repo",
+		DefaultBranch: "main",
+		StoragePath:   "pending",
+	}
+	if err := db.CreateRepository(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+
+	hook := &models.Webhook{
+		RepoID:    repo.ID,
+		URL:       "https://example.com/hook",
+		Secret:    "secret",
+		EventsCSV: "ping,pull_request",
+		Active:    true,
+	}
+	if err := db.CreateWebhook(ctx, hook); err != nil {
+		t.Fatal(err)
+	}
+	if hook.ID == 0 {
+		t.Fatal("expected webhook id")
+	}
+
+	gotHook, err := db.GetWebhook(ctx, repo.ID, hook.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotHook.URL != hook.URL || gotHook.EventsCSV != hook.EventsCSV {
+		t.Fatalf("unexpected webhook row: %+v", gotHook)
+	}
+
+	hooks, err := db.ListWebhooks(ctx, repo.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hooks) != 1 {
+		t.Fatalf("expected 1 webhook, got %d", len(hooks))
+	}
+
+	delivery := &models.WebhookDelivery{
+		RepoID:       repo.ID,
+		WebhookID:    hook.ID,
+		Event:        "ping",
+		DeliveryUID:  "abc123",
+		Attempt:      1,
+		StatusCode:   204,
+		Success:      true,
+		RequestBody:  `{"ok":true}`,
+		ResponseBody: "",
+		DurationMS:   12,
+	}
+	if err := db.CreateWebhookDelivery(ctx, delivery); err != nil {
+		t.Fatal(err)
+	}
+	if delivery.ID == 0 {
+		t.Fatal("expected delivery id")
+	}
+
+	gotDelivery, err := db.GetWebhookDelivery(ctx, repo.ID, hook.ID, delivery.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotDelivery.DeliveryUID != "abc123" || !gotDelivery.Success {
+		t.Fatalf("unexpected delivery row: %+v", gotDelivery)
+	}
+
+	deliveries, err := db.ListWebhookDeliveries(ctx, repo.ID, hook.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deliveries) != 1 {
+		t.Fatalf("expected 1 delivery, got %d", len(deliveries))
+	}
+
+	if err := db.DeleteWebhook(ctx, repo.ID, hook.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.GetWebhook(ctx, repo.ID, hook.ID); err == nil {
+		t.Fatal("expected deleted webhook lookup to fail")
+	}
+}
+
+func TestSQLiteIssueCRUDAndComments(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	user := &models.User{Username: "alice", Email: "alice@example.com", PasswordHash: "x"}
+	if err := db.CreateUser(ctx, user); err != nil {
+		t.Fatal(err)
+	}
+	repo := &models.Repository{
+		OwnerUserID:   &user.ID,
+		Name:          "repo",
+		DefaultBranch: "main",
+		StoragePath:   "pending",
+	}
+	if err := db.CreateRepository(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+
+	issue := &models.Issue{
+		RepoID:   repo.ID,
+		Title:    "Issue 1",
+		Body:     "desc",
+		State:    "open",
+		AuthorID: user.ID,
+	}
+	if err := db.CreateIssue(ctx, issue); err != nil {
+		t.Fatal(err)
+	}
+	if issue.Number != 1 {
+		t.Fatalf("expected issue number 1, got %d", issue.Number)
+	}
+
+	gotIssue, err := db.GetIssue(ctx, repo.ID, issue.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotIssue.Title != "Issue 1" || gotIssue.State != "open" {
+		t.Fatalf("unexpected issue: %+v", gotIssue)
+	}
+
+	issues, err := db.ListIssues(ctx, repo.ID, "open")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(issues) != 1 {
+		t.Fatalf("expected 1 issue, got %d", len(issues))
+	}
+
+	now := time.Now()
+	issue.Title = "Issue closed"
+	issue.State = "closed"
+	issue.ClosedAt = &now
+	if err := db.UpdateIssue(ctx, issue); err != nil {
+		t.Fatal(err)
+	}
+
+	gotIssue, err = db.GetIssue(ctx, repo.ID, issue.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotIssue.State != "closed" || gotIssue.ClosedAt == nil {
+		t.Fatalf("expected closed issue with closed_at, got %+v", gotIssue)
+	}
+
+	comment := &models.IssueComment{
+		IssueID:  issue.ID,
+		AuthorID: user.ID,
+		Body:     "first comment",
+	}
+	if err := db.CreateIssueComment(ctx, comment); err != nil {
+		t.Fatal(err)
+	}
+
+	comments, err := db.ListIssueComments(ctx, issue.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(comments) != 1 || comments[0].Body != "first comment" {
+		t.Fatalf("unexpected comments: %+v", comments)
 	}
 }

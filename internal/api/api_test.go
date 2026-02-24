@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -391,6 +392,335 @@ func TestWriteAccessRequiresRepoPermission(t *testing.T) {
 	resp.Body.Close()
 }
 
+func TestCollaboratorWriteAccessLifecycle(t *testing.T) {
+	server, _ := setupTestServer(t)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	aliceToken := registerAndGetToken(t, ts.URL, "alice")
+	bobToken := registerAndGetToken(t, ts.URL, "bob")
+
+	createRepo(t, ts.URL, aliceToken, "repo", false)
+
+	// Bob cannot create PR before being added.
+	prBody := `{"title":"test","source_branch":"feature","target_branch":"main"}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/repos/alice/repo/pulls", bytes.NewBufferString(prBody))
+	req.Header.Set("Authorization", "Bearer "+bobToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("pre-collab create PR: expected 403, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	addBody := `{"username":"bob","role":"write"}`
+	req, _ = http.NewRequest("POST", ts.URL+"/api/v1/repos/alice/repo/collaborators", bytes.NewBufferString(addBody))
+	req.Header.Set("Authorization", "Bearer "+aliceToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("add collaborator: expected 201, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	resp, err = http.Get(ts.URL + "/api/v1/repos/alice/repo/collaborators")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("list collaborators: expected 200, got %d", resp.StatusCode)
+	}
+	var collabs []struct {
+		Username string `json:"username"`
+		Role     string `json:"role"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&collabs); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if len(collabs) == 0 || collabs[0].Username != "bob" || collabs[0].Role != "write" {
+		t.Fatalf("unexpected collaborators response: %+v", collabs)
+	}
+
+	// Bob can now create PR.
+	req, _ = http.NewRequest("POST", ts.URL+"/api/v1/repos/alice/repo/pulls", bytes.NewBufferString(prBody))
+	req.Header.Set("Authorization", "Bearer "+bobToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("post-collab create PR: expected 201, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	req, _ = http.NewRequest("DELETE", ts.URL+"/api/v1/repos/alice/repo/collaborators/bob", nil)
+	req.Header.Set("Authorization", "Bearer "+aliceToken)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("remove collaborator: expected 204, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Bob is blocked again after removal.
+	req, _ = http.NewRequest("POST", ts.URL+"/api/v1/repos/alice/repo/pulls", bytes.NewBufferString(prBody))
+	req.Header.Set("Authorization", "Bearer "+bobToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("post-removal create PR: expected 403, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestIssueLifecycleAndComments(t *testing.T) {
+	server, _ := setupTestServer(t)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	token := registerAndGetToken(t, ts.URL, "alice")
+	createRepo(t, ts.URL, token, "repo", false)
+
+	createIssueBody := `{"title":"Issue one","body":"description"}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/repos/alice/repo/issues", bytes.NewBufferString(createIssueBody))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create issue: expected 201, got %d", resp.StatusCode)
+	}
+	var issue struct {
+		Number int    `json:"number"`
+		Title  string `json:"title"`
+		State  string `json:"state"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&issue); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if issue.Number == 0 || issue.Title != "Issue one" || issue.State != "open" {
+		t.Fatalf("unexpected created issue: %+v", issue)
+	}
+
+	resp, err = http.Get(ts.URL + "/api/v1/repos/alice/repo/issues?state=open")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("list issues: expected 200, got %d", resp.StatusCode)
+	}
+	var issues []struct {
+		Number int `json:"number"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&issues); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if len(issues) != 1 || issues[0].Number != issue.Number {
+		t.Fatalf("unexpected issues list: %+v", issues)
+	}
+
+	resp, err = http.Get(fmt.Sprintf("%s/api/v1/repos/alice/repo/issues/%d", ts.URL, issue.Number))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("get issue: expected 200, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	updateBody := `{"state":"closed","title":"Issue one closed"}`
+	req, _ = http.NewRequest("PATCH", fmt.Sprintf("%s/api/v1/repos/alice/repo/issues/%d", ts.URL, issue.Number), bytes.NewBufferString(updateBody))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("update issue: expected 200, got %d", resp.StatusCode)
+	}
+	var updated struct {
+		State string `json:"state"`
+		Title string `json:"title"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&updated); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if updated.State != "closed" || updated.Title != "Issue one closed" {
+		t.Fatalf("unexpected updated issue: %+v", updated)
+	}
+
+	commentBody := `{"body":"first comment"}`
+	req, _ = http.NewRequest("POST", fmt.Sprintf("%s/api/v1/repos/alice/repo/issues/%d/comments", ts.URL, issue.Number), bytes.NewBufferString(commentBody))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create issue comment: expected 201, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	resp, err = http.Get(fmt.Sprintf("%s/api/v1/repos/alice/repo/issues/%d/comments", ts.URL, issue.Number))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("list issue comments: expected 200, got %d", resp.StatusCode)
+	}
+	var comments []struct {
+		Body string `json:"body"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&comments); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if len(comments) != 1 || comments[0].Body != "first comment" {
+		t.Fatalf("unexpected issue comments: %+v", comments)
+	}
+}
+
+func TestRepositoryStarLifecycle(t *testing.T) {
+	server, _ := setupTestServer(t)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	aliceToken := registerAndGetToken(t, ts.URL, "alice")
+	bobToken := registerAndGetToken(t, ts.URL, "bob")
+	createRepo(t, ts.URL, aliceToken, "repo", false)
+
+	resp, err := http.Get(ts.URL + "/api/v1/repos/alice/repo/stars")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("get stars: expected 200, got %d", resp.StatusCode)
+	}
+	var starsResp struct {
+		Count   int  `json:"count"`
+		Starred bool `json:"starred"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&starsResp); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if starsResp.Count != 0 || starsResp.Starred {
+		t.Fatalf("expected empty star state, got %+v", starsResp)
+	}
+
+	req, _ := http.NewRequest("PUT", ts.URL+"/api/v1/repos/alice/repo/star", nil)
+	req.Header.Set("Authorization", "Bearer "+bobToken)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("star repo: expected 200, got %d", resp.StatusCode)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&starsResp); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if starsResp.Count != 1 || !starsResp.Starred {
+		t.Fatalf("expected starred=true with count=1, got %+v", starsResp)
+	}
+
+	req, _ = http.NewRequest("GET", ts.URL+"/api/v1/repos/alice/repo/stars", nil)
+	req.Header.Set("Authorization", "Bearer "+bobToken)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("get stars (bob): expected 200, got %d", resp.StatusCode)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&starsResp); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if starsResp.Count != 1 || !starsResp.Starred {
+		t.Fatalf("expected bob to see starred=true with count=1, got %+v", starsResp)
+	}
+
+	req, _ = http.NewRequest("GET", ts.URL+"/api/v1/repos/alice/repo/stargazers", nil)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("list stargazers: expected 200, got %d", resp.StatusCode)
+	}
+	var stargazers []struct {
+		ID       int64  `json:"id"`
+		Username string `json:"username"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&stargazers); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if len(stargazers) != 1 || stargazers[0].Username != "bob" {
+		t.Fatalf("expected bob as only stargazer, got %+v", stargazers)
+	}
+
+	req, _ = http.NewRequest("GET", ts.URL+"/api/v1/user/starred", nil)
+	req.Header.Set("Authorization", "Bearer "+bobToken)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("list user starred repos: expected 200, got %d", resp.StatusCode)
+	}
+	var starredRepos []struct {
+		OwnerName string `json:"owner_name"`
+		Name      string `json:"name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&starredRepos); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if len(starredRepos) != 1 || starredRepos[0].OwnerName != "alice" || starredRepos[0].Name != "repo" {
+		t.Fatalf("unexpected starred repos response: %+v", starredRepos)
+	}
+
+	req, _ = http.NewRequest("DELETE", ts.URL+"/api/v1/repos/alice/repo/star", nil)
+	req.Header.Set("Authorization", "Bearer "+bobToken)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("unstar repo: expected 200, got %d", resp.StatusCode)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&starsResp); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if starsResp.Count != 0 || starsResp.Starred {
+		t.Fatalf("expected starred=false with count=0 after unstar, got %+v", starsResp)
+	}
+}
+
 func TestBranchesEndpointAndPRAuthorName(t *testing.T) {
 	server, _ := setupTestServer(t)
 	ts := httptest.NewServer(server)
@@ -538,6 +868,373 @@ func TestReceivePackReportsActualRefStatus(t *testing.T) {
 	}
 }
 
+func TestMergeBlockedByBranchProtectionApprovalRequirement(t *testing.T) {
+	server, _ := setupTestServer(t)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	token := registerAndGetToken(t, ts.URL, "alice")
+	createRepo(t, ts.URL, token, "repo", false)
+	prNumber := createPRNumber(t, ts.URL, token, "alice", "repo", "feature", "main")
+
+	ruleBody := `{
+		"enabled": true,
+		"require_approvals": true,
+		"required_approvals": 1,
+		"require_status_checks": false
+	}`
+	req, _ := http.NewRequest("PUT", ts.URL+"/api/v1/repos/alice/repo/branch-protection/main", bytes.NewBufferString(ruleBody))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("set branch protection: expected 200, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	req, _ = http.NewRequest("POST", fmt.Sprintf("%s/api/v1/repos/alice/repo/pulls/%d/merge", ts.URL, prNumber), nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("merge should be blocked: expected 409, got %d", resp.StatusCode)
+	}
+	var mergeResp struct {
+		Error   string   `json:"error"`
+		Reasons []string `json:"reasons"`
+		Detail  string   `json:"detail"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&mergeResp); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if mergeResp.Error != "merge blocked by branch protection" {
+		t.Fatalf("unexpected merge error: %q", mergeResp.Error)
+	}
+	if !strings.Contains(strings.Join(mergeResp.Reasons, " "), "approving review") {
+		t.Fatalf("expected approval requirement reason, got %+v", mergeResp.Reasons)
+	}
+}
+
+func TestMergeGatePassesAfterRequiredCheckSucceeds(t *testing.T) {
+	server, _ := setupTestServer(t)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	token := registerAndGetToken(t, ts.URL, "alice")
+	createRepo(t, ts.URL, token, "repo", false)
+	prNumber := createPRNumber(t, ts.URL, token, "alice", "repo", "feature", "main")
+
+	ruleBody := `{
+		"enabled": true,
+		"require_approvals": false,
+		"require_status_checks": true,
+		"required_checks": ["ci/test"]
+	}`
+	req, _ := http.NewRequest("PUT", ts.URL+"/api/v1/repos/alice/repo/branch-protection/main", bytes.NewBufferString(ruleBody))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("set branch protection: expected 200, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Missing required check should block merge.
+	req, _ = http.NewRequest("POST", fmt.Sprintf("%s/api/v1/repos/alice/repo/pulls/%d/merge", ts.URL, prNumber), nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("merge should be blocked without check: expected 409, got %d", resp.StatusCode)
+	}
+	var blockedResp struct {
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&blockedResp); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if blockedResp.Error != "merge blocked by branch protection" {
+		t.Fatalf("expected branch protection block, got %q", blockedResp.Error)
+	}
+
+	checkBody := `{"name":"ci/test","status":"completed","conclusion":"success"}`
+	req, _ = http.NewRequest("POST", fmt.Sprintf("%s/api/v1/repos/alice/repo/pulls/%d/checks", ts.URL, prNumber), bytes.NewBufferString(checkBody))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("upsert check run: expected 200, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Merge now gets past policy and fails later (branches do not exist in this test fixture).
+	req, _ = http.NewRequest("POST", fmt.Sprintf("%s/api/v1/repos/alice/repo/pulls/%d/merge", ts.URL, prNumber), nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("merge should still fail due to missing branches: expected 409, got %d", resp.StatusCode)
+	}
+	var afterCheckResp struct {
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&afterCheckResp); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if afterCheckResp.Error == "merge blocked by branch protection" {
+		t.Fatalf("expected merge to pass policy gate after check run, got %q", afterCheckResp.Error)
+	}
+}
+
+func TestPRMergeGateEndpoint(t *testing.T) {
+	server, _ := setupTestServer(t)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	token := registerAndGetToken(t, ts.URL, "alice")
+	createRepo(t, ts.URL, token, "repo", false)
+	prNumber := createPRNumber(t, ts.URL, token, "alice", "repo", "feature", "main")
+
+	ruleBody := `{
+		"enabled": true,
+		"require_approvals": false,
+		"require_status_checks": true,
+		"required_checks": ["ci/test"]
+	}`
+	req, _ := http.NewRequest("PUT", ts.URL+"/api/v1/repos/alice/repo/branch-protection/main", bytes.NewBufferString(ruleBody))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("set branch protection: expected 200, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	req, _ = http.NewRequest("GET", fmt.Sprintf("%s/api/v1/repos/alice/repo/pulls/%d/merge-gate", ts.URL, prNumber), nil)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("merge gate endpoint: expected 200, got %d", resp.StatusCode)
+	}
+	var gateResp struct {
+		Allowed bool     `json:"allowed"`
+		Reasons []string `json:"reasons"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&gateResp); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if gateResp.Allowed {
+		t.Fatal("expected merge gate to block without required check")
+	}
+	if len(gateResp.Reasons) == 0 {
+		t.Fatal("expected merge gate reasons when blocked")
+	}
+
+	checkBody := `{"name":"ci/test","status":"completed","conclusion":"success"}`
+	req, _ = http.NewRequest("POST", fmt.Sprintf("%s/api/v1/repos/alice/repo/pulls/%d/checks", ts.URL, prNumber), bytes.NewBufferString(checkBody))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("upsert check run: expected 200, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	req, _ = http.NewRequest("GET", fmt.Sprintf("%s/api/v1/repos/alice/repo/pulls/%d/merge-gate", ts.URL, prNumber), nil)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("merge gate endpoint after check: expected 200, got %d", resp.StatusCode)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&gateResp); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if !gateResp.Allowed {
+		t.Fatalf("expected merge gate to allow after required check, got reasons %+v", gateResp.Reasons)
+	}
+}
+
+func TestWebhookPingRetriesAndRedelivery(t *testing.T) {
+	server, _ := setupTestServer(t)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	token := registerAndGetToken(t, ts.URL, "alice")
+	createRepo(t, ts.URL, token, "repo", false)
+
+	var recvCount int32
+	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&recvCount, 1)
+		if r.Header.Get("X-Gothub-Event") != "ping" {
+			t.Errorf("expected X-Gothub-Event ping, got %q", r.Header.Get("X-Gothub-Event"))
+		}
+		if r.Header.Get("X-Gothub-Delivery") == "" {
+			t.Errorf("expected X-Gothub-Delivery header")
+		}
+		if !strings.HasPrefix(r.Header.Get("X-Hub-Signature-256"), "sha256=") {
+			t.Errorf("expected HMAC signature header, got %q", r.Header.Get("X-Hub-Signature-256"))
+		}
+		if atomic.LoadInt32(&recvCount) < 3 {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte("temporary failure"))
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer receiver.Close()
+
+	createHookBody := fmt.Sprintf(`{"url":"%s","secret":"topsecret","events":["ping"],"active":true}`, receiver.URL)
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/repos/alice/repo/webhooks", bytes.NewBufferString(createHookBody))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create webhook: expected 201, got %d", resp.StatusCode)
+	}
+	var hook struct {
+		ID        int64 `json:"id"`
+		HasSecret bool  `json:"has_secret"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&hook); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if hook.ID == 0 {
+		t.Fatal("expected webhook id")
+	}
+	if !hook.HasSecret {
+		t.Fatal("expected has_secret=true")
+	}
+
+	req, _ = http.NewRequest("POST", fmt.Sprintf("%s/api/v1/repos/alice/repo/webhooks/%d/ping", ts.URL, hook.ID), nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("ping webhook: expected 200, got %d", resp.StatusCode)
+	}
+	var pingDelivery struct {
+		ID      int64 `json:"id"`
+		Attempt int   `json:"attempt"`
+		Success bool  `json:"success"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&pingDelivery); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if pingDelivery.ID == 0 || !pingDelivery.Success || pingDelivery.Attempt != 3 {
+		t.Fatalf("unexpected ping delivery: %+v", pingDelivery)
+	}
+	if atomic.LoadInt32(&recvCount) != 3 {
+		t.Fatalf("expected 3 delivery attempts, got %d", atomic.LoadInt32(&recvCount))
+	}
+
+	resp, err = http.Get(fmt.Sprintf("%s/api/v1/repos/alice/repo/webhooks/%d/deliveries", ts.URL, hook.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("list deliveries: expected 200, got %d", resp.StatusCode)
+	}
+	var deliveries []struct {
+		ID             int64  `json:"id"`
+		Attempt        int    `json:"attempt"`
+		DeliveryUID    string `json:"delivery_uid"`
+		Success        bool   `json:"success"`
+		RedeliveryOfID *int64 `json:"redelivery_of_id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&deliveries); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if len(deliveries) != 3 {
+		t.Fatalf("expected 3 delivery rows, got %d", len(deliveries))
+	}
+	var originalID int64
+	for _, d := range deliveries {
+		if d.Attempt == 1 {
+			originalID = d.ID
+			break
+		}
+	}
+	if originalID == 0 {
+		t.Fatalf("expected attempt 1 delivery in %+v", deliveries)
+	}
+
+	req, _ = http.NewRequest("POST", fmt.Sprintf("%s/api/v1/repos/alice/repo/webhooks/%d/deliveries/%d/redeliver", ts.URL, hook.ID, originalID), nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("redeliver: expected 200, got %d", resp.StatusCode)
+	}
+	var redelivery struct {
+		ID             int64  `json:"id"`
+		Attempt        int    `json:"attempt"`
+		RedeliveryOfID *int64 `json:"redelivery_of_id"`
+		Success        bool   `json:"success"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&redelivery); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if redelivery.ID == 0 || !redelivery.Success || redelivery.RedeliveryOfID == nil || *redelivery.RedeliveryOfID != originalID {
+		t.Fatalf("unexpected redelivery response: %+v", redelivery)
+	}
+
+	resp, err = http.Get(fmt.Sprintf("%s/api/v1/repos/alice/repo/webhooks/%d/deliveries", ts.URL, hook.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("list deliveries after redelivery: expected 200, got %d", resp.StatusCode)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&deliveries); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if len(deliveries) != 4 {
+		t.Fatalf("expected 4 delivery rows after redelivery, got %d", len(deliveries))
+	}
+}
+
 func registerAndGetToken(t *testing.T, baseURL, username string) string {
 	t.Helper()
 	body := fmt.Sprintf(`{"username":"%s","email":"%s@example.com","password":"secret123"}`, username, username)
@@ -575,6 +1272,32 @@ func createRepo(t *testing.T, baseURL, token, name string, isPrivate bool) {
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("create repo %s: expected 201, got %d", name, resp.StatusCode)
 	}
+}
+
+func createPRNumber(t *testing.T, baseURL, token, owner, repo, sourceBranch, targetBranch string) int {
+	t.Helper()
+	body := fmt.Sprintf(`{"title":"test pr","body":"","source_branch":"%s","target_branch":"%s"}`, sourceBranch, targetBranch)
+	req, _ := http.NewRequest("POST", fmt.Sprintf("%s/api/v1/repos/%s/%s/pulls", baseURL, owner, repo), bytes.NewBufferString(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create PR: expected 201, got %d", resp.StatusCode)
+	}
+	var pr struct {
+		Number int `json:"number"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&pr); err != nil {
+		t.Fatal(err)
+	}
+	if pr.Number == 0 {
+		t.Fatal("create PR: missing number in response")
+	}
+	return pr.Number
 }
 
 func pktLineForTest(payload string) []byte {

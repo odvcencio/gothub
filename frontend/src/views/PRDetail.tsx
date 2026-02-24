@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'preact/hooks';
-import { getPR, getPRDiff, getMergePreview, mergePR, listPRComments, createPRComment, listPRReviews, createPRReview, getToken } from '../api/client';
+import { getPR, getPRDiff, getMergePreview, getMergeGate, mergePR, listPRComments, createPRComment, listPRReviews, createPRReview, listPRChecks, getToken } from '../api/client';
 import { EntityDiff } from '../components/EntityDiff';
 import { MergePreview } from '../components/MergePreview';
 
@@ -14,6 +14,8 @@ export function PRDetailView({ owner, repo, number }: Props) {
   const [tab, setTab] = useState<'conversation' | 'files' | 'merge'>('conversation');
   const [diff, setDiff] = useState<any>(null);
   const [mergePreview, setMergePreview] = useState<any>(null);
+  const [mergeGate, setMergeGate] = useState<{ allowed: boolean; reasons?: string[] } | null>(null);
+  const [checks, setChecks] = useState<any[]>([]);
   const [comments, setComments] = useState<any[]>([]);
   const [reviews, setReviews] = useState<any[]>([]);
   const [merging, setMerging] = useState(false);
@@ -36,13 +38,18 @@ export function PRDetailView({ owner, repo, number }: Props) {
     if (tab === 'merge' && !mergePreview) {
       getMergePreview(owner, repo, prNum).then(setMergePreview).catch(() => {});
     }
-  }, [tab, owner, repo, prNum]);
+    if (tab === 'merge') {
+      getMergeGate(owner, repo, prNum).then(setMergeGate).catch(() => {});
+      listPRChecks(owner, repo, prNum).then(setChecks).catch(() => {});
+    }
+  }, [tab, owner, repo, prNum, reviews.length]);
 
   const handleMerge = async () => {
     setMerging(true);
     try {
       await mergePR(owner!, repo!, prNum);
       getPR(owner!, repo!, prNum).then(setPr);
+      getMergeGate(owner!, repo!, prNum).then(setMergeGate).catch(() => {});
     } catch (e: any) {
       setError(e.message);
     }
@@ -100,10 +107,51 @@ export function PRDetailView({ owner, repo, number }: Props) {
       )}
 
       {tab === 'merge' && (
-        mergePreview
-          ? <MergePreview preview={mergePreview} onMerge={pr.state === 'open' ? handleMerge : undefined} merging={merging} />
-          : <div style={{ color: '#8b949e' }}>Loading merge preview...</div>
+        <div style={{ display: 'grid', gap: '16px' }}>
+          <MergeGatePanel gate={mergeGate} checks={checks} />
+          {mergePreview
+            ? <MergePreview preview={mergePreview} onMerge={pr.state === 'open' ? handleMerge : undefined} merging={merging} />
+            : <div style={{ color: '#8b949e' }}>Loading merge preview...</div>}
+        </div>
       )}
+    </div>
+  );
+}
+
+function MergeGatePanel({ gate, checks }: { gate: { allowed: boolean; reasons?: string[] } | null; checks: any[] }) {
+  return (
+    <div style={{ border: '1px solid #30363d', borderRadius: '6px' }}>
+      <div style={{ padding: '12px 16px', borderBottom: '1px solid #30363d', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <strong style={{ color: '#f0f6fc', fontSize: '14px' }}>Merge Gate</strong>
+        <span style={{ color: gate?.allowed ? '#3fb950' : '#f85149', fontSize: '13px', fontWeight: 'bold' }}>
+          {gate == null ? 'checking...' : gate.allowed ? 'passing' : 'blocked'}
+        </span>
+      </div>
+
+      {gate && !gate.allowed && gate.reasons && gate.reasons.length > 0 && (
+        <div style={{ padding: '12px 16px', borderBottom: '1px solid #30363d' }}>
+          <div style={{ color: '#f85149', fontSize: '13px', marginBottom: '6px' }}>Blocking reasons</div>
+          {gate.reasons.map((reason, idx) => (
+            <div key={idx} style={{ color: '#c9d1d9', fontSize: '13px' }}>- {reason}</div>
+          ))}
+        </div>
+      )}
+
+      <div style={{ padding: '12px 16px' }}>
+        <div style={{ color: '#8b949e', fontSize: '12px', marginBottom: '8px' }}>Check runs</div>
+        {checks.length === 0 ? (
+          <div style={{ color: '#8b949e', fontSize: '13px' }}>No checks reported</div>
+        ) : (
+          checks.map((check, idx) => (
+            <div key={idx} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 0', borderTop: idx === 0 ? 'none' : '1px solid #21262d' }}>
+              <span style={{ color: '#c9d1d9', fontSize: '13px', fontFamily: 'monospace' }}>{check.name}</span>
+              <span style={{ color: check.status === 'completed' && check.conclusion === 'success' ? '#3fb950' : check.status === 'completed' ? '#f85149' : '#d29922', fontSize: '12px' }}>
+                {check.status}{check.conclusion ? `/${check.conclusion}` : ''}
+              </span>
+            </div>
+          ))
+        )}
+      </div>
     </div>
   );
 }

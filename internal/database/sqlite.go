@@ -95,6 +95,13 @@ CREATE TABLE IF NOT EXISTS collaborators (
 	PRIMARY KEY (repo_id, user_id)
 );
 
+CREATE TABLE IF NOT EXISTS repo_stars (
+	repo_id INTEGER NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+	user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (repo_id, user_id)
+);
+
 CREATE TABLE IF NOT EXISTS pull_requests (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	repo_id INTEGER NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
@@ -136,6 +143,83 @@ CREATE TABLE IF NOT EXISTS pr_reviews (
 	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS issues (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	repo_id INTEGER NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+	number INTEGER NOT NULL,
+	title TEXT NOT NULL,
+	body TEXT NOT NULL DEFAULT '',
+	state TEXT NOT NULL DEFAULT 'open',
+	author_id INTEGER NOT NULL REFERENCES users(id),
+	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	closed_at DATETIME,
+	UNIQUE(repo_id, number)
+);
+
+CREATE TABLE IF NOT EXISTS issue_comments (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	issue_id INTEGER NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+	author_id INTEGER NOT NULL REFERENCES users(id),
+	body TEXT NOT NULL,
+	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS branch_protection_rules (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	repo_id INTEGER NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+	branch TEXT NOT NULL,
+	enabled BOOLEAN NOT NULL DEFAULT TRUE,
+	require_approvals BOOLEAN NOT NULL DEFAULT FALSE,
+	required_approvals INTEGER NOT NULL DEFAULT 1,
+	require_status_checks BOOLEAN NOT NULL DEFAULT FALSE,
+	required_checks_csv TEXT NOT NULL DEFAULT '',
+	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	UNIQUE(repo_id, branch)
+);
+
+CREATE TABLE IF NOT EXISTS pr_check_runs (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	pr_id INTEGER NOT NULL REFERENCES pull_requests(id) ON DELETE CASCADE,
+	name TEXT NOT NULL,
+	status TEXT NOT NULL DEFAULT 'queued',
+	conclusion TEXT NOT NULL DEFAULT '',
+	details_url TEXT NOT NULL DEFAULT '',
+	external_id TEXT NOT NULL DEFAULT '',
+	head_commit TEXT NOT NULL DEFAULT '',
+	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	UNIQUE(pr_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS repo_webhooks (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	repo_id INTEGER NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+	url TEXT NOT NULL,
+	secret TEXT NOT NULL DEFAULT '',
+	events_csv TEXT NOT NULL DEFAULT '*',
+	active BOOLEAN NOT NULL DEFAULT TRUE,
+	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS webhook_deliveries (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	repo_id INTEGER NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+	webhook_id INTEGER NOT NULL REFERENCES repo_webhooks(id) ON DELETE CASCADE,
+	event TEXT NOT NULL,
+	delivery_uid TEXT NOT NULL,
+	attempt INTEGER NOT NULL DEFAULT 1,
+	status_code INTEGER NOT NULL DEFAULT 0,
+	success BOOLEAN NOT NULL DEFAULT FALSE,
+	error TEXT NOT NULL DEFAULT '',
+	request_body TEXT NOT NULL DEFAULT '',
+	response_body TEXT NOT NULL DEFAULT '',
+	duration_ms INTEGER NOT NULL DEFAULT 0,
+	redelivery_of_id INTEGER,
+	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS hash_mapping (
 	repo_id INTEGER NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
 	got_hash TEXT NOT NULL,
@@ -145,6 +229,14 @@ CREATE TABLE IF NOT EXISTS hash_mapping (
 );
 
 CREATE INDEX IF NOT EXISTS idx_hash_mapping_git ON hash_mapping(repo_id, git_hash);
+CREATE INDEX IF NOT EXISTS idx_branch_protection_repo_branch ON branch_protection_rules(repo_id, branch);
+CREATE INDEX IF NOT EXISTS idx_pr_check_runs_pr ON pr_check_runs(pr_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_issues_repo_number ON issues(repo_id, number DESC);
+CREATE INDEX IF NOT EXISTS idx_issue_comments_issue ON issue_comments(issue_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_repo_webhooks_repo ON repo_webhooks(repo_id);
+CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_webhook_time ON webhook_deliveries(webhook_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_repo_stars_repo ON repo_stars(repo_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_repo_stars_user ON repo_stars(user_id, created_at DESC);
 `
 
 // --- Users ---
@@ -279,9 +371,11 @@ func (s *SQLiteDB) GetRepository(ctx context.Context, ownerName, repoName string
 func (s *SQLiteDB) GetRepositoryByID(ctx context.Context, id int64) (*models.Repository, error) {
 	r := &models.Repository{}
 	err := s.db.QueryRowContext(ctx,
-		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at, u.username
+		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at,
+		 COALESCE(u.username, o.name, '')
 		 FROM repositories r
-		 JOIN users u ON u.id = r.owner_user_id
+		 LEFT JOIN users u ON u.id = r.owner_user_id
+		 LEFT JOIN orgs o ON o.id = r.owner_org_id
 		 WHERE r.id = ?`, id).
 		Scan(&r.ID, &r.OwnerUserID, &r.OwnerOrgID, &r.Name, &r.Description, &r.DefaultBranch, &r.IsPrivate, &r.StoragePath, &r.CreatedAt, &r.OwnerName)
 	if err != nil {
@@ -314,6 +408,97 @@ func (s *SQLiteDB) ListUserRepositories(ctx context.Context, userID int64) ([]mo
 func (s *SQLiteDB) DeleteRepository(ctx context.Context, id int64) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM repositories WHERE id = ?`, id)
 	return err
+}
+
+// --- Stars ---
+
+func (s *SQLiteDB) AddRepoStar(ctx context.Context, repoID, userID int64) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT OR IGNORE INTO repo_stars (repo_id, user_id) VALUES (?, ?)`,
+		repoID, userID)
+	return err
+}
+
+func (s *SQLiteDB) RemoveRepoStar(ctx context.Context, repoID, userID int64) error {
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM repo_stars WHERE repo_id = ? AND user_id = ?`,
+		repoID, userID)
+	return err
+}
+
+func (s *SQLiteDB) IsRepoStarred(ctx context.Context, repoID, userID int64) (bool, error) {
+	var one int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT 1 FROM repo_stars WHERE repo_id = ? AND user_id = ?`,
+		repoID, userID).Scan(&one)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *SQLiteDB) CountRepoStars(ctx context.Context, repoID int64) (int, error) {
+	var count int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM repo_stars WHERE repo_id = ?`,
+		repoID).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+func (s *SQLiteDB) ListRepoStargazers(ctx context.Context, repoID int64) ([]models.User, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT u.id, u.username, u.email, u.password_hash, u.is_admin, u.created_at
+		 FROM repo_stars rs
+		 JOIN users u ON u.id = rs.user_id
+		 WHERE rs.repo_id = ?
+		 ORDER BY rs.created_at DESC, u.id DESC`,
+		repoID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var users []models.User
+	for rows.Next() {
+		var u models.User
+		if err := rows.Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.IsAdmin, &u.CreatedAt); err != nil {
+			return nil, err
+		}
+		users = append(users, u)
+	}
+	return users, rows.Err()
+}
+
+func (s *SQLiteDB) ListUserStarredRepositories(ctx context.Context, userID int64) ([]models.Repository, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at,
+		 COALESCE(u.username, o.name, '')
+		 FROM repo_stars rs
+		 JOIN repositories r ON r.id = rs.repo_id
+		 LEFT JOIN users u ON u.id = r.owner_user_id
+		 LEFT JOIN orgs o ON o.id = r.owner_org_id
+		 WHERE rs.user_id = ?
+		 ORDER BY rs.created_at DESC, r.id DESC`,
+		userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var repos []models.Repository
+	for rows.Next() {
+		var r models.Repository
+		if err := rows.Scan(&r.ID, &r.OwnerUserID, &r.OwnerOrgID, &r.Name, &r.Description, &r.DefaultBranch, &r.IsPrivate, &r.StoragePath, &r.CreatedAt, &r.OwnerName); err != nil {
+			return nil, err
+		}
+		repos = append(repos, r)
+	}
+	return repos, rows.Err()
 }
 
 // --- Collaborators ---
@@ -362,12 +547,12 @@ func (s *SQLiteDB) RemoveCollaborator(ctx context.Context, repoID, userID int64)
 // --- Pull Requests ---
 
 func (s *SQLiteDB) CreatePullRequest(ctx context.Context, pr *models.PullRequest) error {
-	const maxAttempts = 8
+	const maxAttempts = 20
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
 			if isSQLiteBusyErr(err) && attempt < maxAttempts-1 {
-				time.Sleep(time.Duration(attempt+1) * 5 * time.Millisecond)
+				time.Sleep(time.Duration(attempt+1) * 10 * time.Millisecond)
 				continue
 			}
 			return err
@@ -379,7 +564,7 @@ func (s *SQLiteDB) CreatePullRequest(ctx context.Context, pr *models.PullRequest
 			`SELECT COALESCE(MAX(number), 0) FROM pull_requests WHERE repo_id = ?`, pr.RepoID).Scan(&maxNum); err != nil {
 			tx.Rollback()
 			if isSQLiteBusyErr(err) && attempt < maxAttempts-1 {
-				time.Sleep(time.Duration(attempt+1) * 5 * time.Millisecond)
+				time.Sleep(time.Duration(attempt+1) * 10 * time.Millisecond)
 				continue
 			}
 			return err
@@ -393,7 +578,7 @@ func (s *SQLiteDB) CreatePullRequest(ctx context.Context, pr *models.PullRequest
 		if err != nil {
 			tx.Rollback()
 			if (isSQLiteBusyErr(err) || isPRNumberUniqueConstraintErr(err)) && attempt < maxAttempts-1 {
-				time.Sleep(time.Duration(attempt+1) * 5 * time.Millisecond)
+				time.Sleep(time.Duration(attempt+1) * 10 * time.Millisecond)
 				continue
 			}
 			return err
@@ -402,7 +587,7 @@ func (s *SQLiteDB) CreatePullRequest(ctx context.Context, pr *models.PullRequest
 
 		if err := tx.Commit(); err != nil {
 			if (isSQLiteBusyErr(err) || isPRNumberUniqueConstraintErr(err)) && attempt < maxAttempts-1 {
-				time.Sleep(time.Duration(attempt+1) * 5 * time.Millisecond)
+				time.Sleep(time.Duration(attempt+1) * 10 * time.Millisecond)
 				continue
 			}
 			return err
@@ -546,6 +731,346 @@ func (s *SQLiteDB) ListPRReviews(ctx context.Context, prID int64) ([]models.PRRe
 		reviews = append(reviews, r)
 	}
 	return reviews, rows.Err()
+}
+
+// --- Issues ---
+
+func (s *SQLiteDB) CreateIssue(ctx context.Context, issue *models.Issue) error {
+	const maxAttempts = 8
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			if isSQLiteBusyErr(err) && attempt < maxAttempts-1 {
+				time.Sleep(time.Duration(attempt+1) * 5 * time.Millisecond)
+				continue
+			}
+			return err
+		}
+
+		var maxNum int
+		if err := tx.QueryRowContext(ctx,
+			`SELECT COALESCE(MAX(number), 0) FROM issues WHERE repo_id = ?`, issue.RepoID).Scan(&maxNum); err != nil {
+			tx.Rollback()
+			if isSQLiteBusyErr(err) && attempt < maxAttempts-1 {
+				time.Sleep(time.Duration(attempt+1) * 5 * time.Millisecond)
+				continue
+			}
+			return err
+		}
+		issue.Number = maxNum + 1
+
+		res, err := tx.ExecContext(ctx,
+			`INSERT INTO issues (repo_id, number, title, body, state, author_id)
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+			issue.RepoID, issue.Number, issue.Title, issue.Body, issue.State, issue.AuthorID)
+		if err != nil {
+			tx.Rollback()
+			if (isSQLiteBusyErr(err) || strings.Contains(err.Error(), "UNIQUE constraint failed: issues.repo_id, issues.number")) && attempt < maxAttempts-1 {
+				time.Sleep(time.Duration(attempt+1) * 5 * time.Millisecond)
+				continue
+			}
+			return err
+		}
+		issue.ID, _ = res.LastInsertId()
+
+		if err := tx.Commit(); err != nil {
+			if (isSQLiteBusyErr(err) || strings.Contains(err.Error(), "UNIQUE constraint failed: issues.repo_id, issues.number")) && attempt < maxAttempts-1 {
+				time.Sleep(time.Duration(attempt+1) * 5 * time.Millisecond)
+				continue
+			}
+			return err
+		}
+		return nil
+	}
+	return fmt.Errorf("create issue: retries exhausted")
+}
+
+func (s *SQLiteDB) GetIssue(ctx context.Context, repoID int64, number int) (*models.Issue, error) {
+	issue := &models.Issue{}
+	err := s.db.QueryRowContext(ctx,
+		`SELECT i.id, i.repo_id, i.number, i.title, i.body, i.state, i.author_id, u.username, i.created_at, i.closed_at
+		 FROM issues i
+		 JOIN users u ON u.id = i.author_id
+		 WHERE i.repo_id = ? AND i.number = ?`, repoID, number).
+		Scan(&issue.ID, &issue.RepoID, &issue.Number, &issue.Title, &issue.Body, &issue.State, &issue.AuthorID, &issue.AuthorName, &issue.CreatedAt, &issue.ClosedAt)
+	if err != nil {
+		return nil, err
+	}
+	return issue, nil
+}
+
+func (s *SQLiteDB) ListIssues(ctx context.Context, repoID int64, state string) ([]models.Issue, error) {
+	query := `SELECT i.id, i.repo_id, i.number, i.title, i.body, i.state, i.author_id, u.username, i.created_at, i.closed_at
+		 FROM issues i
+		 JOIN users u ON u.id = i.author_id
+		 WHERE i.repo_id = ?`
+	args := []any{repoID}
+	if state != "" {
+		query += ` AND i.state = ?`
+		args = append(args, state)
+	}
+	query += ` ORDER BY i.number DESC`
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var issues []models.Issue
+	for rows.Next() {
+		var issue models.Issue
+		if err := rows.Scan(&issue.ID, &issue.RepoID, &issue.Number, &issue.Title, &issue.Body, &issue.State, &issue.AuthorID, &issue.AuthorName, &issue.CreatedAt, &issue.ClosedAt); err != nil {
+			return nil, err
+		}
+		issues = append(issues, issue)
+	}
+	return issues, rows.Err()
+}
+
+func (s *SQLiteDB) UpdateIssue(ctx context.Context, issue *models.Issue) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE issues SET title = ?, body = ?, state = ?, closed_at = ? WHERE id = ?`,
+		issue.Title, issue.Body, issue.State, issue.ClosedAt, issue.ID)
+	return err
+}
+
+func (s *SQLiteDB) CreateIssueComment(ctx context.Context, c *models.IssueComment) error {
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO issue_comments (issue_id, author_id, body) VALUES (?, ?, ?)`,
+		c.IssueID, c.AuthorID, c.Body)
+	if err != nil {
+		return err
+	}
+	c.ID, _ = res.LastInsertId()
+	return nil
+}
+
+func (s *SQLiteDB) ListIssueComments(ctx context.Context, issueID int64) ([]models.IssueComment, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT c.id, c.issue_id, c.author_id, u.username, c.body, c.created_at
+		 FROM issue_comments c
+		 JOIN users u ON u.id = c.author_id
+		 WHERE c.issue_id = ?
+		 ORDER BY c.created_at`, issueID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var comments []models.IssueComment
+	for rows.Next() {
+		var c models.IssueComment
+		if err := rows.Scan(&c.ID, &c.IssueID, &c.AuthorID, &c.AuthorName, &c.Body, &c.CreatedAt); err != nil {
+			return nil, err
+		}
+		comments = append(comments, c)
+	}
+	return comments, rows.Err()
+}
+
+// --- Branch Protection ---
+
+func (s *SQLiteDB) UpsertBranchProtectionRule(ctx context.Context, rule *models.BranchProtectionRule) error {
+	if rule.RequiredApprovals <= 0 {
+		rule.RequiredApprovals = 1
+	}
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO branch_protection_rules (
+			 repo_id, branch, enabled, require_approvals, required_approvals, require_status_checks, required_checks_csv
+		 ) VALUES (?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(repo_id, branch) DO UPDATE SET
+			 enabled = excluded.enabled,
+			 require_approvals = excluded.require_approvals,
+			 required_approvals = excluded.required_approvals,
+			 require_status_checks = excluded.require_status_checks,
+			 required_checks_csv = excluded.required_checks_csv,
+			 updated_at = CURRENT_TIMESTAMP`,
+		rule.RepoID, rule.Branch, rule.Enabled, rule.RequireApprovals, rule.RequiredApprovals, rule.RequireStatusChecks, rule.RequiredChecksCSV)
+	if err != nil {
+		return err
+	}
+	stored, err := s.GetBranchProtectionRule(ctx, rule.RepoID, rule.Branch)
+	if err != nil {
+		return err
+	}
+	*rule = *stored
+	return nil
+}
+
+func (s *SQLiteDB) GetBranchProtectionRule(ctx context.Context, repoID int64, branch string) (*models.BranchProtectionRule, error) {
+	rule := &models.BranchProtectionRule{}
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, repo_id, branch, enabled, require_approvals, required_approvals, require_status_checks, required_checks_csv, created_at, updated_at
+		 FROM branch_protection_rules
+		 WHERE repo_id = ? AND branch = ?`,
+		repoID, branch).
+		Scan(&rule.ID, &rule.RepoID, &rule.Branch, &rule.Enabled, &rule.RequireApprovals, &rule.RequiredApprovals,
+			&rule.RequireStatusChecks, &rule.RequiredChecksCSV, &rule.CreatedAt, &rule.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return rule, nil
+}
+
+func (s *SQLiteDB) DeleteBranchProtectionRule(ctx context.Context, repoID int64, branch string) error {
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM branch_protection_rules WHERE repo_id = ? AND branch = ?`, repoID, branch)
+	return err
+}
+
+// --- PR Check Runs ---
+
+func (s *SQLiteDB) UpsertPRCheckRun(ctx context.Context, run *models.PRCheckRun) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO pr_check_runs (
+			 pr_id, name, status, conclusion, details_url, external_id, head_commit
+		 ) VALUES (?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(pr_id, name) DO UPDATE SET
+			 status = excluded.status,
+			 conclusion = excluded.conclusion,
+			 details_url = excluded.details_url,
+			 external_id = excluded.external_id,
+			 head_commit = excluded.head_commit,
+			 updated_at = CURRENT_TIMESTAMP`,
+		run.PRID, run.Name, run.Status, run.Conclusion, run.DetailsURL, run.ExternalID, run.HeadCommit)
+	if err != nil {
+		return err
+	}
+	return s.db.QueryRowContext(ctx,
+		`SELECT id, pr_id, name, status, conclusion, details_url, external_id, head_commit, created_at, updated_at
+		 FROM pr_check_runs
+		 WHERE pr_id = ? AND name = ?`,
+		run.PRID, run.Name).
+		Scan(&run.ID, &run.PRID, &run.Name, &run.Status, &run.Conclusion, &run.DetailsURL, &run.ExternalID, &run.HeadCommit, &run.CreatedAt, &run.UpdatedAt)
+}
+
+func (s *SQLiteDB) ListPRCheckRuns(ctx context.Context, prID int64) ([]models.PRCheckRun, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, pr_id, name, status, conclusion, details_url, external_id, head_commit, created_at, updated_at
+		 FROM pr_check_runs
+		 WHERE pr_id = ?
+		 ORDER BY updated_at DESC, id DESC`, prID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var runs []models.PRCheckRun
+	for rows.Next() {
+		var run models.PRCheckRun
+		if err := rows.Scan(&run.ID, &run.PRID, &run.Name, &run.Status, &run.Conclusion, &run.DetailsURL, &run.ExternalID, &run.HeadCommit, &run.CreatedAt, &run.UpdatedAt); err != nil {
+			return nil, err
+		}
+		runs = append(runs, run)
+	}
+	return runs, rows.Err()
+}
+
+// --- Webhooks ---
+
+func (s *SQLiteDB) CreateWebhook(ctx context.Context, hook *models.Webhook) error {
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO repo_webhooks (repo_id, url, secret, events_csv, active)
+		 VALUES (?, ?, ?, ?, ?)`,
+		hook.RepoID, hook.URL, hook.Secret, hook.EventsCSV, hook.Active)
+	if err != nil {
+		return err
+	}
+	hook.ID, _ = res.LastInsertId()
+	return s.db.QueryRowContext(ctx,
+		`SELECT created_at, updated_at FROM repo_webhooks WHERE id = ?`, hook.ID).
+		Scan(&hook.CreatedAt, &hook.UpdatedAt)
+}
+
+func (s *SQLiteDB) GetWebhook(ctx context.Context, repoID, webhookID int64) (*models.Webhook, error) {
+	hook := &models.Webhook{}
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, repo_id, url, secret, events_csv, active, created_at, updated_at
+		 FROM repo_webhooks
+		 WHERE repo_id = ? AND id = ?`, repoID, webhookID).
+		Scan(&hook.ID, &hook.RepoID, &hook.URL, &hook.Secret, &hook.EventsCSV, &hook.Active, &hook.CreatedAt, &hook.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return hook, nil
+}
+
+func (s *SQLiteDB) ListWebhooks(ctx context.Context, repoID int64) ([]models.Webhook, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, repo_id, url, secret, events_csv, active, created_at, updated_at
+		 FROM repo_webhooks
+		 WHERE repo_id = ?
+		 ORDER BY id DESC`, repoID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var hooks []models.Webhook
+	for rows.Next() {
+		var hook models.Webhook
+		if err := rows.Scan(&hook.ID, &hook.RepoID, &hook.URL, &hook.Secret, &hook.EventsCSV, &hook.Active, &hook.CreatedAt, &hook.UpdatedAt); err != nil {
+			return nil, err
+		}
+		hooks = append(hooks, hook)
+	}
+	return hooks, rows.Err()
+}
+
+func (s *SQLiteDB) DeleteWebhook(ctx context.Context, repoID, webhookID int64) error {
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM repo_webhooks WHERE repo_id = ? AND id = ?`, repoID, webhookID)
+	return err
+}
+
+func (s *SQLiteDB) CreateWebhookDelivery(ctx context.Context, delivery *models.WebhookDelivery) error {
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO webhook_deliveries (
+			 repo_id, webhook_id, event, delivery_uid, attempt, status_code, success, error, request_body, response_body, duration_ms, redelivery_of_id
+		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		delivery.RepoID, delivery.WebhookID, delivery.Event, delivery.DeliveryUID, delivery.Attempt, delivery.StatusCode,
+		delivery.Success, delivery.Error, delivery.RequestBody, delivery.ResponseBody, delivery.DurationMS, delivery.RedeliveryOfID)
+	if err != nil {
+		return err
+	}
+	delivery.ID, _ = res.LastInsertId()
+	return s.db.QueryRowContext(ctx,
+		`SELECT created_at FROM webhook_deliveries WHERE id = ?`, delivery.ID).
+		Scan(&delivery.CreatedAt)
+}
+
+func (s *SQLiteDB) GetWebhookDelivery(ctx context.Context, repoID, webhookID, deliveryID int64) (*models.WebhookDelivery, error) {
+	d := &models.WebhookDelivery{}
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, repo_id, webhook_id, event, delivery_uid, attempt, status_code, success, error, request_body, response_body, duration_ms, redelivery_of_id, created_at
+		 FROM webhook_deliveries
+		 WHERE repo_id = ? AND webhook_id = ? AND id = ?`,
+		repoID, webhookID, deliveryID).
+		Scan(&d.ID, &d.RepoID, &d.WebhookID, &d.Event, &d.DeliveryUID, &d.Attempt, &d.StatusCode, &d.Success, &d.Error,
+			&d.RequestBody, &d.ResponseBody, &d.DurationMS, &d.RedeliveryOfID, &d.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return d, nil
+}
+
+func (s *SQLiteDB) ListWebhookDeliveries(ctx context.Context, repoID, webhookID int64) ([]models.WebhookDelivery, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, repo_id, webhook_id, event, delivery_uid, attempt, status_code, success, error, request_body, response_body, duration_ms, redelivery_of_id, created_at
+		 FROM webhook_deliveries
+		 WHERE repo_id = ? AND webhook_id = ?
+		 ORDER BY id DESC`, repoID, webhookID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var deliveries []models.WebhookDelivery
+	for rows.Next() {
+		var d models.WebhookDelivery
+		if err := rows.Scan(&d.ID, &d.RepoID, &d.WebhookID, &d.Event, &d.DeliveryUID, &d.Attempt, &d.StatusCode, &d.Success, &d.Error,
+			&d.RequestBody, &d.ResponseBody, &d.DurationMS, &d.RedeliveryOfID, &d.CreatedAt); err != nil {
+			return nil, err
+		}
+		deliveries = append(deliveries, d)
+	}
+	return deliveries, rows.Err()
 }
 
 // --- Hash Mapping ---

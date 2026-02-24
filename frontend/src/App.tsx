@@ -8,6 +8,8 @@ import { PRListView } from './views/PRList';
 import { PRDetailView } from './views/PRDetail';
 import { PRCreateView } from './views/PRCreate';
 import { CommitsView } from './views/Commits';
+import { IssueListView } from './views/IssueList';
+import { IssueDetailView } from './views/IssueDetail';
 
 export function App() {
   return (
@@ -24,6 +26,8 @@ export function App() {
           <PRListView path="/:owner/:repo/pulls" />
           <PRCreateView path="/:owner/:repo/pulls/new" />
           <PRDetailView path="/:owner/:repo/pulls/:number" />
+          <IssueListView path="/:owner/:repo/issues" />
+          <IssueDetailView path="/:owner/:repo/issues/:number" />
         </Router>
       </main>
     </div>

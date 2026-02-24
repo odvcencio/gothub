@@ -42,6 +42,20 @@ export const createRepo = (name: string, description: string, isPrivate: boolean
 export const getRepo = (owner: string, repo: string) =>
   request<any>('GET', `/repos/${owner}/${repo}`);
 export const listUserRepos = () => request<any[]>('GET', '/user/repos');
+export const listUserStarredRepos = () => request<any[]>('GET', '/user/starred');
+export const getRepoStars = (owner: string, repo: string) =>
+  request<{ count: number; starred: boolean }>('GET', `/repos/${owner}/${repo}/stars`);
+export const starRepo = (owner: string, repo: string) =>
+  request<{ count: number; starred: boolean }>('PUT', `/repos/${owner}/${repo}/star`);
+export const unstarRepo = (owner: string, repo: string) =>
+  request<{ count: number; starred: boolean }>('DELETE', `/repos/${owner}/${repo}/star`);
+export const listRepoStargazers = (owner: string, repo: string, page?: number, perPage?: number) => {
+  const query = new URLSearchParams();
+  if (page && page > 0) query.set('page', String(page));
+  if (perPage && perPage > 0) query.set('per_page', String(perPage));
+  const suffix = query.toString();
+  return request<any[]>('GET', `/repos/${owner}/${repo}/stargazers${suffix ? '?' + suffix : ''}`);
+};
 
 // Browsing
 export const listTree = (owner: string, repo: string, ref: string, path?: string) =>
@@ -78,6 +92,8 @@ export const getPRDiff = (owner: string, repo: string, number: number) =>
   request<any>('GET', `/repos/${owner}/${repo}/pulls/${number}/diff`);
 export const getMergePreview = (owner: string, repo: string, number: number) =>
   request<any>('GET', `/repos/${owner}/${repo}/pulls/${number}/merge-preview`);
+export const getMergeGate = (owner: string, repo: string, number: number) =>
+  request<{ allowed: boolean; reasons?: string[] }>('GET', `/repos/${owner}/${repo}/pulls/${number}/merge-gate`);
 export const mergePR = (owner: string, repo: string, number: number) =>
   request<any>('POST', `/repos/${owner}/${repo}/pulls/${number}/merge`);
 export const listPRComments = (owner: string, repo: string, number: number) =>
@@ -88,3 +104,51 @@ export const listPRReviews = (owner: string, repo: string, number: number) =>
   request<any[]>('GET', `/repos/${owner}/${repo}/pulls/${number}/reviews`);
 export const createPRReview = (owner: string, repo: string, number: number, data: any) =>
   request<any>('POST', `/repos/${owner}/${repo}/pulls/${number}/reviews`, data);
+export const listPRChecks = (owner: string, repo: string, number: number) =>
+  request<any[]>('GET', `/repos/${owner}/${repo}/pulls/${number}/checks`);
+export const upsertPRCheck = (owner: string, repo: string, number: number, data: any) =>
+  request<any>('POST', `/repos/${owner}/${repo}/pulls/${number}/checks`, data);
+
+// Branch protection
+export const getBranchProtection = (owner: string, repo: string, branch: string) =>
+  request<any>('GET', `/repos/${owner}/${repo}/branch-protection/${branch}`);
+export const setBranchProtection = (owner: string, repo: string, branch: string, data: any) =>
+  request<any>('PUT', `/repos/${owner}/${repo}/branch-protection/${branch}`, data);
+export const deleteBranchProtection = (owner: string, repo: string, branch: string) =>
+  request<void>('DELETE', `/repos/${owner}/${repo}/branch-protection/${branch}`);
+
+// Webhooks
+export const createWebhook = (owner: string, repo: string, data: any) =>
+  request<any>('POST', `/repos/${owner}/${repo}/webhooks`, data);
+export const listWebhooks = (owner: string, repo: string) =>
+  request<any[]>('GET', `/repos/${owner}/${repo}/webhooks`);
+export const getWebhook = (owner: string, repo: string, id: number) =>
+  request<any>('GET', `/repos/${owner}/${repo}/webhooks/${id}`);
+export const deleteWebhook = (owner: string, repo: string, id: number) =>
+  request<void>('DELETE', `/repos/${owner}/${repo}/webhooks/${id}`);
+export const listWebhookDeliveries = (owner: string, repo: string, id: number) =>
+  request<any[]>('GET', `/repos/${owner}/${repo}/webhooks/${id}/deliveries`);
+export const pingWebhook = (owner: string, repo: string, id: number) =>
+  request<any>('POST', `/repos/${owner}/${repo}/webhooks/${id}/ping`);
+export const redeliverWebhookDelivery = (owner: string, repo: string, id: number, deliveryID: number) =>
+  request<any>('POST', `/repos/${owner}/${repo}/webhooks/${id}/deliveries/${deliveryID}/redeliver`);
+
+// Issues
+export const createIssue = (owner: string, repo: string, data: any) =>
+  request<any>('POST', `/repos/${owner}/${repo}/issues`, data);
+export const listIssues = (owner: string, repo: string, state?: string, page?: number, perPage?: number) => {
+  const query = new URLSearchParams();
+  if (state) query.set('state', state);
+  if (page && page > 0) query.set('page', String(page));
+  if (perPage && perPage > 0) query.set('per_page', String(perPage));
+  const suffix = query.toString();
+  return request<any[]>('GET', `/repos/${owner}/${repo}/issues${suffix ? '?' + suffix : ''}`);
+};
+export const getIssue = (owner: string, repo: string, number: number) =>
+  request<any>('GET', `/repos/${owner}/${repo}/issues/${number}`);
+export const updateIssue = (owner: string, repo: string, number: number, data: any) =>
+  request<any>('PATCH', `/repos/${owner}/${repo}/issues/${number}`, data);
+export const createIssueComment = (owner: string, repo: string, number: number, data: any) =>
+  request<any>('POST', `/repos/${owner}/${repo}/issues/${number}/comments`, data);
+export const listIssueComments = (owner: string, repo: string, number: number) =>
+  request<any[]>('GET', `/repos/${owner}/${repo}/issues/${number}/comments`);

@@ -27,8 +27,8 @@ func (s *Server) authorizeRepoRequest(w http.ResponseWriter, r *http.Request, wr
 
 	claims := auth.GetClaims(r.Context())
 
-	// Public read does not require authentication.
-	if !write && !repo.IsPrivate && claims == nil {
+	// Public read is always allowed.
+	if !write && !repo.IsPrivate {
 		return repo, true
 	}
 

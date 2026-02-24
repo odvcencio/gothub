@@ -31,6 +31,14 @@ type DB interface {
 	ListUserRepositories(ctx context.Context, userID int64) ([]models.Repository, error)
 	DeleteRepository(ctx context.Context, id int64) error
 
+	// Stars
+	AddRepoStar(ctx context.Context, repoID, userID int64) error
+	RemoveRepoStar(ctx context.Context, repoID, userID int64) error
+	IsRepoStarred(ctx context.Context, repoID, userID int64) (bool, error)
+	CountRepoStars(ctx context.Context, repoID int64) (int, error)
+	ListRepoStargazers(ctx context.Context, repoID int64) ([]models.User, error)
+	ListUserStarredRepositories(ctx context.Context, userID int64) ([]models.Repository, error)
+
 	// Collaborators
 	AddCollaborator(ctx context.Context, c *models.Collaborator) error
 	GetCollaborator(ctx context.Context, repoID, userID int64) (*models.Collaborator, error)
@@ -50,6 +58,32 @@ type DB interface {
 	// PR Reviews
 	CreatePRReview(ctx context.Context, review *models.PRReview) error
 	ListPRReviews(ctx context.Context, prID int64) ([]models.PRReview, error)
+
+	// Branch Protection
+	UpsertBranchProtectionRule(ctx context.Context, rule *models.BranchProtectionRule) error
+	GetBranchProtectionRule(ctx context.Context, repoID int64, branch string) (*models.BranchProtectionRule, error)
+	DeleteBranchProtectionRule(ctx context.Context, repoID int64, branch string) error
+
+	// PR Check Runs
+	UpsertPRCheckRun(ctx context.Context, run *models.PRCheckRun) error
+	ListPRCheckRuns(ctx context.Context, prID int64) ([]models.PRCheckRun, error)
+
+	// Issues
+	CreateIssue(ctx context.Context, issue *models.Issue) error
+	GetIssue(ctx context.Context, repoID int64, number int) (*models.Issue, error)
+	ListIssues(ctx context.Context, repoID int64, state string) ([]models.Issue, error)
+	UpdateIssue(ctx context.Context, issue *models.Issue) error
+	CreateIssueComment(ctx context.Context, comment *models.IssueComment) error
+	ListIssueComments(ctx context.Context, issueID int64) ([]models.IssueComment, error)
+
+	// Webhooks
+	CreateWebhook(ctx context.Context, hook *models.Webhook) error
+	GetWebhook(ctx context.Context, repoID, webhookID int64) (*models.Webhook, error)
+	ListWebhooks(ctx context.Context, repoID int64) ([]models.Webhook, error)
+	DeleteWebhook(ctx context.Context, repoID, webhookID int64) error
+	CreateWebhookDelivery(ctx context.Context, delivery *models.WebhookDelivery) error
+	GetWebhookDelivery(ctx context.Context, repoID, webhookID, deliveryID int64) (*models.WebhookDelivery, error)
+	ListWebhookDeliveries(ctx context.Context, repoID, webhookID int64) ([]models.WebhookDelivery, error)
 
 	// Hash Mapping
 	SetHashMapping(ctx context.Context, m *models.HashMapping) error

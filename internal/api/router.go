@@ -22,6 +22,8 @@ type Server struct {
 	browseSvc    *service.BrowseService
 	diffSvc      *service.DiffService
 	prSvc        *service.PRService
+	issueSvc     *service.IssueService
+	webhookSvc   *service.WebhookService
 	codeIntelSvc *service.CodeIntelService
 	mux          *http.ServeMux
 }
@@ -30,6 +32,8 @@ func NewServer(db database.DB, authSvc *auth.Service, repoSvc *service.RepoServi
 	browseSvc := service.NewBrowseService(repoSvc)
 	diffSvc := service.NewDiffService(repoSvc, browseSvc)
 	prSvc := service.NewPRService(db, repoSvc, browseSvc)
+	issueSvc := service.NewIssueService(db)
+	webhookSvc := service.NewWebhookService(db)
 	codeIntelSvc := service.NewCodeIntelService(repoSvc, browseSvc)
 	s := &Server{
 		db:           db,
@@ -38,6 +42,8 @@ func NewServer(db database.DB, authSvc *auth.Service, repoSvc *service.RepoServi
 		browseSvc:    browseSvc,
 		diffSvc:      diffSvc,
 		prSvc:        prSvc,
+		issueSvc:     issueSvc,
+		webhookSvc:   webhookSvc,
 		codeIntelSvc: codeIntelSvc,
 		mux:          http.NewServeMux(),
 	}
@@ -60,12 +66,27 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/user/ssh-keys", s.requireAuth(s.handleListSSHKeys))
 	s.mux.HandleFunc("POST /api/v1/user/ssh-keys", s.requireAuth(s.handleCreateSSHKey))
 	s.mux.HandleFunc("DELETE /api/v1/user/ssh-keys/{id}", s.requireAuth(s.handleDeleteSSHKey))
+	s.mux.HandleFunc("GET /api/v1/user/starred", s.requireAuth(s.handleListUserStarredRepos))
 
 	// Repositories
 	s.mux.HandleFunc("POST /api/v1/repos", s.requireAuth(s.handleCreateRepo))
 	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}", s.handleGetRepo)
 	s.mux.HandleFunc("GET /api/v1/user/repos", s.requireAuth(s.handleListUserRepos))
 	s.mux.HandleFunc("DELETE /api/v1/repos/{owner}/{repo}", s.requireAuth(s.handleDeleteRepo))
+	s.mux.HandleFunc("POST /api/v1/repos/{owner}/{repo}/collaborators", s.requireAuth(s.handleAddCollaborator))
+	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/collaborators", s.handleListCollaborators)
+	s.mux.HandleFunc("DELETE /api/v1/repos/{owner}/{repo}/collaborators/{username}", s.requireAuth(s.handleRemoveCollaborator))
+	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/stars", s.handleGetRepoStars)
+	s.mux.HandleFunc("PUT /api/v1/repos/{owner}/{repo}/star", s.requireAuth(s.handleStarRepo))
+	s.mux.HandleFunc("DELETE /api/v1/repos/{owner}/{repo}/star", s.requireAuth(s.handleUnstarRepo))
+	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/stargazers", s.handleListRepoStargazers)
+	s.mux.HandleFunc("POST /api/v1/repos/{owner}/{repo}/webhooks", s.requireAuth(s.handleCreateWebhook))
+	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/webhooks", s.handleListWebhooks)
+	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/webhooks/{id}", s.handleGetWebhook)
+	s.mux.HandleFunc("DELETE /api/v1/repos/{owner}/{repo}/webhooks/{id}", s.requireAuth(s.handleDeleteWebhook))
+	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/webhooks/{id}/deliveries", s.handleListWebhookDeliveries)
+	s.mux.HandleFunc("POST /api/v1/repos/{owner}/{repo}/webhooks/{id}/deliveries/{delivery_id}/redeliver", s.requireAuth(s.handleRedeliverWebhookDelivery))
+	s.mux.HandleFunc("POST /api/v1/repos/{owner}/{repo}/webhooks/{id}/ping", s.requireAuth(s.handlePingWebhook))
 
 	// Code browsing
 	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/branches", s.handleListBranches)
@@ -85,11 +106,27 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/pulls/{number}", s.handleGetPR)
 	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/pulls/{number}/diff", s.handlePRDiff)
 	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/pulls/{number}/merge-preview", s.handleMergePreview)
+	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/pulls/{number}/merge-gate", s.handlePRMergeGate)
 	s.mux.HandleFunc("POST /api/v1/repos/{owner}/{repo}/pulls/{number}/merge", s.requireAuth(s.handleMergePR))
 	s.mux.HandleFunc("POST /api/v1/repos/{owner}/{repo}/pulls/{number}/comments", s.requireAuth(s.handleCreatePRComment))
 	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/pulls/{number}/comments", s.handleListPRComments)
 	s.mux.HandleFunc("POST /api/v1/repos/{owner}/{repo}/pulls/{number}/reviews", s.requireAuth(s.handleCreatePRReview))
 	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/pulls/{number}/reviews", s.handleListPRReviews)
+	s.mux.HandleFunc("POST /api/v1/repos/{owner}/{repo}/pulls/{number}/checks", s.requireAuth(s.handleUpsertPRCheckRun))
+	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/pulls/{number}/checks", s.handleListPRCheckRuns)
+
+	// Issues
+	s.mux.HandleFunc("POST /api/v1/repos/{owner}/{repo}/issues", s.requireAuth(s.handleCreateIssue))
+	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/issues", s.handleListIssues)
+	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/issues/{number}", s.handleGetIssue)
+	s.mux.HandleFunc("PATCH /api/v1/repos/{owner}/{repo}/issues/{number}", s.requireAuth(s.handleUpdateIssue))
+	s.mux.HandleFunc("POST /api/v1/repos/{owner}/{repo}/issues/{number}/comments", s.requireAuth(s.handleCreateIssueComment))
+	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/issues/{number}/comments", s.handleListIssueComments)
+
+	// Branch protection
+	s.mux.HandleFunc("PUT /api/v1/repos/{owner}/{repo}/branch-protection/{branch...}", s.requireAuth(s.handleUpsertBranchProtection))
+	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/branch-protection/{branch...}", s.handleGetBranchProtection)
+	s.mux.HandleFunc("DELETE /api/v1/repos/{owner}/{repo}/branch-protection/{branch...}", s.requireAuth(s.handleDeleteBranchProtection))
 
 	// Code intelligence
 	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/symbols/{ref}", s.handleSearchSymbols)

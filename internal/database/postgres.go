@@ -88,6 +88,13 @@ CREATE TABLE IF NOT EXISTS collaborators (
 	PRIMARY KEY (repo_id, user_id)
 );
 
+CREATE TABLE IF NOT EXISTS repo_stars (
+	repo_id BIGINT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+	user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	PRIMARY KEY (repo_id, user_id)
+);
+
 CREATE TABLE IF NOT EXISTS pull_requests (
 	id BIGSERIAL PRIMARY KEY,
 	repo_id BIGINT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
@@ -129,6 +136,83 @@ CREATE TABLE IF NOT EXISTS pr_reviews (
 	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS issues (
+	id BIGSERIAL PRIMARY KEY,
+	repo_id BIGINT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+	number INTEGER NOT NULL,
+	title TEXT NOT NULL,
+	body TEXT NOT NULL DEFAULT '',
+	state TEXT NOT NULL DEFAULT 'open',
+	author_id BIGINT NOT NULL REFERENCES users(id),
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	closed_at TIMESTAMPTZ,
+	UNIQUE(repo_id, number)
+);
+
+CREATE TABLE IF NOT EXISTS issue_comments (
+	id BIGSERIAL PRIMARY KEY,
+	issue_id BIGINT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+	author_id BIGINT NOT NULL REFERENCES users(id),
+	body TEXT NOT NULL,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS branch_protection_rules (
+	id BIGSERIAL PRIMARY KEY,
+	repo_id BIGINT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+	branch TEXT NOT NULL,
+	enabled BOOLEAN NOT NULL DEFAULT TRUE,
+	require_approvals BOOLEAN NOT NULL DEFAULT FALSE,
+	required_approvals INTEGER NOT NULL DEFAULT 1,
+	require_status_checks BOOLEAN NOT NULL DEFAULT FALSE,
+	required_checks_csv TEXT NOT NULL DEFAULT '',
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	UNIQUE(repo_id, branch)
+);
+
+CREATE TABLE IF NOT EXISTS pr_check_runs (
+	id BIGSERIAL PRIMARY KEY,
+	pr_id BIGINT NOT NULL REFERENCES pull_requests(id) ON DELETE CASCADE,
+	name TEXT NOT NULL,
+	status TEXT NOT NULL DEFAULT 'queued',
+	conclusion TEXT NOT NULL DEFAULT '',
+	details_url TEXT NOT NULL DEFAULT '',
+	external_id TEXT NOT NULL DEFAULT '',
+	head_commit TEXT NOT NULL DEFAULT '',
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	UNIQUE(pr_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS repo_webhooks (
+	id BIGSERIAL PRIMARY KEY,
+	repo_id BIGINT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+	url TEXT NOT NULL,
+	secret TEXT NOT NULL DEFAULT '',
+	events_csv TEXT NOT NULL DEFAULT '*',
+	active BOOLEAN NOT NULL DEFAULT TRUE,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS webhook_deliveries (
+	id BIGSERIAL PRIMARY KEY,
+	repo_id BIGINT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+	webhook_id BIGINT NOT NULL REFERENCES repo_webhooks(id) ON DELETE CASCADE,
+	event TEXT NOT NULL,
+	delivery_uid TEXT NOT NULL,
+	attempt INTEGER NOT NULL DEFAULT 1,
+	status_code INTEGER NOT NULL DEFAULT 0,
+	success BOOLEAN NOT NULL DEFAULT FALSE,
+	error TEXT NOT NULL DEFAULT '',
+	request_body TEXT NOT NULL DEFAULT '',
+	response_body TEXT NOT NULL DEFAULT '',
+	duration_ms BIGINT NOT NULL DEFAULT 0,
+	redelivery_of_id BIGINT,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS hash_mapping (
 	repo_id BIGINT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
 	got_hash TEXT NOT NULL,
@@ -138,6 +222,14 @@ CREATE TABLE IF NOT EXISTS hash_mapping (
 );
 
 CREATE INDEX IF NOT EXISTS idx_hash_mapping_git ON hash_mapping(repo_id, git_hash);
+CREATE INDEX IF NOT EXISTS idx_branch_protection_repo_branch ON branch_protection_rules(repo_id, branch);
+CREATE INDEX IF NOT EXISTS idx_pr_check_runs_pr ON pr_check_runs(pr_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_issues_repo_number ON issues(repo_id, number DESC);
+CREATE INDEX IF NOT EXISTS idx_issue_comments_issue ON issue_comments(issue_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_repo_webhooks_repo ON repo_webhooks(repo_id);
+CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_webhook_time ON webhook_deliveries(webhook_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_repo_stars_repo ON repo_stars(repo_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_repo_stars_user ON repo_stars(user_id, created_at DESC);
 `
 
 // --- Users ---
@@ -304,6 +396,94 @@ func (p *PostgresDB) ListUserRepositories(ctx context.Context, userID int64) ([]
 func (p *PostgresDB) DeleteRepository(ctx context.Context, id int64) error {
 	_, err := p.db.ExecContext(ctx, `DELETE FROM repositories WHERE id = $1`, id)
 	return err
+}
+
+// --- Stars ---
+
+func (p *PostgresDB) AddRepoStar(ctx context.Context, repoID, userID int64) error {
+	_, err := p.db.ExecContext(ctx,
+		`INSERT INTO repo_stars (repo_id, user_id) VALUES ($1, $2)
+		 ON CONFLICT (repo_id, user_id) DO NOTHING`,
+		repoID, userID)
+	return err
+}
+
+func (p *PostgresDB) RemoveRepoStar(ctx context.Context, repoID, userID int64) error {
+	_, err := p.db.ExecContext(ctx,
+		`DELETE FROM repo_stars WHERE repo_id = $1 AND user_id = $2`,
+		repoID, userID)
+	return err
+}
+
+func (p *PostgresDB) IsRepoStarred(ctx context.Context, repoID, userID int64) (bool, error) {
+	var exists bool
+	if err := p.db.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM repo_stars WHERE repo_id = $1 AND user_id = $2)`,
+		repoID, userID).Scan(&exists); err != nil {
+		return false, err
+	}
+	return exists, nil
+}
+
+func (p *PostgresDB) CountRepoStars(ctx context.Context, repoID int64) (int, error) {
+	var count int
+	if err := p.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM repo_stars WHERE repo_id = $1`,
+		repoID).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+func (p *PostgresDB) ListRepoStargazers(ctx context.Context, repoID int64) ([]models.User, error) {
+	rows, err := p.db.QueryContext(ctx,
+		`SELECT u.id, u.username, u.email, u.password_hash, u.is_admin, u.created_at
+		 FROM repo_stars rs
+		 JOIN users u ON u.id = rs.user_id
+		 WHERE rs.repo_id = $1
+		 ORDER BY rs.created_at DESC, u.id DESC`,
+		repoID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var users []models.User
+	for rows.Next() {
+		var u models.User
+		if err := rows.Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.IsAdmin, &u.CreatedAt); err != nil {
+			return nil, err
+		}
+		users = append(users, u)
+	}
+	return users, rows.Err()
+}
+
+func (p *PostgresDB) ListUserStarredRepositories(ctx context.Context, userID int64) ([]models.Repository, error) {
+	rows, err := p.db.QueryContext(ctx,
+		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at,
+		 COALESCE(u.username, o.name, '')
+		 FROM repo_stars rs
+		 JOIN repositories r ON r.id = rs.repo_id
+		 LEFT JOIN users u ON u.id = r.owner_user_id
+		 LEFT JOIN orgs o ON o.id = r.owner_org_id
+		 WHERE rs.user_id = $1
+		 ORDER BY rs.created_at DESC, r.id DESC`,
+		userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var repos []models.Repository
+	for rows.Next() {
+		var r models.Repository
+		if err := rows.Scan(&r.ID, &r.OwnerUserID, &r.OwnerOrgID, &r.Name, &r.Description, &r.DefaultBranch, &r.IsPrivate, &r.StoragePath, &r.CreatedAt, &r.OwnerName); err != nil {
+			return nil, err
+		}
+		repos = append(repos, r)
+	}
+	return repos, rows.Err()
 }
 
 // --- Collaborators ---
@@ -492,6 +672,299 @@ func (p *PostgresDB) ListPRReviews(ctx context.Context, prID int64) ([]models.PR
 		reviews = append(reviews, r)
 	}
 	return reviews, rows.Err()
+}
+
+// --- Issues ---
+
+func (p *PostgresDB) CreateIssue(ctx context.Context, issue *models.Issue) error {
+	tx, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var repoID int64
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM repositories WHERE id = $1 FOR UPDATE`, issue.RepoID).Scan(&repoID); err != nil {
+		return err
+	}
+
+	var maxNum int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COALESCE(MAX(number), 0) FROM issues WHERE repo_id = $1`, issue.RepoID).Scan(&maxNum); err != nil {
+		return err
+	}
+	issue.Number = maxNum + 1
+
+	if err := tx.QueryRowContext(ctx,
+		`INSERT INTO issues (repo_id, number, title, body, state, author_id)
+		 VALUES ($1, $2, $3, $4, $5, $6)
+		 RETURNING id, created_at`,
+		issue.RepoID, issue.Number, issue.Title, issue.Body, issue.State, issue.AuthorID).
+		Scan(&issue.ID, &issue.CreatedAt); err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+func (p *PostgresDB) GetIssue(ctx context.Context, repoID int64, number int) (*models.Issue, error) {
+	issue := &models.Issue{}
+	err := p.db.QueryRowContext(ctx,
+		`SELECT i.id, i.repo_id, i.number, i.title, i.body, i.state, i.author_id, u.username, i.created_at, i.closed_at
+		 FROM issues i
+		 JOIN users u ON u.id = i.author_id
+		 WHERE i.repo_id = $1 AND i.number = $2`, repoID, number).
+		Scan(&issue.ID, &issue.RepoID, &issue.Number, &issue.Title, &issue.Body, &issue.State, &issue.AuthorID, &issue.AuthorName, &issue.CreatedAt, &issue.ClosedAt)
+	if err != nil {
+		return nil, err
+	}
+	return issue, nil
+}
+
+func (p *PostgresDB) ListIssues(ctx context.Context, repoID int64, state string) ([]models.Issue, error) {
+	query := `SELECT i.id, i.repo_id, i.number, i.title, i.body, i.state, i.author_id, u.username, i.created_at, i.closed_at
+		 FROM issues i
+		 JOIN users u ON u.id = i.author_id
+		 WHERE i.repo_id = $1`
+	args := []any{repoID}
+	if state != "" {
+		query += ` AND i.state = $2`
+		args = append(args, state)
+	}
+	query += ` ORDER BY i.number DESC`
+
+	rows, err := p.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var issues []models.Issue
+	for rows.Next() {
+		var issue models.Issue
+		if err := rows.Scan(&issue.ID, &issue.RepoID, &issue.Number, &issue.Title, &issue.Body, &issue.State, &issue.AuthorID, &issue.AuthorName, &issue.CreatedAt, &issue.ClosedAt); err != nil {
+			return nil, err
+		}
+		issues = append(issues, issue)
+	}
+	return issues, rows.Err()
+}
+
+func (p *PostgresDB) UpdateIssue(ctx context.Context, issue *models.Issue) error {
+	_, err := p.db.ExecContext(ctx,
+		`UPDATE issues SET title = $1, body = $2, state = $3, closed_at = $4 WHERE id = $5`,
+		issue.Title, issue.Body, issue.State, issue.ClosedAt, issue.ID)
+	return err
+}
+
+func (p *PostgresDB) CreateIssueComment(ctx context.Context, c *models.IssueComment) error {
+	return p.db.QueryRowContext(ctx,
+		`INSERT INTO issue_comments (issue_id, author_id, body) VALUES ($1, $2, $3) RETURNING id, created_at`,
+		c.IssueID, c.AuthorID, c.Body).Scan(&c.ID, &c.CreatedAt)
+}
+
+func (p *PostgresDB) ListIssueComments(ctx context.Context, issueID int64) ([]models.IssueComment, error) {
+	rows, err := p.db.QueryContext(ctx,
+		`SELECT c.id, c.issue_id, c.author_id, u.username, c.body, c.created_at
+		 FROM issue_comments c
+		 JOIN users u ON u.id = c.author_id
+		 WHERE c.issue_id = $1
+		 ORDER BY c.created_at`, issueID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var comments []models.IssueComment
+	for rows.Next() {
+		var c models.IssueComment
+		if err := rows.Scan(&c.ID, &c.IssueID, &c.AuthorID, &c.AuthorName, &c.Body, &c.CreatedAt); err != nil {
+			return nil, err
+		}
+		comments = append(comments, c)
+	}
+	return comments, rows.Err()
+}
+
+// --- Branch Protection ---
+
+func (p *PostgresDB) UpsertBranchProtectionRule(ctx context.Context, rule *models.BranchProtectionRule) error {
+	if rule.RequiredApprovals <= 0 {
+		rule.RequiredApprovals = 1
+	}
+	return p.db.QueryRowContext(ctx,
+		`INSERT INTO branch_protection_rules (
+			 repo_id, branch, enabled, require_approvals, required_approvals, require_status_checks, required_checks_csv
+		 ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+		 ON CONFLICT(repo_id, branch) DO UPDATE SET
+			 enabled = EXCLUDED.enabled,
+			 require_approvals = EXCLUDED.require_approvals,
+			 required_approvals = EXCLUDED.required_approvals,
+			 require_status_checks = EXCLUDED.require_status_checks,
+			 required_checks_csv = EXCLUDED.required_checks_csv,
+			 updated_at = NOW()
+		 RETURNING id, repo_id, branch, enabled, require_approvals, required_approvals, require_status_checks, required_checks_csv, created_at, updated_at`,
+		rule.RepoID, rule.Branch, rule.Enabled, rule.RequireApprovals, rule.RequiredApprovals, rule.RequireStatusChecks, rule.RequiredChecksCSV).
+		Scan(&rule.ID, &rule.RepoID, &rule.Branch, &rule.Enabled, &rule.RequireApprovals, &rule.RequiredApprovals,
+			&rule.RequireStatusChecks, &rule.RequiredChecksCSV, &rule.CreatedAt, &rule.UpdatedAt)
+}
+
+func (p *PostgresDB) GetBranchProtectionRule(ctx context.Context, repoID int64, branch string) (*models.BranchProtectionRule, error) {
+	rule := &models.BranchProtectionRule{}
+	err := p.db.QueryRowContext(ctx,
+		`SELECT id, repo_id, branch, enabled, require_approvals, required_approvals, require_status_checks, required_checks_csv, created_at, updated_at
+		 FROM branch_protection_rules
+		 WHERE repo_id = $1 AND branch = $2`,
+		repoID, branch).
+		Scan(&rule.ID, &rule.RepoID, &rule.Branch, &rule.Enabled, &rule.RequireApprovals, &rule.RequiredApprovals,
+			&rule.RequireStatusChecks, &rule.RequiredChecksCSV, &rule.CreatedAt, &rule.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return rule, nil
+}
+
+func (p *PostgresDB) DeleteBranchProtectionRule(ctx context.Context, repoID int64, branch string) error {
+	_, err := p.db.ExecContext(ctx,
+		`DELETE FROM branch_protection_rules WHERE repo_id = $1 AND branch = $2`, repoID, branch)
+	return err
+}
+
+// --- PR Check Runs ---
+
+func (p *PostgresDB) UpsertPRCheckRun(ctx context.Context, run *models.PRCheckRun) error {
+	return p.db.QueryRowContext(ctx,
+		`INSERT INTO pr_check_runs (
+			 pr_id, name, status, conclusion, details_url, external_id, head_commit
+		 ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+		 ON CONFLICT(pr_id, name) DO UPDATE SET
+			 status = EXCLUDED.status,
+			 conclusion = EXCLUDED.conclusion,
+			 details_url = EXCLUDED.details_url,
+			 external_id = EXCLUDED.external_id,
+			 head_commit = EXCLUDED.head_commit,
+			 updated_at = NOW()
+		 RETURNING id, pr_id, name, status, conclusion, details_url, external_id, head_commit, created_at, updated_at`,
+		run.PRID, run.Name, run.Status, run.Conclusion, run.DetailsURL, run.ExternalID, run.HeadCommit).
+		Scan(&run.ID, &run.PRID, &run.Name, &run.Status, &run.Conclusion, &run.DetailsURL, &run.ExternalID, &run.HeadCommit, &run.CreatedAt, &run.UpdatedAt)
+}
+
+func (p *PostgresDB) ListPRCheckRuns(ctx context.Context, prID int64) ([]models.PRCheckRun, error) {
+	rows, err := p.db.QueryContext(ctx,
+		`SELECT id, pr_id, name, status, conclusion, details_url, external_id, head_commit, created_at, updated_at
+		 FROM pr_check_runs
+		 WHERE pr_id = $1
+		 ORDER BY updated_at DESC, id DESC`, prID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var runs []models.PRCheckRun
+	for rows.Next() {
+		var run models.PRCheckRun
+		if err := rows.Scan(&run.ID, &run.PRID, &run.Name, &run.Status, &run.Conclusion, &run.DetailsURL, &run.ExternalID, &run.HeadCommit, &run.CreatedAt, &run.UpdatedAt); err != nil {
+			return nil, err
+		}
+		runs = append(runs, run)
+	}
+	return runs, rows.Err()
+}
+
+// --- Webhooks ---
+
+func (p *PostgresDB) CreateWebhook(ctx context.Context, hook *models.Webhook) error {
+	return p.db.QueryRowContext(ctx,
+		`INSERT INTO repo_webhooks (repo_id, url, secret, events_csv, active)
+		 VALUES ($1, $2, $3, $4, $5)
+		 RETURNING id, created_at, updated_at`,
+		hook.RepoID, hook.URL, hook.Secret, hook.EventsCSV, hook.Active).
+		Scan(&hook.ID, &hook.CreatedAt, &hook.UpdatedAt)
+}
+
+func (p *PostgresDB) GetWebhook(ctx context.Context, repoID, webhookID int64) (*models.Webhook, error) {
+	hook := &models.Webhook{}
+	err := p.db.QueryRowContext(ctx,
+		`SELECT id, repo_id, url, secret, events_csv, active, created_at, updated_at
+		 FROM repo_webhooks
+		 WHERE repo_id = $1 AND id = $2`, repoID, webhookID).
+		Scan(&hook.ID, &hook.RepoID, &hook.URL, &hook.Secret, &hook.EventsCSV, &hook.Active, &hook.CreatedAt, &hook.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return hook, nil
+}
+
+func (p *PostgresDB) ListWebhooks(ctx context.Context, repoID int64) ([]models.Webhook, error) {
+	rows, err := p.db.QueryContext(ctx,
+		`SELECT id, repo_id, url, secret, events_csv, active, created_at, updated_at
+		 FROM repo_webhooks
+		 WHERE repo_id = $1
+		 ORDER BY id DESC`, repoID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var hooks []models.Webhook
+	for rows.Next() {
+		var hook models.Webhook
+		if err := rows.Scan(&hook.ID, &hook.RepoID, &hook.URL, &hook.Secret, &hook.EventsCSV, &hook.Active, &hook.CreatedAt, &hook.UpdatedAt); err != nil {
+			return nil, err
+		}
+		hooks = append(hooks, hook)
+	}
+	return hooks, rows.Err()
+}
+
+func (p *PostgresDB) DeleteWebhook(ctx context.Context, repoID, webhookID int64) error {
+	_, err := p.db.ExecContext(ctx,
+		`DELETE FROM repo_webhooks WHERE repo_id = $1 AND id = $2`, repoID, webhookID)
+	return err
+}
+
+func (p *PostgresDB) CreateWebhookDelivery(ctx context.Context, delivery *models.WebhookDelivery) error {
+	return p.db.QueryRowContext(ctx,
+		`INSERT INTO webhook_deliveries (
+			 repo_id, webhook_id, event, delivery_uid, attempt, status_code, success, error, request_body, response_body, duration_ms, redelivery_of_id
+		 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		 RETURNING id, created_at`,
+		delivery.RepoID, delivery.WebhookID, delivery.Event, delivery.DeliveryUID, delivery.Attempt, delivery.StatusCode,
+		delivery.Success, delivery.Error, delivery.RequestBody, delivery.ResponseBody, delivery.DurationMS, delivery.RedeliveryOfID).
+		Scan(&delivery.ID, &delivery.CreatedAt)
+}
+
+func (p *PostgresDB) GetWebhookDelivery(ctx context.Context, repoID, webhookID, deliveryID int64) (*models.WebhookDelivery, error) {
+	d := &models.WebhookDelivery{}
+	err := p.db.QueryRowContext(ctx,
+		`SELECT id, repo_id, webhook_id, event, delivery_uid, attempt, status_code, success, error, request_body, response_body, duration_ms, redelivery_of_id, created_at
+		 FROM webhook_deliveries
+		 WHERE repo_id = $1 AND webhook_id = $2 AND id = $3`,
+		repoID, webhookID, deliveryID).
+		Scan(&d.ID, &d.RepoID, &d.WebhookID, &d.Event, &d.DeliveryUID, &d.Attempt, &d.StatusCode, &d.Success, &d.Error,
+			&d.RequestBody, &d.ResponseBody, &d.DurationMS, &d.RedeliveryOfID, &d.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return d, nil
+}
+
+func (p *PostgresDB) ListWebhookDeliveries(ctx context.Context, repoID, webhookID int64) ([]models.WebhookDelivery, error) {
+	rows, err := p.db.QueryContext(ctx,
+		`SELECT id, repo_id, webhook_id, event, delivery_uid, attempt, status_code, success, error, request_body, response_body, duration_ms, redelivery_of_id, created_at
+		 FROM webhook_deliveries
+		 WHERE repo_id = $1 AND webhook_id = $2
+		 ORDER BY id DESC`, repoID, webhookID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var deliveries []models.WebhookDelivery
+	for rows.Next() {
+		var d models.WebhookDelivery
+		if err := rows.Scan(&d.ID, &d.RepoID, &d.WebhookID, &d.Event, &d.DeliveryUID, &d.Attempt, &d.StatusCode, &d.Success, &d.Error,
+			&d.RequestBody, &d.ResponseBody, &d.DurationMS, &d.RedeliveryOfID, &d.CreatedAt); err != nil {
+			return nil, err
+		}
+		deliveries = append(deliveries, d)
+	}
+	return deliveries, rows.Err()
 }
 
 // --- Hash Mapping ---

@@ -1,11 +1,13 @@
 package api
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/odvcencio/gothub/internal/auth"
 	"github.com/odvcencio/gothub/internal/models"
@@ -43,6 +45,12 @@ func (s *Server) handleCreatePR(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+
+	// Best-effort webhook emission; does not block PR creation success.
+	go func(repoID int64, createdPR *models.PullRequest) {
+		_ = s.webhookSvc.EmitPullRequestEvent(context.Background(), repoID, "opened", createdPR)
+	}(repo.ID, pr)
+
 	jsonResponse(w, http.StatusCreated, pr)
 }
 
@@ -130,6 +138,28 @@ func (s *Server) handleMergePreview(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, preview)
 }
 
+func (s *Server) handlePRMergeGate(w http.ResponseWriter, r *http.Request) {
+	number, _ := strconv.Atoi(r.PathValue("number"))
+
+	repo, ok := s.authorizeRepoRequest(w, r, false)
+	if !ok {
+		return
+	}
+
+	pr, err := s.prSvc.Get(r.Context(), repo.ID, number)
+	if err != nil {
+		jsonError(w, "pull request not found", http.StatusNotFound)
+		return
+	}
+
+	gate, err := s.prSvc.EvaluateMergeGate(r.Context(), repo.ID, pr)
+	if err != nil {
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	jsonResponse(w, http.StatusOK, gate)
+}
+
 func (s *Server) handleMergePR(w http.ResponseWriter, r *http.Request) {
 	claims := auth.GetClaims(r.Context())
 	owner := r.PathValue("owner")
@@ -151,6 +181,20 @@ func (s *Server) handleMergePR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	gate, err := s.prSvc.EvaluateMergeGate(r.Context(), repo.ID, pr)
+	if err != nil {
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if !gate.Allowed {
+		jsonResponse(w, http.StatusConflict, map[string]any{
+			"error":   "merge blocked by branch protection",
+			"reasons": gate.Reasons,
+			"detail":  strings.Join(gate.Reasons, "; "),
+		})
+		return
+	}
+
 	user, _ := s.db.GetUserByID(r.Context(), claims.UserID)
 	mergerName := user.Username
 
@@ -164,6 +208,11 @@ func (s *Server) handleMergePR(w http.ResponseWriter, r *http.Request) {
 		"merge_commit": string(mergeHash),
 		"status":       "merged",
 	})
+
+	// Best-effort webhook emission after merge.
+	go func(repoID int64, mergedPR *models.PullRequest) {
+		_ = s.webhookSvc.EmitPullRequestEvent(context.Background(), repoID, "merged", mergedPR)
+	}(repo.ID, pr)
 }
 
 // PR Comments
