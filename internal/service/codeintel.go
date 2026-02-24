@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -55,8 +56,8 @@ func NewCodeIntelService(db database.DB, repoSvc *RepoService, browseSvc *Browse
 }
 
 // BuildIndex returns a semantic index for a repository at a ref.
-// It first checks in-memory cache, then persisted store-backed index, then
-// falls back to an on-demand object-store build.
+// It checks in-memory cache and persisted index first, then builds directly
+// from the object store if needed.
 func (s *CodeIntelService) BuildIndex(ctx context.Context, owner, repo, ref string) (*model.Index, error) {
 	commitHash, err := s.browseSvc.ResolveRef(ctx, owner, repo, ref)
 	if err != nil {
@@ -79,7 +80,7 @@ func (s *CodeIntelService) BuildIndex(ctx context.Context, owner, repo, ref stri
 		return idx, nil
 	}
 
-	idx, err := s.buildIndexFromStore(ctx, owner, repo, ref, store)
+	idx, err := s.buildIndexFromStore(store, commitHash, fmt.Sprintf("%s/%s", owner, repo))
 	if err != nil {
 		return nil, err
 	}
@@ -88,16 +89,55 @@ func (s *CodeIntelService) BuildIndex(ctx context.Context, owner, repo, ref stri
 	return idx, nil
 }
 
-func (s *CodeIntelService) buildIndexFromStore(ctx context.Context, owner, repo, ref string, store *gotstore.RepoStore) (*model.Index, error) {
+// EnsureCommitIndexed ensures a persisted semantic index exists for a commit.
+// cacheKey should be "owner/repo" when available, or empty to skip cache updates.
+func (s *CodeIntelService) EnsureCommitIndexed(ctx context.Context, repoID int64, store *gotstore.RepoStore, cacheKey string, commitHash object.Hash) error {
+	if strings.TrimSpace(string(commitHash)) == "" || store == nil {
+		return nil
+	}
+
+	key := ""
+	if strings.TrimSpace(cacheKey) != "" {
+		key = fmt.Sprintf("%s@%s", cacheKey, commitHash)
+		if _, ok := s.getCachedIndex(key); ok {
+			return nil
+		}
+	}
+
+	if idx, ok, err := s.loadPersistedIndex(ctx, store, repoID, string(commitHash)); err == nil && ok {
+		if key != "" {
+			s.setCachedIndex(key, idx)
+		}
+		return nil
+	}
+
+	idx, err := s.buildIndexFromStore(store, commitHash, cacheKey)
+	if err != nil {
+		return err
+	}
+	if err := s.persistIndex(ctx, store, repoID, string(commitHash), idx); err != nil {
+		return err
+	}
+	if key != "" {
+		s.setCachedIndex(key, idx)
+	}
+	return nil
+}
+
+func (s *CodeIntelService) buildIndexFromStore(store *gotstore.RepoStore, commitHash object.Hash, indexRoot string) (*model.Index, error) {
 	// Read file blobs directly from the object store to avoid temp-dir materialization.
-	files, err := s.browseSvc.FlattenTree(ctx, owner, repo, ref)
+	files, err := s.flattenTreeForCommit(store, commitHash)
 	if err != nil {
 		return nil, fmt.Errorf("flatten tree: %w", err)
 	}
+	if strings.TrimSpace(indexRoot) == "" {
+		indexRoot = string(commitHash)
+	}
+
 	builder := index.NewBuilder()
 	idx := &model.Index{
 		Version:     repoIndexSchemaVersion,
-		Root:        fmt.Sprintf("%s/%s@%s", owner, repo, ref),
+		Root:        fmt.Sprintf("%s@%s", indexRoot, commitHash),
 		GeneratedAt: time.Now().UTC(),
 		Files:       make([]model.FileSummary, 0, len(files)),
 	}
@@ -137,6 +177,14 @@ func (s *CodeIntelService) buildIndexFromStore(ctx context.Context, owner, repo,
 		idx.Files = append(idx.Files, summary)
 	}
 	return idx, nil
+}
+
+func (s *CodeIntelService) flattenTreeForCommit(store *gotstore.RepoStore, commitHash object.Hash) ([]FileEntry, error) {
+	commit, err := store.Objects.ReadCommit(commitHash)
+	if err != nil {
+		return nil, fmt.Errorf("read commit: %w", err)
+	}
+	return flattenTree(store.Objects, commit.TreeHash, "")
 }
 
 func (s *CodeIntelService) loadPersistedIndex(ctx context.Context, store *gotstore.RepoStore, repoID int64, commitHash string) (*model.Index, bool, error) {

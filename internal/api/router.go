@@ -179,7 +179,10 @@ func (s *Server) routes() {
 		if err != nil {
 			return err
 		}
-		return s.lineageSvc.IndexCommit(ctx, repoModel.ID, store, commitHash)
+		if err := s.lineageSvc.IndexCommit(ctx, repoModel.ID, store, commitHash); err != nil {
+			return err
+		}
+		return s.codeIntelSvc.EnsureCommitIndexed(ctx, repoModel.ID, store, owner+"/"+repo, commitHash)
 	})
 	gotProto.RegisterRoutes(s.mux)
 
@@ -201,7 +204,10 @@ func (s *Server) routes() {
 		},
 		s.authorizeProtocolRepoAccess,
 		func(ctx context.Context, repoID int64, store *gotstore.RepoStore, commitHash object.Hash) error {
-			return s.lineageSvc.IndexCommit(ctx, repoID, store, commitHash)
+			if err := s.lineageSvc.IndexCommit(ctx, repoID, store, commitHash); err != nil {
+				return err
+			}
+			return s.codeIntelSvc.EnsureCommitIndexed(ctx, repoID, store, "", commitHash)
 		},
 	)
 	gitHandler.RegisterRoutes(s.mux)
