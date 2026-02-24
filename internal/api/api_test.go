@@ -193,6 +193,28 @@ func TestUnauthenticatedAccess(t *testing.T) {
 	resp.Body.Close()
 }
 
+func TestAPIBodyLimitRejectsLargeJSON(t *testing.T) {
+	server, _ := setupTestServer(t)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	token := registerAndGetToken(t, ts.URL, "alice")
+	largeDescription := strings.Repeat("x", int((2<<20)+1024))
+	body := fmt.Sprintf(`{"name":"bigrepo","description":"%s","private":false}`, largeDescription)
+
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/repos", bytes.NewBufferString(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("create repo with oversized body: expected 413, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
 func TestProtocolAuthForPrivateRepo(t *testing.T) {
 	server, _ := setupTestServer(t)
 	ts := httptest.NewServer(server)

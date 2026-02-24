@@ -59,7 +59,7 @@ func NewServer(db database.DB, authSvc *auth.Service, repoSvc *service.RepoServi
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	handler := requestLoggingMiddleware(auth.Middleware(s.authSvc)(s.mux))
+	handler := requestLoggingMiddleware(requestBodyLimitMiddleware(auth.Middleware(s.authSvc)(s.mux)))
 	handler.ServeHTTP(w, r)
 }
 
