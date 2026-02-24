@@ -575,7 +575,7 @@ func (h *SmartHTTPHandler) handleUploadPack(w http.ResponseWriter, r *http.Reque
 			return haveSet[h]
 		})
 		if err != nil {
-			http.Error(w, fmt.Sprintf("walk object graph: %v", err), http.StatusInternalServerError)
+			http.Error(w, fmt.Sprintf("invalid object graph: %v", err), http.StatusUnprocessableEntity)
 			return
 		}
 

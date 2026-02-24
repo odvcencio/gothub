@@ -10,10 +10,16 @@ interface Props {
 export function CommitsView({ owner, repo, ref: gitRef }: Props) {
   const [commits, setCommits] = useState<any[]>([]);
   const [error, setError] = useState('');
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     if (!owner || !repo || !gitRef) return;
-    listCommits(owner, repo, gitRef).then(setCommits).catch(e => setError(e.message));
+    setLoading(true);
+    setError('');
+    listCommits(owner, repo, gitRef)
+      .then(setCommits)
+      .catch(e => setError(e.message))
+      .finally(() => setLoading(false));
   }, [owner, repo, gitRef]);
 
   if (error) return <div style={{ color: '#f85149', padding: '20px' }}>{error}</div>;
@@ -24,8 +30,10 @@ export function CommitsView({ owner, repo, ref: gitRef }: Props) {
         Commits on <code style={{ background: '#161b22', padding: '2px 6px', borderRadius: '4px', fontSize: '16px' }}>{gitRef}</code>
       </h2>
 
-      {commits.length === 0 ? (
+      {loading ? (
         <div style={{ color: '#8b949e', padding: '20px' }}>Loading...</div>
+      ) : commits.length === 0 ? (
+        <div style={{ color: '#8b949e', padding: '20px' }}>No commits yet</div>
       ) : (
         <div style={{ border: '1px solid #30363d', borderRadius: '6px' }}>
           {commits.map(c => (

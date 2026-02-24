@@ -1,5 +1,5 @@
 import { useState } from 'preact/hooks';
-import { getToken } from '../api/client';
+import { changePassword, getToken } from '../api/client';
 
 interface Props {
   path?: string;
@@ -7,13 +7,6 @@ interface Props {
 
 export function ChangePasswordView({ path }: Props) {
   const loggedIn = !!getToken();
-
-  const changePassword = (currentPassword: string, newPassword: string) =>
-    fetch('/api/v1/auth/change-password', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('gothub_token')}` },
-      body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
-    }).then(r => { if (!r.ok) return r.json().then(e => { throw new Error(e.error); }); return r.json(); });
 
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');

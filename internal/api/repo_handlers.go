@@ -44,6 +44,12 @@ func (s *Server) handleGetRepo(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if repo.ParentRepoID != nil && *repo.ParentRepoID > 0 {
+		if parent, err := s.repoSvc.GetByID(r.Context(), *repo.ParentRepoID); err == nil {
+			repo.ParentOwner = parent.OwnerName
+			repo.ParentName = parent.Name
+		}
+	}
 	jsonResponse(w, http.StatusOK, repo)
 }
 
@@ -98,6 +104,9 @@ func (s *Server) handleForkRepo(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	fork.OwnerName = claims.Username
+	fork.ParentOwner = sourceRepo.OwnerName
+	fork.ParentName = sourceRepo.Name
 	jsonResponse(w, http.StatusCreated, fork)
 }
 

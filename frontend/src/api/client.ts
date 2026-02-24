@@ -10,6 +10,10 @@ export function setToken(t: string | null) {
 
 export function getToken() { return token; }
 
+function isAuthRequest(path: string): boolean {
+  return path.startsWith('/auth/login') || path.startsWith('/auth/register');
+}
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
@@ -19,6 +23,15 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     headers,
     body: body ? JSON.stringify(body) : undefined,
   });
+
+  if (resp.status === 401 && token && !isAuthRequest(path)) {
+    // Expired/invalid token: clear auth state and send user back to sign-in.
+    setToken(null);
+    if (window.location.pathname !== '/') {
+      window.location.assign('/?session=expired');
+      throw new Error('authentication required');
+    }
+  }
 
   if (!resp.ok) {
     const err = await resp.json().catch(() => ({ error: resp.statusText }));

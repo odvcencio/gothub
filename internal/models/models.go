@@ -38,6 +38,8 @@ type Repository struct {
 	OwnerUserID   *int64    `json:"owner_user_id,omitempty"`
 	OwnerOrgID    *int64    `json:"owner_org_id,omitempty"`
 	ParentRepoID  *int64    `json:"parent_repo_id,omitempty"`
+	ParentOwner   string    `json:"parent_owner,omitempty"`
+	ParentName    string    `json:"parent_name,omitempty"`
 	OwnerName     string    `json:"owner_name"` // populated by service layer
 	Name          string    `json:"name"`
 	Description   string    `json:"description"`

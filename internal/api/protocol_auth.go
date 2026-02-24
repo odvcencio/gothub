@@ -39,9 +39,6 @@ func (s *Server) authorizeProtocolRepoAccess(r *http.Request, owner, repo string
 		return http.StatusInternalServerError, fmt.Errorf("authorization failed")
 	}
 	if !allowed {
-		if repoModel.IsPrivate {
-			return http.StatusNotFound, fmt.Errorf("repository not found")
-		}
 		return http.StatusForbidden, fmt.Errorf("forbidden")
 	}
 

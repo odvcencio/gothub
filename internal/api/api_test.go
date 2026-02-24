@@ -548,6 +548,41 @@ func TestProtocolAuthForPrivateRepo(t *testing.T) {
 	resp.Body.Close()
 }
 
+func TestProtocolAuthForbiddenForPrivateRepoNonMember(t *testing.T) {
+	server, _ := setupTestServer(t)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	aliceToken := registerAndGetToken(t, ts.URL, "alice")
+	bobToken := registerAndGetToken(t, ts.URL, "bob")
+
+	createBody := `{"name":"private-repo","description":"","private":true}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/repos", bytes.NewBufferString(createBody))
+	req.Header.Set("Authorization", "Bearer "+aliceToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create private repo: expected 201, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	reqBody := `{"wants":["` + strings.Repeat("0", 64) + `"]}`
+	req, _ = http.NewRequest("POST", ts.URL+"/got/alice/private-repo/objects/batch", bytes.NewBufferString(reqBody))
+	req.Header.Set("Authorization", "Bearer "+bobToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("non-member got batch fetch on private repo: expected 403, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
 func TestPrivateRepoReadAccessAcrossAPI(t *testing.T) {
 	server, _ := setupTestServer(t)
 	ts := httptest.NewServer(server)
@@ -1203,8 +1238,8 @@ func TestGitUploadPackReturnsErrorOnCorruptObjectGraph(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.StatusCode != http.StatusInternalServerError {
-		t.Fatalf("git upload-pack: expected 500 for corrupt graph, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("git upload-pack: expected 422 for corrupt graph, got %d", resp.StatusCode)
 	}
 	resp.Body.Close()
 }
