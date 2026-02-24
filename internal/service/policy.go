@@ -15,6 +15,8 @@ import (
 	"github.com/odvcencio/gothub/internal/gotstore"
 	"github.com/odvcencio/gothub/internal/models"
 	"github.com/odvcencio/gts-suite/pkg/index"
+	"github.com/odvcencio/gts-suite/pkg/structdiff"
+	"github.com/odvcencio/gts-suite/pkg/xref"
 )
 
 type MergeGateResult struct {
@@ -103,6 +105,14 @@ func (s *PRService) EvaluateMergeGate(ctx context.Context, repoID int64, pr *mod
 		reasons, evalErr := s.evaluateLintPass(ctx, repoID, pr)
 		if evalErr != nil {
 			result.Reasons = append(result.Reasons, fmt.Sprintf("unable to evaluate lint gate: %v", evalErr))
+		}
+		result.Reasons = append(result.Reasons, reasons...)
+	}
+
+	if rule.RequireNoNewDeadCode {
+		reasons, evalErr := s.evaluateNoNewDeadCode(ctx, repoID, pr)
+		if evalErr != nil {
+			result.Reasons = append(result.Reasons, fmt.Sprintf("unable to evaluate dead-code gate: %v", evalErr))
 		}
 		result.Reasons = append(result.Reasons, reasons...)
 	}
@@ -331,6 +341,65 @@ func (s *PRService) evaluateLintPass(ctx context.Context, repoID int64, pr *mode
 	return reasons, nil
 }
 
+func (s *PRService) evaluateNoNewDeadCode(ctx context.Context, repoID int64, pr *models.PullRequest) ([]string, error) {
+	if s.codeIntelSvc == nil {
+		return nil, fmt.Errorf("code intelligence service is not configured")
+	}
+
+	repo, err := s.repoSvc.GetByID(ctx, repoID)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(repo.OwnerName) == "" {
+		return nil, fmt.Errorf("repository owner is unavailable")
+	}
+
+	baseIdx, err := s.codeIntelSvc.BuildIndex(ctx, repo.OwnerName, repo.Name, pr.TargetBranch)
+	if err != nil {
+		return nil, fmt.Errorf("build base index: %w", err)
+	}
+	headIdx, err := s.codeIntelSvc.BuildIndex(ctx, repo.OwnerName, repo.Name, pr.SourceBranch)
+	if err != nil {
+		return nil, fmt.Errorf("build head index: %w", err)
+	}
+
+	report := structdiff.Compare(baseIdx, headIdx)
+	if len(report.AddedSymbols) == 0 {
+		return nil, nil
+	}
+
+	graph, err := xref.Build(headIdx)
+	if err != nil {
+		return nil, fmt.Errorf("build call graph: %w", err)
+	}
+	defByKey := make(map[string]xref.Definition, len(graph.Definitions))
+	for _, def := range graph.Definitions {
+		if !def.Callable {
+			continue
+		}
+		defByKey[symbolLookupKey(def.File, def.Kind, def.Receiver, def.Name)] = def
+	}
+
+	reasons := make([]string, 0)
+	seen := make(map[string]bool)
+	for _, added := range report.AddedSymbols {
+		def, ok := defByKey[symbolLookupKey(added.File, added.Kind, added.Receiver, added.Name)]
+		if !ok || shouldIgnoreDeadCodeCandidate(def) {
+			continue
+		}
+		if graph.IncomingCount(def.ID) > 0 || graph.OutgoingCount(def.ID) > 0 {
+			continue
+		}
+		reason := fmt.Sprintf("new callable appears unused: %s (%s)", def.Name, def.File)
+		if !seen[reason] {
+			seen[reason] = true
+			reasons = append(reasons, reason)
+		}
+	}
+	sort.Strings(reasons)
+	return reasons, nil
+}
+
 func loadGotOwnersForBranch(store *gotstore.RepoStore, branch string) (*gotOwnersConfig, error) {
 	headHash, err := store.Refs.Get("heads/" + branch)
 	if err != nil {
@@ -507,6 +576,27 @@ func hasLikelySymbolSyntax(data []byte) bool {
 		if strings.Contains(src, kw) {
 			return true
 		}
+	}
+	return false
+}
+
+func symbolLookupKey(file, kind, receiver, name string) string {
+	return file + "|" + kind + "|" + receiver + "|" + name
+}
+
+func shouldIgnoreDeadCodeCandidate(def xref.Definition) bool {
+	name := strings.TrimSpace(def.Name)
+	if name == "" {
+		return true
+	}
+	if name == "init" {
+		return true
+	}
+	if name == "main" && filepath.Base(def.File) == "main.go" {
+		return true
+	}
+	if strings.HasSuffix(def.File, "_test.go") && strings.HasPrefix(name, "Test") {
+		return true
 	}
 	return false
 }

@@ -2032,6 +2032,156 @@ func TestMergeGateRequiresLintPass(t *testing.T) {
 	}
 }
 
+func TestMergeGateRequiresNoNewDeadCode(t *testing.T) {
+	server, db := setupTestServer(t)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	token := registerAndGetToken(t, ts.URL, "alice")
+	createRepo(t, ts.URL, token, "repo", false)
+
+	repo, err := db.GetRepository(context.Background(), "alice", "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := gotstore.Open(repo.StoragePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	baseBlobHash, err := store.Objects.WriteBlob(&object.Blob{Data: []byte("package main\n\nfunc Existing() {}\n")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseTreeHash, err := store.Objects.WriteTree(&object.TreeObj{
+		Entries: []object.TreeEntry{{Name: "main.go", BlobHash: baseBlobHash}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseCommitHash, err := store.Objects.WriteCommit(&object.CommitObj{
+		TreeHash:  baseTreeHash,
+		Author:    "alice",
+		Timestamp: 1700003000,
+		Message:   "base",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	deadBlobHash, err := store.Objects.WriteBlob(&object.Blob{Data: []byte("package main\n\nfunc Existing() {}\nfunc NewUnused() {}\n")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadTreeHash, err := store.Objects.WriteTree(&object.TreeObj{
+		Entries: []object.TreeEntry{{Name: "main.go", BlobHash: deadBlobHash}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadCommitHash, err := store.Objects.WriteCommit(&object.CommitObj{
+		TreeHash:  deadTreeHash,
+		Parents:   []object.Hash{baseCommitHash},
+		Author:    "alice",
+		Timestamp: 1700003100,
+		Message:   "introduce dead code",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Refs.Set("heads/main", baseCommitHash); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Refs.Set("heads/feature", deadCommitHash); err != nil {
+		t.Fatal(err)
+	}
+
+	prNumber := createPRNumber(t, ts.URL, token, "alice", "repo", "feature", "main")
+
+	ruleBody := `{
+		"enabled": true,
+		"require_no_new_dead_code": true
+	}`
+	req, _ := http.NewRequest("PUT", ts.URL+"/api/v1/repos/alice/repo/branch-protection/main", bytes.NewBufferString(ruleBody))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("set branch protection: expected 200, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	req, _ = http.NewRequest("GET", fmt.Sprintf("%s/api/v1/repos/alice/repo/pulls/%d/merge-gate", ts.URL, prNumber), nil)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("merge gate endpoint: expected 200, got %d", resp.StatusCode)
+	}
+	var blockedGate struct {
+		Allowed bool     `json:"allowed"`
+		Reasons []string `json:"reasons"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&blockedGate); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if blockedGate.Allowed {
+		t.Fatalf("expected merge gate to block for dead code, got %+v", blockedGate)
+	}
+	if !strings.Contains(strings.Join(blockedGate.Reasons, " "), "appears unused") {
+		t.Fatalf("expected dead code reason, got %+v", blockedGate.Reasons)
+	}
+
+	fixedBlobHash, err := store.Objects.WriteBlob(&object.Blob{Data: []byte("package main\n\nfunc Existing() {}\nfunc NewUnused() {}\nfunc Use() { NewUnused() }\n")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixedTreeHash, err := store.Objects.WriteTree(&object.TreeObj{
+		Entries: []object.TreeEntry{{Name: "main.go", BlobHash: fixedBlobHash}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixedCommitHash, err := store.Objects.WriteCommit(&object.CommitObj{
+		TreeHash:  fixedTreeHash,
+		Parents:   []object.Hash{deadCommitHash},
+		Author:    "alice",
+		Timestamp: 1700003200,
+		Message:   "use new symbol",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Refs.Set("heads/feature", fixedCommitHash); err != nil {
+		t.Fatal(err)
+	}
+
+	req, _ = http.NewRequest("GET", fmt.Sprintf("%s/api/v1/repos/alice/repo/pulls/%d/merge-gate", ts.URL, prNumber), nil)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("merge gate endpoint after dead-code fix: expected 200, got %d", resp.StatusCode)
+	}
+	var allowedGate struct {
+		Allowed bool     `json:"allowed"`
+		Reasons []string `json:"reasons"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&allowedGate); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if !allowedGate.Allowed {
+		t.Fatalf("expected merge gate to allow after dead-code fix, got %+v", allowedGate)
+	}
+}
+
 func TestMergeProducesEntityEnrichedTree(t *testing.T) {
 	server, db := setupTestServer(t)
 	ts := httptest.NewServer(server)

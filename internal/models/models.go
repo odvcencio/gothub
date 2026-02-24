@@ -106,6 +106,7 @@ type BranchProtectionRule struct {
 	RequireStatusChecks        bool      `json:"require_status_checks"`
 	RequireEntityOwnerApproval bool      `json:"require_entity_owner_approval"`
 	RequireLintPass            bool      `json:"require_lint_pass"`
+	RequireNoNewDeadCode       bool      `json:"require_no_new_dead_code"`
 	RequiredChecksCSV          string    `json:"-"`
 	RequiredChecks             []string  `json:"required_checks,omitempty"`
 	CreatedAt                  time.Time `json:"created_at"`

@@ -583,6 +583,7 @@ func TestSQLiteBranchProtectionRuleCRUD(t *testing.T) {
 		RequireStatusChecks:        true,
 		RequireEntityOwnerApproval: true,
 		RequireLintPass:            true,
+		RequireNoNewDeadCode:       true,
 		RequiredChecksCSV:          "ci/test,lint",
 	}
 	if err := db.UpsertBranchProtectionRule(ctx, rule); err != nil {
@@ -607,6 +608,9 @@ func TestSQLiteBranchProtectionRuleCRUD(t *testing.T) {
 	}
 	if !got.RequireLintPass {
 		t.Fatalf("expected require_lint_pass to persist, got %+v", got)
+	}
+	if !got.RequireNoNewDeadCode {
+		t.Fatalf("expected require_no_new_dead_code to persist, got %+v", got)
 	}
 
 	if err := db.DeleteBranchProtectionRule(ctx, repo.ID, "main"); err != nil {

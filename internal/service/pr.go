@@ -40,13 +40,18 @@ type FileMergeInfo struct {
 }
 
 type PRService struct {
-	db        database.DB
-	repoSvc   *RepoService
-	browseSvc *BrowseService
+	db           database.DB
+	repoSvc      *RepoService
+	browseSvc    *BrowseService
+	codeIntelSvc *CodeIntelService
 }
 
 func NewPRService(db database.DB, repoSvc *RepoService, browseSvc *BrowseService) *PRService {
 	return &PRService{db: db, repoSvc: repoSvc, browseSvc: browseSvc}
+}
+
+func (s *PRService) SetCodeIntelService(codeIntelSvc *CodeIntelService) {
+	s.codeIntelSvc = codeIntelSvc
 }
 
 func (s *PRService) Create(ctx context.Context, repoID, authorID int64, title, body, srcBranch, tgtBranch string) (*models.PullRequest, error) {

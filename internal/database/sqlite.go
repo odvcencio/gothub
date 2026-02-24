@@ -59,6 +59,12 @@ func (s *SQLiteDB) Migrate(ctx context.Context) error {
 			return err
 		}
 	}
+	// Backfill schema for existing installations created before dead-code gate support.
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE branch_protection_rules ADD COLUMN require_no_new_dead_code BOOLEAN NOT NULL DEFAULT FALSE`); err != nil {
+		if !isSQLiteDuplicateColumnErr(err) {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -210,6 +216,7 @@ CREATE TABLE IF NOT EXISTS branch_protection_rules (
 	require_status_checks BOOLEAN NOT NULL DEFAULT FALSE,
 	require_entity_owner_approval BOOLEAN NOT NULL DEFAULT FALSE,
 	require_lint_pass BOOLEAN NOT NULL DEFAULT FALSE,
+	require_no_new_dead_code BOOLEAN NOT NULL DEFAULT FALSE,
 	required_checks_csv TEXT NOT NULL DEFAULT '',
 	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -1065,8 +1072,8 @@ func (s *SQLiteDB) UpsertBranchProtectionRule(ctx context.Context, rule *models.
 	}
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO branch_protection_rules (
-			 repo_id, branch, enabled, require_approvals, required_approvals, require_status_checks, require_entity_owner_approval, require_lint_pass, required_checks_csv
-		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 repo_id, branch, enabled, require_approvals, required_approvals, require_status_checks, require_entity_owner_approval, require_lint_pass, require_no_new_dead_code, required_checks_csv
+		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(repo_id, branch) DO UPDATE SET
 			 enabled = excluded.enabled,
 			 require_approvals = excluded.require_approvals,
@@ -1074,9 +1081,10 @@ func (s *SQLiteDB) UpsertBranchProtectionRule(ctx context.Context, rule *models.
 			 require_status_checks = excluded.require_status_checks,
 			 require_entity_owner_approval = excluded.require_entity_owner_approval,
 			 require_lint_pass = excluded.require_lint_pass,
+			 require_no_new_dead_code = excluded.require_no_new_dead_code,
 			 required_checks_csv = excluded.required_checks_csv,
 			 updated_at = CURRENT_TIMESTAMP`,
-		rule.RepoID, rule.Branch, rule.Enabled, rule.RequireApprovals, rule.RequiredApprovals, rule.RequireStatusChecks, rule.RequireEntityOwnerApproval, rule.RequireLintPass, rule.RequiredChecksCSV)
+		rule.RepoID, rule.Branch, rule.Enabled, rule.RequireApprovals, rule.RequiredApprovals, rule.RequireStatusChecks, rule.RequireEntityOwnerApproval, rule.RequireLintPass, rule.RequireNoNewDeadCode, rule.RequiredChecksCSV)
 	if err != nil {
 		return err
 	}
@@ -1091,12 +1099,12 @@ func (s *SQLiteDB) UpsertBranchProtectionRule(ctx context.Context, rule *models.
 func (s *SQLiteDB) GetBranchProtectionRule(ctx context.Context, repoID int64, branch string) (*models.BranchProtectionRule, error) {
 	rule := &models.BranchProtectionRule{}
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, repo_id, branch, enabled, require_approvals, required_approvals, require_status_checks, require_entity_owner_approval, require_lint_pass, required_checks_csv, created_at, updated_at
+		`SELECT id, repo_id, branch, enabled, require_approvals, required_approvals, require_status_checks, require_entity_owner_approval, require_lint_pass, require_no_new_dead_code, required_checks_csv, created_at, updated_at
 		 FROM branch_protection_rules
 		 WHERE repo_id = ? AND branch = ?`,
 		repoID, branch).
 		Scan(&rule.ID, &rule.RepoID, &rule.Branch, &rule.Enabled, &rule.RequireApprovals, &rule.RequiredApprovals,
-			&rule.RequireStatusChecks, &rule.RequireEntityOwnerApproval, &rule.RequireLintPass, &rule.RequiredChecksCSV, &rule.CreatedAt, &rule.UpdatedAt)
+			&rule.RequireStatusChecks, &rule.RequireEntityOwnerApproval, &rule.RequireLintPass, &rule.RequireNoNewDeadCode, &rule.RequiredChecksCSV, &rule.CreatedAt, &rule.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
