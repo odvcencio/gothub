@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/odvcencio/got/pkg/object"
 	"github.com/odvcencio/gothub/internal/auth"
@@ -168,6 +169,21 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/orgs/{org}/repos", s.handleListOrgRepos)
 	s.mux.HandleFunc("GET /api/v1/user/orgs", s.requireAuth(s.handleListUserOrgs))
 
+	validateProtectedRefUpdate := func(ctx context.Context, repoID int64, refName string, oldHash, newHash object.Hash) error {
+		if !strings.HasPrefix(refName, "heads/") || newHash == "" {
+			return nil
+		}
+		branch := strings.TrimPrefix(refName, "heads/")
+		reasons, err := s.prSvc.EvaluateBranchUpdateGate(ctx, repoID, branch, oldHash, newHash)
+		if err != nil {
+			return err
+		}
+		if len(reasons) == 0 {
+			return nil
+		}
+		return errors.New(strings.Join(reasons, "; "))
+	}
+
 	// Got protocol
 	gotProto := gotprotocol.NewHandler(func(owner, repo string) (*gotstore.RepoStore, error) {
 		return s.repoSvc.OpenStore(context.Background(), owner, repo)
@@ -184,6 +200,13 @@ func (s *Server) routes() {
 			return err
 		}
 		return s.codeIntelSvc.EnsureCommitIndexed(ctx, repoModel.ID, store, owner+"/"+repo, commitHash)
+	})
+	gotProto.SetRefUpdateValidator(func(ctx context.Context, owner, repo, refName string, oldHash, newHash object.Hash) error {
+		repoModel, err := s.repoSvc.Get(ctx, owner, repo)
+		if err != nil {
+			return err
+		}
+		return validateProtectedRefUpdate(ctx, repoModel.ID, refName, oldHash, newHash)
 	})
 	gotProto.RegisterRoutes(s.mux)
 
@@ -211,6 +234,9 @@ func (s *Server) routes() {
 			return s.codeIntelSvc.EnsureCommitIndexed(ctx, repoID, store, "", commitHash)
 		},
 	)
+	gitHandler.SetRefUpdateValidator(func(ctx context.Context, owner, repo string, repoID int64, refName string, oldHash, newHash object.Hash) error {
+		return validateProtectedRefUpdate(ctx, repoID, refName, oldHash, newHash)
+	})
 	gitHandler.RegisterRoutes(s.mux)
 
 	// Frontend SPA — fallback for all non-API/protocol routes

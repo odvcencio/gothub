@@ -61,6 +61,42 @@ func (s *PRService) ListPRCheckRuns(ctx context.Context, prID int64) ([]models.P
 	return s.db.ListPRCheckRuns(ctx, prID)
 }
 
+// EvaluateBranchUpdateGate evaluates branch-protection checks that can be
+// enforced for direct ref updates (pushes).
+func (s *PRService) EvaluateBranchUpdateGate(ctx context.Context, repoID int64, branch string, oldHead, newHead object.Hash) ([]string, error) {
+	if strings.TrimSpace(branch) == "" || newHead == "" {
+		return nil, nil
+	}
+
+	rule, err := s.GetBranchProtectionRule(ctx, repoID, branch)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if !rule.Enabled {
+		return nil, nil
+	}
+
+	store, err := s.repoSvc.OpenStoreByID(ctx, repoID)
+	if err != nil {
+		return nil, err
+	}
+
+	var reasons []string
+	if rule.RequireSignedCommits {
+		signedReasons, err := s.evaluateSignedCommitRange(ctx, store, newHead, oldHead)
+		if err != nil {
+			return nil, err
+		}
+		reasons = append(reasons, signedReasons...)
+	}
+
+	sort.Strings(reasons)
+	return reasons, nil
+}
+
 func (s *PRService) EvaluateMergeGate(ctx context.Context, repoID int64, pr *models.PullRequest) (*MergeGateResult, error) {
 	result := &MergeGateResult{Allowed: true}
 
@@ -423,6 +459,10 @@ func (s *PRService) evaluateSignedCommits(ctx context.Context, repoID int64, pr 
 		return nil, fmt.Errorf("resolve target branch %q: %w", pr.TargetBranch, err)
 	}
 
+	return s.evaluateSignedCommitRange(ctx, store, sourceHead, targetHead)
+}
+
+func (s *PRService) evaluateSignedCommitRange(ctx context.Context, store *gotstore.RepoStore, sourceHead, targetHead object.Hash) ([]string, error) {
 	commitHashes, err := sourceOnlyCommits(store.Objects, sourceHead, targetHead)
 	if err != nil {
 		return nil, err

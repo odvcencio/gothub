@@ -25,6 +25,7 @@ type SmartHTTPHandler struct {
 	getRepo      func(ctx context.Context, owner, repo string) (int64, error) // returns repo ID
 	authorize    func(r *http.Request, owner, repo string, write bool) (int, error)
 	indexLineage func(ctx context.Context, repoID int64, store *gotstore.RepoStore, commitHash object.Hash) error
+	validateRef  func(ctx context.Context, owner, repo string, repoID int64, refName string, oldHash, newHash object.Hash) error
 }
 
 type refUpdate struct {
@@ -53,6 +54,10 @@ func NewSmartHTTPHandler(
 		authorize:    authorize,
 		indexLineage: indexLineage,
 	}
+}
+
+func (h *SmartHTTPHandler) SetRefUpdateValidator(fn func(ctx context.Context, owner, repo string, repoID int64, refName string, oldHash, newHash object.Hash) error) {
+	h.validateRef = fn
 }
 
 // RegisterRoutes sets up git smart HTTP protocol routes.
@@ -359,6 +364,12 @@ func (h *SmartHTTPHandler) handleReceivePack(w http.ResponseWriter, r *http.Requ
 		expectedOldPtr := &expectedOldGotHash
 
 		if string(u.newHash) == gitZeroHash40 {
+			if h.validateRef != nil {
+				if err := h.validateRef(r.Context(), owner, repo, repoID, u.storageRef, expectedOldGotHash, ""); err != nil {
+					refErrors[u.refName] = err.Error()
+					continue
+				}
+			}
 			if err := store.Refs.Update(u.storageRef, expectedOldPtr, nil); err != nil {
 				var mismatch *gotstore.RefCASMismatchError
 				if errors.As(err, &mismatch) {
@@ -375,13 +386,19 @@ func (h *SmartHTTPHandler) handleReceivePack(w http.ResponseWriter, r *http.Requ
 			refErrors[u.refName] = "missing object mapping"
 			continue
 		}
+		newGotHash := object.Hash(gotHash)
+		if h.validateRef != nil {
+			if err := h.validateRef(r.Context(), owner, repo, repoID, u.storageRef, expectedOldGotHash, newGotHash); err != nil {
+				refErrors[u.refName] = err.Error()
+				continue
+			}
+		}
 		if h.indexLineage != nil {
-			if err := h.indexLineage(r.Context(), repoID, store, object.Hash(gotHash)); err != nil {
+			if err := h.indexLineage(r.Context(), repoID, store, newGotHash); err != nil {
 				refErrors[u.refName] = "lineage index failed"
 				continue
 			}
 		}
-		newGotHash := object.Hash(gotHash)
 		if err := store.Refs.Update(u.storageRef, expectedOldPtr, &newGotHash); err != nil {
 			var mismatch *gotstore.RefCASMismatchError
 			if errors.As(err, &mismatch) {

@@ -29,6 +29,7 @@ type Handler struct {
 	getStore    func(owner, repo string) (*gotstore.RepoStore, error)
 	authorize   func(r *http.Request, owner, repo string, write bool) (int, error)
 	indexCommit func(ctx context.Context, owner, repo string, commitHash object.Hash) error
+	validateRef func(ctx context.Context, owner, repo, refName string, oldHash, newHash object.Hash) error
 }
 
 type refUpdateRequest struct {
@@ -47,6 +48,10 @@ func NewHandler(
 	indexCommit func(ctx context.Context, owner, repo string, commitHash object.Hash) error,
 ) *Handler {
 	return &Handler{getStore: getStore, authorize: authorize, indexCommit: indexCommit}
+}
+
+func (h *Handler) SetRefUpdateValidator(fn func(ctx context.Context, owner, repo, refName string, oldHash, newHash object.Hash) error) {
+	h.validateRef = fn
 }
 
 // RegisterRoutes sets up Got protocol routes on the given mux.
@@ -333,6 +338,25 @@ func (h *Handler) handleUpdateRefs(w http.ResponseWriter, r *http.Request) {
 
 	applied := make(map[string]string, len(updates))
 	for _, u := range updates {
+		currentHash, err := store.Refs.Get(u.Name)
+		if err != nil {
+			if !isMissingRefErr(err) {
+				http.Error(w, fmt.Sprintf("read ref %s: %v", u.Name, err), http.StatusInternalServerError)
+				return
+			}
+			currentHash = ""
+		}
+		newHash := object.Hash("")
+		if u.New != nil && *u.New != "" {
+			newHash = refTargets[u.Name]
+		}
+		if h.validateRef != nil {
+			if err := h.validateRef(r.Context(), owner, repo, u.Name, currentHash, newHash); err != nil {
+				http.Error(w, fmt.Sprintf("set ref %s: %v", u.Name, err), http.StatusConflict)
+				return
+			}
+		}
+
 		var expectedOld *object.Hash
 		if u.Old != nil {
 			oldHash := object.Hash(*u.Old)
@@ -473,6 +497,14 @@ func parsePushedObjectType(raw string) (object.ObjectType, error) {
 	default:
 		return "", fmt.Errorf("unsupported object type %q", raw)
 	}
+}
+
+func isMissingRefErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "not exist") || strings.Contains(s, "no such file")
 }
 
 func resolveObjectType(hash object.Hash, known map[object.Hash]object.ObjectType, store *object.Store) (object.ObjectType, bool) {
