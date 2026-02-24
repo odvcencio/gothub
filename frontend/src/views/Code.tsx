@@ -1,5 +1,13 @@
 import { useState, useEffect } from 'preact/hooks';
-import { listTree, getBlob } from '../api/client';
+import {
+  getBlob,
+  getEntityBlame,
+  listEntities,
+  listTree,
+  type EntityBlameInfo,
+  type FileEntity,
+  type TreeEntry,
+} from '../api/client';
 import { FileTree } from '../components/FileTree';
 import { CodeViewer } from '../components/CodeViewer';
 
@@ -11,13 +19,24 @@ interface Props {
 }
 
 export function CodeView({ owner, repo, ref: gitRef, path }: Props) {
-  const [entries, setEntries] = useState<any[] | null>(null);
-  const [blob, setBlob] = useState<any>(null);
+  const [entries, setEntries] = useState<TreeEntry[] | null>(null);
+  const [blob, setBlob] = useState<{ content: string } | null>(null);
   const [isDir, setIsDir] = useState(true);
+  const [entities, setEntities] = useState<FileEntity[] | null>(null);
+  const [selectedEntity, setSelectedEntity] = useState<FileEntity | null>(null);
+  const [blame, setBlame] = useState<EntityBlameInfo | null>(null);
+  const [blameLoading, setBlameLoading] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
     if (!owner || !repo || !gitRef) return;
+    setError('');
+    setEntries(null);
+    setBlob(null);
+    setEntities(null);
+    setSelectedEntity(null);
+    setBlame(null);
+    setBlameLoading(false);
 
     // Determine if path is a blob or tree based on the URL
     const isBlobUrl = location.pathname.includes('/blob/');
@@ -27,11 +46,20 @@ export function CodeView({ owner, repo, ref: gitRef, path }: Props) {
       getBlob(owner, repo, gitRef, path)
         .then((b) => {
           setBlob({
-            ...b,
             content: decodeBlobContent(b?.data),
           });
         })
         .catch(e => setError(e.message));
+      listEntities(owner, repo, gitRef, path)
+        .then((resp) => {
+          const list = resp.entities || [];
+          setEntities(list);
+          setSelectedEntity(list.length > 0 ? list[0] : null);
+        })
+        .catch(() => {
+          setEntities([]);
+          setSelectedEntity(null);
+        });
     } else {
       setIsDir(true);
       listTree(owner, repo, gitRef, path)
@@ -39,6 +67,17 @@ export function CodeView({ owner, repo, ref: gitRef, path }: Props) {
         .catch(e => setError(e.message));
     }
   }, [owner, repo, gitRef, path]);
+
+  useEffect(() => {
+    if (!owner || !repo || !gitRef || !path || !selectedEntity) return;
+
+    setBlameLoading(true);
+    setBlame(null);
+    getEntityBlame(owner, repo, gitRef, selectedEntity.key, path, 500)
+      .then(setBlame)
+      .catch(() => setBlame(null))
+      .finally(() => setBlameLoading(false));
+  }, [owner, repo, gitRef, path, selectedEntity?.key]);
 
   if (!owner || !repo || !gitRef) {
     return <div style={{ color: '#f85149', padding: '20px' }}>Missing repository context</div>;
@@ -72,7 +111,18 @@ export function CodeView({ owner, repo, ref: gitRef, path }: Props) {
         )
       ) : (
         blob ? (
-          <CodeViewer filename={path || ''} source={blob.content || ''} />
+          <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', gap: '16px' }}>
+            <div style={{ flex: '1 1 640px', minWidth: 0 }}>
+              <CodeViewer filename={path || ''} source={blob.content || ''} />
+            </div>
+            <EntityBlamePanel
+              entities={entities}
+              selectedKey={selectedEntity?.key || ''}
+              blame={blame}
+              blameLoading={blameLoading}
+              onSelect={(entity) => setSelectedEntity(entity)}
+            />
+          </div>
         ) : (
           <div style={{ color: '#8b949e', padding: '20px' }}>Loading...</div>
         )
@@ -109,4 +159,85 @@ function decodeBlobContent(data: unknown): string {
   } catch {
     return '';
   }
+}
+
+function EntityBlamePanel({
+  entities,
+  selectedKey,
+  blame,
+  blameLoading,
+  onSelect,
+}: {
+  entities: FileEntity[] | null;
+  selectedKey: string;
+  blame: EntityBlameInfo | null;
+  blameLoading: boolean;
+  onSelect: (entity: FileEntity) => void;
+}) {
+  return (
+    <aside style={{ flex: '1 1 320px', width: '320px', maxWidth: '100%', border: '1px solid #30363d', borderRadius: '6px', overflow: 'hidden' }}>
+      <div style={{ padding: '10px 12px', borderBottom: '1px solid #30363d', background: '#161b22' }}>
+        <strong style={{ color: '#f0f6fc', fontSize: '13px' }}>Structural Blame</strong>
+      </div>
+
+      {entities === null && (
+        <div style={{ color: '#8b949e', fontSize: '13px', padding: '12px' }}>Loading entities...</div>
+      )}
+
+      {entities !== null && entities.length === 0 && (
+        <div style={{ color: '#8b949e', fontSize: '13px', padding: '12px' }}>No entities detected for this file.</div>
+      )}
+
+      {entities !== null && entities.length > 0 && (
+        <div style={{ maxHeight: '240px', overflowY: 'auto', borderBottom: '1px solid #30363d' }}>
+          {entities.map((entity) => (
+            <button
+              key={entity.key}
+              onClick={() => onSelect(entity)}
+              style={{
+                width: '100%',
+                textAlign: 'left',
+                border: 'none',
+                borderTop: '1px solid #21262d',
+                background: selectedKey === entity.key ? '#1f2937' : '#0d1117',
+                color: '#c9d1d9',
+                padding: '8px 10px',
+                cursor: 'pointer',
+              }}
+            >
+              <div style={{ fontFamily: 'monospace', fontSize: '12px' }}>{entity.name || entity.key}</div>
+              <div style={{ color: '#8b949e', fontSize: '11px' }}>
+                {entity.decl_kind} · L{entity.start_line}-{entity.end_line}
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
+
+      <div style={{ padding: '12px' }}>
+        {blameLoading ? (
+          <div style={{ color: '#8b949e', fontSize: '13px' }}>Resolving blame...</div>
+        ) : blame ? (
+          <div style={{ display: 'grid', gap: '6px' }}>
+            <div style={{ color: '#58a6ff', fontFamily: 'monospace', fontSize: '12px' }}>{shortHash(blame.commit_hash)}</div>
+            <div style={{ color: '#c9d1d9', fontSize: '13px' }}>{blame.author || 'unknown'}</div>
+            <div style={{ color: '#8b949e', fontSize: '12px' }}>{formatTimestamp(blame.timestamp)}</div>
+            <div style={{ color: '#c9d1d9', fontSize: '12px' }}>{blame.message || '(no message)'}</div>
+          </div>
+        ) : (
+          <div style={{ color: '#8b949e', fontSize: '13px' }}>Select an entity to view attribution.</div>
+        )}
+      </div>
+    </aside>
+  );
+}
+
+function shortHash(hash: string): string {
+  if (!hash) return '';
+  return hash.length > 12 ? hash.slice(0, 12) : hash;
+}
+
+function formatTimestamp(ts: number): string {
+  if (!ts) return 'unknown time';
+  return new Date(ts * 1000).toLocaleString();
 }

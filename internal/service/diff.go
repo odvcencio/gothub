@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -10,16 +11,19 @@ import (
 	"github.com/odvcencio/got/pkg/diff"
 	"github.com/odvcencio/got/pkg/entity"
 	"github.com/odvcencio/got/pkg/object"
+	gotrepo "github.com/odvcencio/got/pkg/repo"
 	"github.com/odvcencio/gothub/internal/database"
 	"github.com/odvcencio/gothub/internal/entityutil"
 )
 
 // EntityInfo represents a single entity for API responses.
 type EntityInfo struct {
+	Key       string `json:"key"`
 	Kind      string `json:"kind"`
 	Name      string `json:"name"`
 	DeclKind  string `json:"decl_kind"`
 	Receiver  string `json:"receiver,omitempty"`
+	Signature string `json:"signature,omitempty"`
 	StartLine int    `json:"start_line"`
 	EndLine   int    `json:"end_line"`
 	BodyHash  string `json:"body_hash"`
@@ -79,6 +83,28 @@ type EntityHistoryHit struct {
 	Receiver   string `json:"receiver,omitempty"`
 	BodyHash   string `json:"body_hash"`
 }
+
+// EntityLogHit is one commit that changed a selected entity key.
+type EntityLogHit struct {
+	CommitHash string `json:"commit_hash"`
+	Author     string `json:"author"`
+	Timestamp  int64  `json:"timestamp"`
+	Message    string `json:"message"`
+	Path       string `json:"path,omitempty"`
+	Key        string `json:"key"`
+}
+
+// EntityBlameInfo is the newest attribution for a selected entity key.
+type EntityBlameInfo struct {
+	CommitHash string `json:"commit_hash"`
+	Author     string `json:"author"`
+	Timestamp  int64  `json:"timestamp"`
+	Message    string `json:"message"`
+	Path       string `json:"path,omitempty"`
+	Key        string `json:"key"`
+}
+
+var ErrEntityNotFound = errors.New("entity not found")
 
 type DiffService struct {
 	repoSvc    *RepoService
@@ -425,6 +451,69 @@ func (s *DiffService) EntityHistory(ctx context.Context, owner, repo, ref, stabl
 	return hits, nil
 }
 
+// EntityLog returns newest-first commits that changed the selected entity key.
+// key is required. path is optional and narrows matching to a single file.
+func (s *DiffService) EntityLog(ctx context.Context, owner, repo, ref, path, key string, limit int) ([]EntityLogHit, error) {
+	key = strings.TrimSpace(key)
+	path = strings.TrimSpace(path)
+	if key == "" {
+		return nil, fmt.Errorf("key query is required")
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+
+	store, err := s.repoSvc.OpenStore(ctx, owner, repo)
+	if err != nil {
+		return nil, err
+	}
+	head, err := s.browseSvc.ResolveRef(ctx, owner, repo, ref)
+	if err != nil {
+		return nil, fmt.Errorf("resolve ref: %w", err)
+	}
+
+	gr := &gotrepo.Repo{Store: store.Objects}
+	entries, err := gr.LogByEntity(head, limit, path, key)
+	if err != nil {
+		return nil, err
+	}
+	hits := make([]EntityLogHit, 0, len(entries))
+	for _, e := range entries {
+		if e.Commit == nil {
+			continue
+		}
+		hits = append(hits, EntityLogHit{
+			CommitHash: string(e.Hash),
+			Author:     e.Commit.Author,
+			Timestamp:  e.Commit.Timestamp,
+			Message:    e.Commit.Message,
+			Path:       path,
+			Key:        key,
+		})
+	}
+	return hits, nil
+}
+
+// EntityBlame returns the newest commit that changed the selected entity key.
+func (s *DiffService) EntityBlame(ctx context.Context, owner, repo, ref, path, key string, limit int) (*EntityBlameInfo, error) {
+	hits, err := s.EntityLog(ctx, owner, repo, ref, path, key, limit)
+	if err != nil {
+		return nil, err
+	}
+	if len(hits) == 0 {
+		return nil, ErrEntityNotFound
+	}
+	top := hits[0]
+	return &EntityBlameInfo{
+		CommitHash: top.CommitHash,
+		Author:     top.Author,
+		Timestamp:  top.Timestamp,
+		Message:    top.Message,
+		Path:       top.Path,
+		Key:        top.Key,
+	}, nil
+}
+
 // --- helpers ---
 
 func readBlobData(store *object.Store, h object.Hash) ([]byte, error) {
@@ -449,10 +538,12 @@ func entityListToResponse(el *entity.EntityList) *EntityListResponse {
 
 func entityToInfo(e *entity.Entity) EntityInfo {
 	return EntityInfo{
+		Key:       e.IdentityKey(),
 		Kind:      entityutil.KindName(e.Kind),
 		Name:      e.Name,
 		DeclKind:  e.DeclKind,
 		Receiver:  e.Receiver,
+		Signature: e.Signature,
 		StartLine: e.StartLine,
 		EndLine:   e.EndLine,
 		BodyHash:  e.BodyHash,

@@ -1,9 +1,12 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
+
+	"github.com/odvcencio/gothub/internal/service"
 )
 
 // GET /api/v1/repos/{owner}/{repo}/branches
@@ -159,6 +162,90 @@ func (s *Server) handleEntityHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonResponse(w, http.StatusOK, paginateSlice(hits, page, perPage))
+}
+
+// GET /api/v1/repos/{owner}/{repo}/entity-log/{ref}?key=...&path=...&limit=...
+func (s *Server) handleEntityLog(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.authorizeRepoRequest(w, r, false); !ok {
+		return
+	}
+	owner := r.PathValue("owner")
+	repo := r.PathValue("repo")
+	ref := r.PathValue("ref")
+	key := strings.TrimSpace(r.URL.Query().Get("key"))
+	path := strings.TrimSpace(r.URL.Query().Get("path"))
+	limit := 50
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 {
+			jsonError(w, "invalid limit query parameter", http.StatusBadRequest)
+			return
+		}
+		if n > 500 {
+			n = 500
+		}
+		limit = n
+	}
+	if key == "" {
+		jsonError(w, "key query is required", http.StatusBadRequest)
+		return
+	}
+
+	hits, err := s.diffSvc.EntityLog(r.Context(), owner, repo, ref, path, key, limit)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if strings.Contains(err.Error(), "resolve ref") {
+			status = http.StatusNotFound
+		} else if strings.Contains(err.Error(), "required") {
+			status = http.StatusBadRequest
+		}
+		jsonError(w, err.Error(), status)
+		return
+	}
+	jsonResponse(w, http.StatusOK, hits)
+}
+
+// GET /api/v1/repos/{owner}/{repo}/entity-blame/{ref}?key=...&path=...&limit=...
+func (s *Server) handleEntityBlame(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.authorizeRepoRequest(w, r, false); !ok {
+		return
+	}
+	owner := r.PathValue("owner")
+	repo := r.PathValue("repo")
+	ref := r.PathValue("ref")
+	key := strings.TrimSpace(r.URL.Query().Get("key"))
+	path := strings.TrimSpace(r.URL.Query().Get("path"))
+	limit := 200
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 {
+			jsonError(w, "invalid limit query parameter", http.StatusBadRequest)
+			return
+		}
+		if n > 2000 {
+			n = 2000
+		}
+		limit = n
+	}
+	if key == "" {
+		jsonError(w, "key query is required", http.StatusBadRequest)
+		return
+	}
+
+	blame, err := s.diffSvc.EntityBlame(r.Context(), owner, repo, ref, path, key, limit)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, service.ErrEntityNotFound) {
+			status = http.StatusNotFound
+		} else if strings.Contains(err.Error(), "resolve ref") {
+			status = http.StatusNotFound
+		} else if strings.Contains(err.Error(), "required") {
+			status = http.StatusBadRequest
+		}
+		jsonError(w, err.Error(), status)
+		return
+	}
+	jsonResponse(w, http.StatusOK, blame)
 }
 
 // GET /api/v1/repos/{owner}/{repo}/diff/{spec}

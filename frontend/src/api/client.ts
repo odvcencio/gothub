@@ -115,6 +115,43 @@ export interface EntityDescriptor {
   [key: string]: unknown;
 }
 
+export interface FileEntity {
+  key: string;
+  kind: string;
+  name: string;
+  decl_kind: string;
+  receiver?: string;
+  signature?: string;
+  start_line: number;
+  end_line: number;
+  body_hash: string;
+  [key: string]: unknown;
+}
+
+export interface EntityListResponse {
+  language: string;
+  path: string;
+  entities: FileEntity[];
+}
+
+export interface EntityLogHit {
+  commit_hash: string;
+  author: string;
+  timestamp: number;
+  message: string;
+  path?: string;
+  key: string;
+}
+
+export interface EntityBlameInfo {
+  commit_hash: string;
+  author: string;
+  timestamp: number;
+  message: string;
+  path?: string;
+  key: string;
+}
+
 export interface DiffFileChange {
   type: string;
   key: string;
@@ -396,7 +433,19 @@ export const getCommit = (owner: string, repo: string, hash: string) =>
 
 // Entities & Diff
 export const listEntities = (owner: string, repo: string, ref: string, path: string) =>
-  request<EntityDescriptor[]>('GET', `/repos/${owner}/${repo}/entities/${ref}/${path}`);
+  request<EntityListResponse>('GET', `/repos/${owner}/${repo}/entities/${ref}/${path}`);
+export const getEntityLog = (owner: string, repo: string, ref: string, key: string, path?: string, limit?: number) => {
+  const params = new URLSearchParams({ key });
+  if (path) params.set('path', path);
+  if (limit && limit > 0) params.set('limit', String(limit));
+  return request<EntityLogHit[]>('GET', `/repos/${owner}/${repo}/entity-log/${ref}?${params.toString()}`);
+};
+export const getEntityBlame = (owner: string, repo: string, ref: string, key: string, path?: string, limit?: number) => {
+  const params = new URLSearchParams({ key });
+  if (path) params.set('path', path);
+  if (limit && limit > 0) params.set('limit', String(limit));
+  return request<EntityBlameInfo>('GET', `/repos/${owner}/${repo}/entity-blame/${ref}?${params.toString()}`);
+};
 export const getDiff = (owner: string, repo: string, spec: string) =>
   request<{ files: DiffFile[] }>('GET', `/repos/${owner}/${repo}/diff/${spec}`);
 
