@@ -51,6 +51,19 @@ func cmdServe(args []string) {
 		os.Exit(1)
 	}
 
+	traceShutdown, err := initTracing(context.Background())
+	if err != nil {
+		slog.Error("init tracing", "error", err)
+		os.Exit(1)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := traceShutdown(ctx); err != nil {
+			slog.Error("shutdown tracing", "error", err)
+		}
+	}()
+
 	db, err := openDB(cfg)
 	if err != nil {
 		slog.Error("open database", "error", err)

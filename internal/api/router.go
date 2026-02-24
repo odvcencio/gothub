@@ -14,6 +14,7 @@ import (
 	"github.com/odvcencio/gothub/internal/gitinterop"
 	"github.com/odvcencio/gothub/internal/gotprotocol"
 	"github.com/odvcencio/gothub/internal/gotstore"
+	"github.com/odvcencio/gothub/internal/jobs"
 	"github.com/odvcencio/gothub/internal/service"
 	"github.com/odvcencio/gothub/internal/web"
 )
@@ -31,6 +32,7 @@ type Server struct {
 	codeIntelSvc *service.CodeIntelService
 	lineageSvc   *service.EntityLineageService
 	rateLimiter  *requestRateLimiter
+	httpMetrics  *httpMetrics
 	passkey      *webauthn.WebAuthn
 	passwordAuth bool
 	mux          *http.ServeMux
@@ -38,7 +40,8 @@ type Server struct {
 }
 
 type ServerOptions struct {
-	EnablePasswordAuth bool
+	EnablePasswordAuth   bool
+	EnableAsyncIndexing bool
 }
 
 func NewServer(db database.DB, authSvc *auth.Service, repoSvc *service.RepoService) *Server {
@@ -54,6 +57,8 @@ func NewServerWithOptions(db database.DB, authSvc *auth.Service, repoSvc *servic
 	webhookSvc := service.NewWebhookService(db)
 	notifySvc := service.NewNotificationService(db)
 	codeIntelSvc := service.NewCodeIntelService(db, repoSvc, browseSvc)
+	indexQueue := jobs.NewQueue(db, jobs.QueueOptions{})
+	httpMetrics := getDefaultHTTPMetrics()
 	prSvc.SetCodeIntelService(codeIntelSvc)
 	prSvc.SetLineageService(lineageSvc)
 	s := &Server{
@@ -69,16 +74,22 @@ func NewServerWithOptions(db database.DB, authSvc *auth.Service, repoSvc *servic
 		codeIntelSvc: codeIntelSvc,
 		lineageSvc:   lineageSvc,
 		rateLimiter:  newRequestRateLimiter(),
+		httpMetrics:  httpMetrics,
 		passkey:      initWebAuthn(),
 		passwordAuth: opts.EnablePasswordAuth,
 		mux:          http.NewServeMux(),
 	}
 	s.routes()
-	s.handler = requestLoggingMiddleware(
-		corsMiddleware(
-			requestRateLimitMiddleware(
-				s.rateLimiter,
-				requestBodyLimitMiddleware(auth.Middleware(s.authSvc)(s.mux)),
+	s.handler = requestTracingMiddleware(
+		requestMetricsMiddleware(
+			s.httpMetrics,
+			requestLoggingMiddleware(
+				corsMiddleware(
+					requestRateLimitMiddleware(
+						s.rateLimiter,
+						requestBodyLimitMiddleware(auth.Middleware(s.authSvc)(s.mux)),
+					),
+				),
 			),
 		),
 	)
@@ -95,6 +106,7 @@ func (s *Server) routes() {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"status":"ok"}`))
 	})
+	s.mux.Handle("GET /metrics", metricsHandler(nil))
 
 	// Auth
 	s.mux.HandleFunc("POST /api/v1/auth/register", s.handleRegister)
@@ -221,12 +233,13 @@ func (s *Server) routes() {
 		return errors.New(strings.Join(reasons, "; "))
 	}
 
-	// Got protocol
-	gotProto := gotprotocol.NewHandler(func(owner, repo string) (*gotstore.RepoStore, error) {
-		return s.repoSvc.OpenStore(context.Background(), owner, repo)
-	}, s.authorizeProtocolRepoAccess, func(ctx context.Context, owner, repo string, commitHash object.Hash) error {
+	indexByRepoName := func(ctx context.Context, owner, repo string, commitHash object.Hash) error {
 		repoModel, err := s.repoSvc.Get(ctx, owner, repo)
 		if err != nil {
+			return err
+		}
+		if opts.EnableAsyncIndexing {
+			_, err := indexQueue.EnqueueCommitIndex(ctx, repoModel.ID, string(commitHash))
 			return err
 		}
 		store, err := s.repoSvc.OpenStore(ctx, owner, repo)
@@ -237,7 +250,23 @@ func (s *Server) routes() {
 			return err
 		}
 		return s.codeIntelSvc.EnsureCommitIndexed(ctx, repoModel.ID, store, owner+"/"+repo, commitHash)
-	})
+	}
+
+	indexByRepoID := func(ctx context.Context, repoID int64, store *gotstore.RepoStore, commitHash object.Hash) error {
+		if opts.EnableAsyncIndexing {
+			_, err := indexQueue.EnqueueCommitIndex(ctx, repoID, string(commitHash))
+			return err
+		}
+		if err := s.lineageSvc.IndexCommit(ctx, repoID, store, commitHash); err != nil {
+			return err
+		}
+		return s.codeIntelSvc.EnsureCommitIndexed(ctx, repoID, store, "", commitHash)
+	}
+
+	// Got protocol
+	gotProto := gotprotocol.NewHandler(func(owner, repo string) (*gotstore.RepoStore, error) {
+		return s.repoSvc.OpenStore(context.Background(), owner, repo)
+	}, s.authorizeProtocolRepoAccess, indexByRepoName)
 	gotProto.SetRefUpdateValidator(func(ctx context.Context, owner, repo, refName string, oldHash, newHash object.Hash) error {
 		repoModel, err := s.repoSvc.Get(ctx, owner, repo)
 		if err != nil {
@@ -264,12 +293,7 @@ func (s *Server) routes() {
 			return r.ID, nil
 		},
 		s.authorizeProtocolRepoAccess,
-		func(ctx context.Context, repoID int64, store *gotstore.RepoStore, commitHash object.Hash) error {
-			if err := s.lineageSvc.IndexCommit(ctx, repoID, store, commitHash); err != nil {
-				return err
-			}
-			return s.codeIntelSvc.EnsureCommitIndexed(ctx, repoID, store, "", commitHash)
-		},
+		indexByRepoID,
 	)
 	gitHandler.SetRefUpdateValidator(func(ctx context.Context, owner, repo string, repoID int64, refName string, oldHash, newHash object.Hash) error {
 		return validateProtectedRefUpdate(ctx, repoID, refName, oldHash, newHash)
