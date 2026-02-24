@@ -1039,6 +1039,10 @@ func (s *SQLiteDB) GetPullRequest(ctx context.Context, repoID int64, number int)
 }
 
 func (s *SQLiteDB) ListPullRequests(ctx context.Context, repoID int64, state string) ([]models.PullRequest, error) {
+	return s.ListPullRequestsPage(ctx, repoID, state, 1<<30, 0)
+}
+
+func (s *SQLiteDB) ListPullRequestsPage(ctx context.Context, repoID int64, state string, limit, offset int) ([]models.PullRequest, error) {
 	query := `SELECT pr.id, pr.repo_id, pr.number, pr.title, pr.body, pr.state, pr.author_id, u.username,
 	         pr.source_branch, pr.target_branch, pr.source_commit, pr.target_commit, pr.merge_commit, pr.merge_method, pr.created_at, pr.merged_at
 		 FROM pull_requests pr
@@ -1049,7 +1053,14 @@ func (s *SQLiteDB) ListPullRequests(ctx context.Context, repoID int64, state str
 		query += ` AND pr.state = ?`
 		args = append(args, state)
 	}
-	query += ` ORDER BY pr.number DESC`
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	query += ` ORDER BY pr.number DESC LIMIT ? OFFSET ?`
+	args = append(args, limit, offset)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -1092,12 +1103,23 @@ func (s *SQLiteDB) CreatePRComment(ctx context.Context, c *models.PRComment) err
 }
 
 func (s *SQLiteDB) ListPRComments(ctx context.Context, prID int64) ([]models.PRComment, error) {
+	return s.ListPRCommentsPage(ctx, prID, 1<<30, 0)
+}
+
+func (s *SQLiteDB) ListPRCommentsPage(ctx context.Context, prID int64, limit, offset int) ([]models.PRComment, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT c.id, c.pr_id, c.author_id, u.username, c.body, c.file_path, c.entity_key, c.entity_stable_id, c.line_number, c.commit_hash, c.created_at
 		 FROM pr_comments c
 		 JOIN users u ON u.id = c.author_id
 		 WHERE c.pr_id = ?
-		 ORDER BY c.created_at`, prID)
+		 ORDER BY c.created_at
+		 LIMIT ? OFFSET ?`, prID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -1139,12 +1161,23 @@ func (s *SQLiteDB) CreatePRReview(ctx context.Context, r *models.PRReview) error
 }
 
 func (s *SQLiteDB) ListPRReviews(ctx context.Context, prID int64) ([]models.PRReview, error) {
+	return s.ListPRReviewsPage(ctx, prID, 1<<30, 0)
+}
+
+func (s *SQLiteDB) ListPRReviewsPage(ctx context.Context, prID int64, limit, offset int) ([]models.PRReview, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT r.id, r.pr_id, r.author_id, u.username, r.state, r.body, r.commit_hash, r.created_at
 		 FROM pr_reviews r
 		 JOIN users u ON u.id = r.author_id
 		 WHERE r.pr_id = ?
-		 ORDER BY r.created_at`, prID)
+		 ORDER BY r.created_at
+		 LIMIT ? OFFSET ?`, prID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -1227,6 +1260,10 @@ func (s *SQLiteDB) GetIssue(ctx context.Context, repoID int64, number int) (*mod
 }
 
 func (s *SQLiteDB) ListIssues(ctx context.Context, repoID int64, state string) ([]models.Issue, error) {
+	return s.ListIssuesPage(ctx, repoID, state, 1<<30, 0)
+}
+
+func (s *SQLiteDB) ListIssuesPage(ctx context.Context, repoID int64, state string, limit, offset int) ([]models.Issue, error) {
 	query := `SELECT i.id, i.repo_id, i.number, i.title, i.body, i.state, i.author_id, u.username, i.created_at, i.closed_at
 		 FROM issues i
 		 JOIN users u ON u.id = i.author_id
@@ -1236,7 +1273,14 @@ func (s *SQLiteDB) ListIssues(ctx context.Context, repoID int64, state string) (
 		query += ` AND i.state = ?`
 		args = append(args, state)
 	}
-	query += ` ORDER BY i.number DESC`
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	query += ` ORDER BY i.number DESC LIMIT ? OFFSET ?`
+	args = append(args, limit, offset)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -1273,12 +1317,23 @@ func (s *SQLiteDB) CreateIssueComment(ctx context.Context, c *models.IssueCommen
 }
 
 func (s *SQLiteDB) ListIssueComments(ctx context.Context, issueID int64) ([]models.IssueComment, error) {
+	return s.ListIssueCommentsPage(ctx, issueID, 1<<30, 0)
+}
+
+func (s *SQLiteDB) ListIssueCommentsPage(ctx context.Context, issueID int64, limit, offset int) ([]models.IssueComment, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT c.id, c.issue_id, c.author_id, u.username, c.body, c.created_at
 		 FROM issue_comments c
 		 JOIN users u ON u.id = c.author_id
 		 WHERE c.issue_id = ?
-		 ORDER BY c.created_at`, issueID)
+		 ORDER BY c.created_at
+		 LIMIT ? OFFSET ?`, issueID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -1322,6 +1377,10 @@ func (s *SQLiteDB) CreateNotification(ctx context.Context, n *models.Notificatio
 }
 
 func (s *SQLiteDB) ListNotifications(ctx context.Context, userID int64, unreadOnly bool) ([]models.Notification, error) {
+	return s.ListNotificationsPage(ctx, userID, unreadOnly, 1<<30, 0)
+}
+
+func (s *SQLiteDB) ListNotificationsPage(ctx context.Context, userID int64, unreadOnly bool, limit, offset int) ([]models.Notification, error) {
 	query := `SELECT n.id, n.user_id, n.actor_id, a.username, n.type, n.title, n.body, n.resource_path, n.repo_id, n.pr_id, n.issue_id, n.read_at, n.created_at
 		 FROM notifications n
 		 JOIN users a ON a.id = n.actor_id
@@ -1330,7 +1389,14 @@ func (s *SQLiteDB) ListNotifications(ctx context.Context, userID int64, unreadOn
 	if unreadOnly {
 		query += ` AND n.read_at IS NULL`
 	}
-	query += ` ORDER BY n.created_at DESC, n.id DESC`
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	query += ` ORDER BY n.created_at DESC, n.id DESC LIMIT ? OFFSET ?`
+	args = append(args, limit, offset)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {

@@ -16,13 +16,15 @@ func (s *Server) handleListNotifications(w http.ResponseWriter, r *http.Request)
 	}
 
 	unreadOnly := parseBool(r.URL.Query().Get("unread"))
-	notifications, err := s.db.ListNotifications(r.Context(), claims.UserID, unreadOnly)
+	page, perPage := parsePagination(r, 30, 200)
+	limit := perPage
+	offset := (page - 1) * perPage
+	notifications, err := s.db.ListNotificationsPage(r.Context(), claims.UserID, unreadOnly, limit, offset)
 	if err != nil {
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	page, perPage := parsePagination(r, 30, 200)
-	jsonResponse(w, http.StatusOK, paginateSlice(notifications, page, perPage))
+	jsonResponse(w, http.StatusOK, notifications)
 }
 
 func (s *Server) handleUnreadNotificationsCount(w http.ResponseWriter, r *http.Request) {

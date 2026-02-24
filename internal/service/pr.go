@@ -133,8 +133,9 @@ func (s *PRService) Get(ctx context.Context, repoID int64, number int) (*models.
 	return s.db.GetPullRequest(ctx, repoID, number)
 }
 
-func (s *PRService) List(ctx context.Context, repoID int64, state string) ([]models.PullRequest, error) {
-	return s.db.ListPullRequests(ctx, repoID, state)
+func (s *PRService) List(ctx context.Context, repoID int64, state string, page, perPage int) ([]models.PullRequest, error) {
+	limit, offset := normalizePage(page, perPage, 30, 200)
+	return s.db.ListPullRequestsPage(ctx, repoID, state, limit, offset)
 }
 
 // Diff computes the entity-level diff for a PR.
@@ -652,8 +653,9 @@ func (s *PRService) CreateComment(ctx context.Context, c *models.PRComment) erro
 	return s.db.CreatePRComment(ctx, c)
 }
 
-func (s *PRService) ListComments(ctx context.Context, prID int64) ([]models.PRComment, error) {
-	return s.db.ListPRComments(ctx, prID)
+func (s *PRService) ListComments(ctx context.Context, prID int64, page, perPage int) ([]models.PRComment, error) {
+	limit, offset := normalizePage(page, perPage, 50, 200)
+	return s.db.ListPRCommentsPage(ctx, prID, limit, offset)
 }
 
 // Reviews
@@ -661,8 +663,22 @@ func (s *PRService) CreateReview(ctx context.Context, r *models.PRReview) error 
 	return s.db.CreatePRReview(ctx, r)
 }
 
-func (s *PRService) ListReviews(ctx context.Context, prID int64) ([]models.PRReview, error) {
-	return s.db.ListPRReviews(ctx, prID)
+func (s *PRService) ListReviews(ctx context.Context, prID int64, page, perPage int) ([]models.PRReview, error) {
+	limit, offset := normalizePage(page, perPage, 50, 200)
+	return s.db.ListPRReviewsPage(ctx, prID, limit, offset)
+}
+
+func normalizePage(page, perPage, defaultPerPage, maxPerPage int) (limit, offset int) {
+	if page <= 0 {
+		page = 1
+	}
+	if perPage <= 0 {
+		perPage = defaultPerPage
+	}
+	if perPage > maxPerPage {
+		perPage = maxPerPage
+	}
+	return perPage, (page - 1) * perPage
 }
 
 // --- helpers ---

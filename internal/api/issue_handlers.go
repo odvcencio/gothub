@@ -56,13 +56,13 @@ func (s *Server) handleListIssues(w http.ResponseWriter, r *http.Request) {
 	if state == "all" {
 		state = ""
 	}
-	issues, err := s.issueSvc.List(r.Context(), repo.ID, state)
+	page, perPage := parsePagination(r, 30, 200)
+	issues, err := s.issueSvc.List(r.Context(), repo.ID, state, page, perPage)
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	page, perPage := parsePagination(r, 30, 200)
-	jsonResponse(w, http.StatusOK, paginateSlice(issues, page, perPage))
+	jsonResponse(w, http.StatusOK, issues)
 }
 
 func (s *Server) handleGetIssue(w http.ResponseWriter, r *http.Request) {
@@ -220,11 +220,11 @@ func (s *Server) handleListIssueComments(w http.ResponseWriter, r *http.Request)
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	comments, err := s.issueSvc.ListComments(r.Context(), issue.ID)
+	page, perPage := parsePagination(r, 50, 200)
+	comments, err := s.issueSvc.ListComments(r.Context(), issue.ID, page, perPage)
 	if err != nil {
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	page, perPage := parsePagination(r, 50, 200)
-	jsonResponse(w, http.StatusOK, paginateSlice(comments, page, perPage))
+	jsonResponse(w, http.StatusOK, comments)
 }

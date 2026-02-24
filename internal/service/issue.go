@@ -40,11 +40,12 @@ func (s *IssueService) Get(ctx context.Context, repoID int64, number int) (*mode
 	return s.db.GetIssue(ctx, repoID, number)
 }
 
-func (s *IssueService) List(ctx context.Context, repoID int64, state string) ([]models.Issue, error) {
+func (s *IssueService) List(ctx context.Context, repoID int64, state string, page, perPage int) ([]models.Issue, error) {
 	if state != "" && state != "open" && state != "closed" {
 		return nil, fmt.Errorf("state must be open or closed")
 	}
-	return s.db.ListIssues(ctx, repoID, state)
+	limit, offset := normalizePage(page, perPage, 30, 200)
+	return s.db.ListIssuesPage(ctx, repoID, state, limit, offset)
 }
 
 func (s *IssueService) Update(ctx context.Context, issue *models.Issue) error {
@@ -81,6 +82,7 @@ func (s *IssueService) CreateComment(ctx context.Context, issueID, authorID int6
 	return c, nil
 }
 
-func (s *IssueService) ListComments(ctx context.Context, issueID int64) ([]models.IssueComment, error) {
-	return s.db.ListIssueComments(ctx, issueID)
+func (s *IssueService) ListComments(ctx context.Context, issueID int64, page, perPage int) ([]models.IssueComment, error) {
+	limit, offset := normalizePage(page, perPage, 50, 200)
+	return s.db.ListIssueCommentsPage(ctx, issueID, limit, offset)
 }

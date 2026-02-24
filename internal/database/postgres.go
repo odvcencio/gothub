@@ -959,17 +959,30 @@ func (p *PostgresDB) GetPullRequest(ctx context.Context, repoID int64, number in
 }
 
 func (p *PostgresDB) ListPullRequests(ctx context.Context, repoID int64, state string) ([]models.PullRequest, error) {
+	return p.ListPullRequestsPage(ctx, repoID, state, 1<<30, 0)
+}
+
+func (p *PostgresDB) ListPullRequestsPage(ctx context.Context, repoID int64, state string, limit, offset int) ([]models.PullRequest, error) {
 	query := `SELECT pr.id, pr.repo_id, pr.number, pr.title, pr.body, pr.state, pr.author_id, u.username,
 	         pr.source_branch, pr.target_branch, pr.source_commit, pr.target_commit, pr.merge_commit, pr.merge_method, pr.created_at, pr.merged_at
 		 FROM pull_requests pr
 		 JOIN users u ON u.id = pr.author_id
 		 WHERE pr.repo_id = $1`
 	args := []any{repoID}
+	argPos := 2
 	if state != "" {
-		query += ` AND pr.state = $2`
+		query += fmt.Sprintf(" AND pr.state = $%d", argPos)
 		args = append(args, state)
+		argPos++
 	}
-	query += ` ORDER BY pr.number DESC`
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	query += fmt.Sprintf(" ORDER BY pr.number DESC LIMIT $%d OFFSET $%d", argPos, argPos+1)
+	args = append(args, limit, offset)
 
 	rows, err := p.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -1007,12 +1020,23 @@ func (p *PostgresDB) CreatePRComment(ctx context.Context, c *models.PRComment) e
 }
 
 func (p *PostgresDB) ListPRComments(ctx context.Context, prID int64) ([]models.PRComment, error) {
+	return p.ListPRCommentsPage(ctx, prID, 1<<30, 0)
+}
+
+func (p *PostgresDB) ListPRCommentsPage(ctx context.Context, prID int64, limit, offset int) ([]models.PRComment, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
 	rows, err := p.db.QueryContext(ctx,
 		`SELECT c.id, c.pr_id, c.author_id, u.username, c.body, c.file_path, c.entity_key, c.entity_stable_id, c.line_number, c.commit_hash, c.created_at
 		 FROM pr_comments c
 		 JOIN users u ON u.id = c.author_id
 		 WHERE c.pr_id = $1
-		 ORDER BY c.created_at`, prID)
+		 ORDER BY c.created_at
+		 LIMIT $2 OFFSET $3`, prID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -1049,12 +1073,23 @@ func (p *PostgresDB) CreatePRReview(ctx context.Context, r *models.PRReview) err
 }
 
 func (p *PostgresDB) ListPRReviews(ctx context.Context, prID int64) ([]models.PRReview, error) {
+	return p.ListPRReviewsPage(ctx, prID, 1<<30, 0)
+}
+
+func (p *PostgresDB) ListPRReviewsPage(ctx context.Context, prID int64, limit, offset int) ([]models.PRReview, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
 	rows, err := p.db.QueryContext(ctx,
 		`SELECT r.id, r.pr_id, r.author_id, u.username, r.state, r.body, r.commit_hash, r.created_at
 		 FROM pr_reviews r
 		 JOIN users u ON u.id = r.author_id
 		 WHERE r.pr_id = $1
-		 ORDER BY r.created_at`, prID)
+		 ORDER BY r.created_at
+		 LIMIT $2 OFFSET $3`, prID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -1118,16 +1153,29 @@ func (p *PostgresDB) GetIssue(ctx context.Context, repoID int64, number int) (*m
 }
 
 func (p *PostgresDB) ListIssues(ctx context.Context, repoID int64, state string) ([]models.Issue, error) {
+	return p.ListIssuesPage(ctx, repoID, state, 1<<30, 0)
+}
+
+func (p *PostgresDB) ListIssuesPage(ctx context.Context, repoID int64, state string, limit, offset int) ([]models.Issue, error) {
 	query := `SELECT i.id, i.repo_id, i.number, i.title, i.body, i.state, i.author_id, u.username, i.created_at, i.closed_at
 		 FROM issues i
 		 JOIN users u ON u.id = i.author_id
 		 WHERE i.repo_id = $1`
 	args := []any{repoID}
+	argPos := 2
 	if state != "" {
-		query += ` AND i.state = $2`
+		query += fmt.Sprintf(" AND i.state = $%d", argPos)
 		args = append(args, state)
+		argPos++
 	}
-	query += ` ORDER BY i.number DESC`
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	query += fmt.Sprintf(" ORDER BY i.number DESC LIMIT $%d OFFSET $%d", argPos, argPos+1)
+	args = append(args, limit, offset)
 
 	rows, err := p.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -1159,12 +1207,23 @@ func (p *PostgresDB) CreateIssueComment(ctx context.Context, c *models.IssueComm
 }
 
 func (p *PostgresDB) ListIssueComments(ctx context.Context, issueID int64) ([]models.IssueComment, error) {
+	return p.ListIssueCommentsPage(ctx, issueID, 1<<30, 0)
+}
+
+func (p *PostgresDB) ListIssueCommentsPage(ctx context.Context, issueID int64, limit, offset int) ([]models.IssueComment, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
 	rows, err := p.db.QueryContext(ctx,
 		`SELECT c.id, c.issue_id, c.author_id, u.username, c.body, c.created_at
 		 FROM issue_comments c
 		 JOIN users u ON u.id = c.author_id
 		 WHERE c.issue_id = $1
-		 ORDER BY c.created_at`, issueID)
+		 ORDER BY c.created_at
+		 LIMIT $2 OFFSET $3`, issueID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -1205,15 +1264,27 @@ func (p *PostgresDB) CreateNotification(ctx context.Context, n *models.Notificat
 }
 
 func (p *PostgresDB) ListNotifications(ctx context.Context, userID int64, unreadOnly bool) ([]models.Notification, error) {
+	return p.ListNotificationsPage(ctx, userID, unreadOnly, 1<<30, 0)
+}
+
+func (p *PostgresDB) ListNotificationsPage(ctx context.Context, userID int64, unreadOnly bool, limit, offset int) ([]models.Notification, error) {
 	query := `SELECT n.id, n.user_id, n.actor_id, a.username, n.type, n.title, n.body, n.resource_path, n.repo_id, n.pr_id, n.issue_id, n.read_at, n.created_at
 		 FROM notifications n
 		 JOIN users a ON a.id = n.actor_id
 		 WHERE n.user_id = $1`
 	args := []any{userID}
+	argPos := 2
 	if unreadOnly {
 		query += ` AND n.read_at IS NULL`
 	}
-	query += ` ORDER BY n.created_at DESC, n.id DESC`
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	query += fmt.Sprintf(" ORDER BY n.created_at DESC, n.id DESC LIMIT $%d OFFSET $%d", argPos, argPos+1)
+	args = append(args, limit, offset)
 
 	rows, err := p.db.QueryContext(ctx, query, args...)
 	if err != nil {

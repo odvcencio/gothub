@@ -62,16 +62,19 @@ type DB interface {
 	CreatePullRequest(ctx context.Context, pr *models.PullRequest) error
 	GetPullRequest(ctx context.Context, repoID int64, number int) (*models.PullRequest, error)
 	ListPullRequests(ctx context.Context, repoID int64, state string) ([]models.PullRequest, error)
+	ListPullRequestsPage(ctx context.Context, repoID int64, state string, limit, offset int) ([]models.PullRequest, error)
 	UpdatePullRequest(ctx context.Context, pr *models.PullRequest) error
 
 	// PR Comments
 	CreatePRComment(ctx context.Context, comment *models.PRComment) error
 	ListPRComments(ctx context.Context, prID int64) ([]models.PRComment, error)
+	ListPRCommentsPage(ctx context.Context, prID int64, limit, offset int) ([]models.PRComment, error)
 	DeletePRComment(ctx context.Context, commentID, authorID int64) error
 
 	// PR Reviews
 	CreatePRReview(ctx context.Context, review *models.PRReview) error
 	ListPRReviews(ctx context.Context, prID int64) ([]models.PRReview, error)
+	ListPRReviewsPage(ctx context.Context, prID int64, limit, offset int) ([]models.PRReview, error)
 
 	// Branch Protection
 	UpsertBranchProtectionRule(ctx context.Context, rule *models.BranchProtectionRule) error
@@ -86,14 +89,17 @@ type DB interface {
 	CreateIssue(ctx context.Context, issue *models.Issue) error
 	GetIssue(ctx context.Context, repoID int64, number int) (*models.Issue, error)
 	ListIssues(ctx context.Context, repoID int64, state string) ([]models.Issue, error)
+	ListIssuesPage(ctx context.Context, repoID int64, state string, limit, offset int) ([]models.Issue, error)
 	UpdateIssue(ctx context.Context, issue *models.Issue) error
 	CreateIssueComment(ctx context.Context, comment *models.IssueComment) error
 	ListIssueComments(ctx context.Context, issueID int64) ([]models.IssueComment, error)
+	ListIssueCommentsPage(ctx context.Context, issueID int64, limit, offset int) ([]models.IssueComment, error)
 	DeleteIssueComment(ctx context.Context, commentID, authorID int64) error
 
 	// Notifications
 	CreateNotification(ctx context.Context, n *models.Notification) error
 	ListNotifications(ctx context.Context, userID int64, unreadOnly bool) ([]models.Notification, error)
+	ListNotificationsPage(ctx context.Context, userID int64, unreadOnly bool, limit, offset int) ([]models.Notification, error)
 	CountUnreadNotifications(ctx context.Context, userID int64) (int, error)
 	MarkNotificationRead(ctx context.Context, id, userID int64) error
 	MarkAllNotificationsRead(ctx context.Context, userID int64) error
