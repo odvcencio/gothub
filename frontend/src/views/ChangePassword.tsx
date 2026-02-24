@@ -31,6 +31,14 @@ export function ChangePasswordView({ path }: Props) {
     );
   }
 
+  if (passwordAuthEnabled === null) {
+    return (
+      <div style={{ maxWidth: '600px', margin: '60px auto', textAlign: 'center' }}>
+        <p style={{ color: '#8b949e', fontSize: '16px' }}>Loading auth settings...</p>
+      </div>
+    );
+  }
+
   if (passwordAuthEnabled === false) {
     return (
       <div style={{ maxWidth: '600px', margin: '60px auto', textAlign: 'center' }}>

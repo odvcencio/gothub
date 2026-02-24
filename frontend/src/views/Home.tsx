@@ -28,17 +28,39 @@ function AuthForm() {
   const [password, setPassword] = useState('');
   const [magicToken, setMagicToken] = useState('');
   const [magicSent, setMagicSent] = useState(false);
-  const [passwordAuthEnabled, setPasswordAuthEnabled] = useState(false);
+  const [authCapabilities, setAuthCapabilities] = useState({
+    passwordAuthEnabled: false,
+    magicLinkEnabled: true,
+    passkeyEnabled: true,
+  });
   const [info, setInfo] = useState('');
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const sessionExpired = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('session') === 'expired';
-  const passkeysAvailable = browserSupportsPasskeys();
+  const passkeysAvailable = browserSupportsPasskeys() && authCapabilities.passkeyEnabled;
+  const passwordAuthEnabled = authCapabilities.passwordAuthEnabled;
+  const passkeyLabel = !authCapabilities.passkeyEnabled
+    ? 'Passkeys disabled by server'
+    : passkeysAvailable
+      ? 'Sign in with passkey'
+      : 'Passkeys unavailable in this browser';
 
   useEffect(() => {
     getAuthCapabilities()
-      .then((caps) => setPasswordAuthEnabled(!!caps.password_auth_enabled))
-      .catch(() => setPasswordAuthEnabled(false));
+      .then((caps) =>
+        setAuthCapabilities({
+          passwordAuthEnabled: !!caps.password_auth_enabled,
+          magicLinkEnabled: !!caps.magic_link_enabled,
+          passkeyEnabled: !!caps.passkey_enabled,
+        })
+      )
+      .catch(() =>
+        setAuthCapabilities({
+          passwordAuthEnabled: false,
+          magicLinkEnabled: true,
+          passkeyEnabled: true,
+        })
+      );
   }, []);
 
   const completeAuth = (tokenValue: string) => {
@@ -138,26 +160,28 @@ function AuthForm() {
               disabled={submitting || !username || !passkeysAvailable}
               style={{ ...primaryButtonStyle, opacity: submitting || !username || !passkeysAvailable ? 0.6 : 1 }}
             >
-              {passkeysAvailable ? 'Sign in with passkey' : 'Passkeys unavailable in this browser'}
+              {passkeyLabel}
             </button>
           </form>
 
-          <div style={{ borderTop: '1px solid #30363d', paddingTop: '14px' }}>
-            <form onSubmit={submitMagicRequest} style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-              <input value={email} onInput={(e: any) => setEmail(e.target.value)} placeholder="Email" type="email" style={inputStyle} />
-              <button type="submit" disabled={submitting || !email} style={{ ...secondaryButtonStyle, opacity: submitting || !email ? 0.6 : 1 }}>
-                Send magic link
-              </button>
-            </form>
-            {magicSent && (
-              <form onSubmit={submitMagicVerify} style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '10px' }}>
-                <input value={magicToken} onInput={(e: any) => setMagicToken(e.target.value)} placeholder="Magic token" style={inputStyle} />
-                <button type="submit" disabled={submitting || !magicToken} style={{ ...secondaryButtonStyle, opacity: submitting || !magicToken ? 0.6 : 1 }}>
-                  Verify magic link
+          {authCapabilities.magicLinkEnabled && (
+            <div style={{ borderTop: '1px solid #30363d', paddingTop: '14px' }}>
+              <form onSubmit={submitMagicRequest} style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                <input value={email} onInput={(e: any) => setEmail(e.target.value)} placeholder="Email" type="email" style={inputStyle} />
+                <button type="submit" disabled={submitting || !email} style={{ ...secondaryButtonStyle, opacity: submitting || !email ? 0.6 : 1 }}>
+                  Send magic link
                 </button>
               </form>
-            )}
-          </div>
+              {magicSent && (
+                <form onSubmit={submitMagicVerify} style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '10px' }}>
+                  <input value={magicToken} onInput={(e: any) => setMagicToken(e.target.value)} placeholder="Magic token" style={inputStyle} />
+                  <button type="submit" disabled={submitting || !magicToken} style={{ ...secondaryButtonStyle, opacity: submitting || !magicToken ? 0.6 : 1 }}>
+                    Verify magic link
+                  </button>
+                </form>
+              )}
+            </div>
+          )}
 
           {passwordAuthEnabled && (
             <details style={{ borderTop: '1px solid #30363d', paddingTop: '14px' }}>

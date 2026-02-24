@@ -595,25 +595,30 @@ func (h *SmartHTTPHandler) handleUploadPack(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
-	// Build and send packfile
-	w.Header().Set("Content-Type", "application/x-git-upload-pack-result")
+	var packData []byte
+	if len(packObjects) > 0 {
+		packData, err = BuildPackfile(packObjects)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("build packfile: %v", err), http.StatusInternalServerError)
+			return
+		}
+	}
 
+	// Build and send upload-pack response.
+	w.Header().Set("Content-Type", "application/x-git-upload-pack-result")
 	w.Write(pktLine("NAK\n"))
 
-	if len(packObjects) > 0 {
-		packData, err := BuildPackfile(packObjects)
-		if err != nil {
-			return
-		}
-		if useSideband {
-			if err := writeSideband(w, 1, packData); err != nil {
-				return
-			}
-			w.Write(pktFlush())
-			return
-		}
-		w.Write(packData)
+	if len(packData) == 0 {
+		return
 	}
+	if useSideband {
+		if err := writeSideband(w, 1, packData); err != nil {
+			return
+		}
+		w.Write(pktFlush())
+		return
+	}
+	w.Write(packData)
 }
 
 func (h *SmartHTTPHandler) sendReceivePackResult(w http.ResponseWriter, errMsg string, updates []refUpdate, refErrors map[string]string, useSideband bool) {
