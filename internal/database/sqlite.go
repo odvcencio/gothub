@@ -38,8 +38,16 @@ func OpenSQLite(dsn string) (*SQLiteDB, error) {
 func (s *SQLiteDB) Close() error { return s.db.Close() }
 
 func (s *SQLiteDB) Migrate(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, schema)
-	return err
+	if _, err := s.db.ExecContext(ctx, schema); err != nil {
+		return err
+	}
+	// Backfill schema for existing installations created before entity_stable_id.
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE pr_comments ADD COLUMN entity_stable_id TEXT NOT NULL DEFAULT ''`); err != nil {
+		if !isSQLiteDuplicateColumnErr(err) {
+			return err
+		}
+	}
+	return nil
 }
 
 const schema = `
@@ -128,6 +136,7 @@ CREATE TABLE IF NOT EXISTS pr_comments (
 	body TEXT NOT NULL,
 	file_path TEXT NOT NULL DEFAULT '',
 	entity_key TEXT NOT NULL DEFAULT '',
+	entity_stable_id TEXT NOT NULL DEFAULT '',
 	line_number INTEGER,
 	commit_hash TEXT NOT NULL DEFAULT '',
 	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -674,6 +683,13 @@ func isSQLiteBusyErr(err error) bool {
 	return strings.Contains(s, "SQLITE_BUSY") || strings.Contains(s, "database is locked")
 }
 
+func isSQLiteDuplicateColumnErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "duplicate column name")
+}
+
 func isPRNumberUniqueConstraintErr(err error) bool {
 	if err == nil {
 		return false
@@ -741,9 +757,9 @@ func (s *SQLiteDB) UpdatePullRequest(ctx context.Context, pr *models.PullRequest
 
 func (s *SQLiteDB) CreatePRComment(ctx context.Context, c *models.PRComment) error {
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO pr_comments (pr_id, author_id, body, file_path, entity_key, line_number, commit_hash)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		c.PRID, c.AuthorID, c.Body, c.FilePath, c.EntityKey, c.LineNumber, c.CommitHash)
+		`INSERT INTO pr_comments (pr_id, author_id, body, file_path, entity_key, entity_stable_id, line_number, commit_hash)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		c.PRID, c.AuthorID, c.Body, c.FilePath, c.EntityKey, c.EntityStableID, c.LineNumber, c.CommitHash)
 	if err != nil {
 		return err
 	}
@@ -753,7 +769,7 @@ func (s *SQLiteDB) CreatePRComment(ctx context.Context, c *models.PRComment) err
 
 func (s *SQLiteDB) ListPRComments(ctx context.Context, prID int64) ([]models.PRComment, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT c.id, c.pr_id, c.author_id, u.username, c.body, c.file_path, c.entity_key, c.line_number, c.commit_hash, c.created_at
+		`SELECT c.id, c.pr_id, c.author_id, u.username, c.body, c.file_path, c.entity_key, c.entity_stable_id, c.line_number, c.commit_hash, c.created_at
 		 FROM pr_comments c
 		 JOIN users u ON u.id = c.author_id
 		 WHERE c.pr_id = ?
@@ -765,7 +781,7 @@ func (s *SQLiteDB) ListPRComments(ctx context.Context, prID int64) ([]models.PRC
 	var comments []models.PRComment
 	for rows.Next() {
 		var c models.PRComment
-		if err := rows.Scan(&c.ID, &c.PRID, &c.AuthorID, &c.AuthorName, &c.Body, &c.FilePath, &c.EntityKey, &c.LineNumber, &c.CommitHash, &c.CreatedAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.PRID, &c.AuthorID, &c.AuthorName, &c.Body, &c.FilePath, &c.EntityKey, &c.EntityStableID, &c.LineNumber, &c.CommitHash, &c.CreatedAt); err != nil {
 			return nil, err
 		}
 		comments = append(comments, c)

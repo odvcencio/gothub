@@ -213,6 +213,7 @@ function ConversationTab({ pr, comments, reviews, owner, repo, prNum, onCommentA
               </span>
             )}
             {item.file_path && <span style={{ fontFamily: 'monospace' }}>{item.file_path}</span>}
+            {item.entity_stable_id && <span style={{ fontFamily: 'monospace', color: '#58a6ff' }}>stable:{item.entity_stable_id}</span>}
             {item.entity_key && <span style={{ fontFamily: 'monospace', color: '#d2a8ff' }}>{item.entity_key}</span>}
           </div>
           {item.body && <div style={{ color: '#c9d1d9', fontSize: '13px', whiteSpace: 'pre-wrap' }}>{item.body}</div>}

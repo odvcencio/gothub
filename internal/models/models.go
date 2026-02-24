@@ -72,16 +72,17 @@ type PullRequest struct {
 }
 
 type PRComment struct {
-	ID         int64     `json:"id"`
-	PRID       int64     `json:"pr_id"`
-	AuthorID   int64     `json:"author_id"`
-	AuthorName string    `json:"author_name,omitempty"`
-	Body       string    `json:"body"`
-	FilePath   string    `json:"file_path,omitempty"`
-	EntityKey  string    `json:"entity_key,omitempty"`
-	LineNumber *int      `json:"line_number,omitempty"`
-	CommitHash string    `json:"commit_hash,omitempty"`
-	CreatedAt  time.Time `json:"created_at"`
+	ID             int64     `json:"id"`
+	PRID           int64     `json:"pr_id"`
+	AuthorID       int64     `json:"author_id"`
+	AuthorName     string    `json:"author_name,omitempty"`
+	Body           string    `json:"body"`
+	FilePath       string    `json:"file_path,omitempty"`
+	EntityKey      string    `json:"entity_key,omitempty"`
+	EntityStableID string    `json:"entity_stable_id,omitempty"`
+	LineNumber     *int      `json:"line_number,omitempty"`
+	CommitHash     string    `json:"commit_hash,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
 }
 
 type PRReview struct {

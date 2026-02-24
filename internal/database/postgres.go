@@ -32,7 +32,10 @@ func OpenPostgres(dsn string) (*PostgresDB, error) {
 func (p *PostgresDB) Close() error { return p.db.Close() }
 
 func (p *PostgresDB) Migrate(ctx context.Context) error {
-	_, err := p.db.ExecContext(ctx, pgSchema)
+	if _, err := p.db.ExecContext(ctx, pgSchema); err != nil {
+		return err
+	}
+	_, err := p.db.ExecContext(ctx, `ALTER TABLE pr_comments ADD COLUMN IF NOT EXISTS entity_stable_id TEXT NOT NULL DEFAULT ''`)
 	return err
 }
 
@@ -122,6 +125,7 @@ CREATE TABLE IF NOT EXISTS pr_comments (
 	body TEXT NOT NULL,
 	file_path TEXT NOT NULL DEFAULT '',
 	entity_key TEXT NOT NULL DEFAULT '',
+	entity_stable_id TEXT NOT NULL DEFAULT '',
 	line_number INTEGER,
 	commit_hash TEXT NOT NULL DEFAULT '',
 	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -693,14 +697,14 @@ func (p *PostgresDB) UpdatePullRequest(ctx context.Context, pr *models.PullReque
 
 func (p *PostgresDB) CreatePRComment(ctx context.Context, c *models.PRComment) error {
 	return p.db.QueryRowContext(ctx,
-		`INSERT INTO pr_comments (pr_id, author_id, body, file_path, entity_key, line_number, commit_hash)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, created_at`,
-		c.PRID, c.AuthorID, c.Body, c.FilePath, c.EntityKey, c.LineNumber, c.CommitHash).Scan(&c.ID, &c.CreatedAt)
+		`INSERT INTO pr_comments (pr_id, author_id, body, file_path, entity_key, entity_stable_id, line_number, commit_hash)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id, created_at`,
+		c.PRID, c.AuthorID, c.Body, c.FilePath, c.EntityKey, c.EntityStableID, c.LineNumber, c.CommitHash).Scan(&c.ID, &c.CreatedAt)
 }
 
 func (p *PostgresDB) ListPRComments(ctx context.Context, prID int64) ([]models.PRComment, error) {
 	rows, err := p.db.QueryContext(ctx,
-		`SELECT c.id, c.pr_id, c.author_id, u.username, c.body, c.file_path, c.entity_key, c.line_number, c.commit_hash, c.created_at
+		`SELECT c.id, c.pr_id, c.author_id, u.username, c.body, c.file_path, c.entity_key, c.entity_stable_id, c.line_number, c.commit_hash, c.created_at
 		 FROM pr_comments c
 		 JOIN users u ON u.id = c.author_id
 		 WHERE c.pr_id = $1
@@ -712,7 +716,7 @@ func (p *PostgresDB) ListPRComments(ctx context.Context, prID int64) ([]models.P
 	var comments []models.PRComment
 	for rows.Next() {
 		var c models.PRComment
-		if err := rows.Scan(&c.ID, &c.PRID, &c.AuthorID, &c.AuthorName, &c.Body, &c.FilePath, &c.EntityKey, &c.LineNumber, &c.CommitHash, &c.CreatedAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.PRID, &c.AuthorID, &c.AuthorName, &c.Body, &c.FilePath, &c.EntityKey, &c.EntityStableID, &c.LineNumber, &c.CommitHash, &c.CreatedAt); err != nil {
 			return nil, err
 		}
 		comments = append(comments, c)

@@ -219,11 +219,12 @@ func (s *Server) handleMergePR(w http.ResponseWriter, r *http.Request) {
 // PR Comments
 
 type createPRCommentRequest struct {
-	Body       string `json:"body"`
-	FilePath   string `json:"file_path"`
-	EntityKey  string `json:"entity_key"`
-	LineNumber *int   `json:"line_number"`
-	CommitHash string `json:"commit_hash"`
+	Body           string `json:"body"`
+	FilePath       string `json:"file_path"`
+	EntityKey      string `json:"entity_key"`
+	EntityStableID string `json:"entity_stable_id"`
+	LineNumber     *int   `json:"line_number"`
+	CommitHash     string `json:"commit_hash"`
 }
 
 func (s *Server) handleCreatePRComment(w http.ResponseWriter, r *http.Request) {
@@ -252,13 +253,14 @@ func (s *Server) handleCreatePRComment(w http.ResponseWriter, r *http.Request) {
 	}
 
 	comment := &models.PRComment{
-		PRID:       pr.ID,
-		AuthorID:   claims.UserID,
-		Body:       req.Body,
-		FilePath:   req.FilePath,
-		EntityKey:  req.EntityKey,
-		LineNumber: req.LineNumber,
-		CommitHash: req.CommitHash,
+		PRID:           pr.ID,
+		AuthorID:       claims.UserID,
+		Body:           req.Body,
+		FilePath:       req.FilePath,
+		EntityKey:      req.EntityKey,
+		EntityStableID: req.EntityStableID,
+		LineNumber:     req.LineNumber,
+		CommitHash:     req.CommitHash,
 	}
 	if err := s.prSvc.CreateComment(r.Context(), comment); err != nil {
 		jsonError(w, "internal error", http.StatusInternalServerError)

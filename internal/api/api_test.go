@@ -1690,7 +1690,7 @@ func TestNotificationsLifecycle(t *testing.T) {
 	}
 
 	// Alice comments on bob's PR -> Bob gets notified.
-	commentReq := `{"body":"Looks good"}`
+	commentReq := `{"body":"Looks good","entity_key":"ProcessOrder","entity_stable_id":"ent_process_order"}`
 	req, _ = http.NewRequest("POST", fmt.Sprintf("%s/api/v1/repos/alice/repo/pulls/%d/comments", ts.URL, prResp.Number), bytes.NewBufferString(commentReq))
 	req.Header.Set("Authorization", "Bearer "+aliceToken)
 	req.Header.Set("Content-Type", "application/json")
@@ -1701,7 +1701,17 @@ func TestNotificationsLifecycle(t *testing.T) {
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("create PR comment: expected 201, got %d", resp.StatusCode)
 	}
+	var createdComment struct {
+		EntityKey      string `json:"entity_key"`
+		EntityStableID string `json:"entity_stable_id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&createdComment); err != nil {
+		t.Fatal(err)
+	}
 	resp.Body.Close()
+	if createdComment.EntityKey != "ProcessOrder" || createdComment.EntityStableID != "ent_process_order" {
+		t.Fatalf("unexpected PR comment anchors: %+v", createdComment)
+	}
 
 	req, _ = http.NewRequest("GET", ts.URL+"/api/v1/notifications/unread-count", nil)
 	req.Header.Set("Authorization", "Bearer "+bobToken)
