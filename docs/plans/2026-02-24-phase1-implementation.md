@@ -52,6 +52,16 @@ Task 30 (Obs: OTel tracing)
 Task 40 (PR UX: impact summary card)
   → Task 41 (PR UX: semver recommendation card)
     → Task 42 (PR UX: entity owner approval checklist)
+
+Task 43 (Got CLI: structural blame)
+  → Task 44 (Got CLI: entity-level log)
+    → Task 45 (Got core: entity rename tracking)
+      → Task 46 (Got CLI: cherry-pick by entity)
+
+Task 47 (GotHub UI: structural blame panel)
+  → Task 48 (GotHub UI: visual call graph)
+    → Task 49 (GotHub UI: inline code intelligence hover/nav)
+      → Task 50 (GotHub UX: demo onboarding repository flow)
 ```
 
 ## Execution Tracker (Live)
@@ -81,6 +91,7 @@ Updated: 2026-02-24
 ### Remaining (Not Yet Implemented)
 
 - Tasks 8-34 are pending.
+- Tasks 43-50 are queued structural-differentiation work.
 - Tasks 35-39 are queued post-Phase-1 cloud multi-tenancy work.
 
 ---
@@ -2203,3 +2214,41 @@ tenant_id = current_setting('app.tenant_id')::bigint
 ### Task 39: Multi-Tenant Security Verification
 
 **Goal:** add integration tests for cross-tenant data isolation (API and direct SQL path) to prove RLS defense-in-depth.
+
+---
+
+## Queued Structural Differentiation Workstream (CLI + UX)
+
+These items come from the latest capability audit and are queued as post-core execution slices.
+
+### Task 43: Structural Blame (`got blame --entity`)
+
+**Goal:** attribute entity-level ownership in blame output (`func ProcessOrder last touched by <author> in <commit>`), not line-level only.
+
+### Task 44: Entity-Level Log (`got log --entity`)
+
+**Goal:** filter commit history to only commits that changed a selected entity key/path.
+
+### Task 45: Rename-Aware Entity Tracking
+
+**Goal:** connect entity identity across rename/move operations so blame/log history survives refactors.
+
+### Task 46: Entity Cherry-Pick (`got cherry-pick --entity`)
+
+**Goal:** apply a single entity delta from another commit/branch without cherry-picking whole commits.
+
+### Task 47: Structural Blame Panel in GotHub Code View
+
+**Goal:** expose entity-last-touch metadata in the web code browser, anchored to selected entity.
+
+### Task 48: Visual Call Graph in GotHub
+
+**Goal:** replace callgraph table-only presentation with interactive graph rendering and click-through navigation.
+
+### Task 49: Inline Code Intelligence in Blob Viewer
+
+**Goal:** add hover/click definition and reference navigation in code view using existing symbol/reference endpoints.
+
+### Task 50: Onboarding Demo Repository
+
+**Goal:** add first-run "Try Gothub" seeded repo/flow that demonstrates structural merge, impact diff, semver, and merge gate behavior.
