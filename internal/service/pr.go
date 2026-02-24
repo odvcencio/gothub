@@ -3,9 +3,11 @@ package service
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/odvcencio/got/pkg/diff"
+	"github.com/odvcencio/got/pkg/entity"
 	"github.com/odvcencio/got/pkg/merge"
 	"github.com/odvcencio/got/pkg/object"
 	"github.com/odvcencio/gothub/internal/database"
@@ -14,10 +16,10 @@ import (
 
 // MergePreviewResponse holds the result of a structural merge preview.
 type MergePreviewResponse struct {
-	HasConflicts  bool              `json:"has_conflicts"`
-	ConflictCount int               `json:"conflict_count"`
-	Stats         MergeStatsInfo    `json:"stats"`
-	Files         []FileMergeInfo   `json:"files"`
+	HasConflicts  bool            `json:"has_conflicts"`
+	ConflictCount int             `json:"conflict_count"`
+	Stats         MergeStatsInfo  `json:"stats"`
+	Files         []FileMergeInfo `json:"files"`
 }
 
 type MergeStatsInfo struct {
@@ -168,13 +170,31 @@ func (s *PRService) MergePreview(ctx context.Context, owner, repo string, pr *mo
 		return nil, fmt.Errorf("find merge base: %w", err)
 	}
 
-	baseCommit, _ := store.Objects.ReadCommit(baseHash)
-	srcCommit, _ := store.Objects.ReadCommit(srcHash)
-	tgtCommit, _ := store.Objects.ReadCommit(tgtHash)
+	baseCommit, err := store.Objects.ReadCommit(baseHash)
+	if err != nil {
+		return nil, fmt.Errorf("read base commit: %w", err)
+	}
+	srcCommit, err := store.Objects.ReadCommit(srcHash)
+	if err != nil {
+		return nil, fmt.Errorf("read source commit: %w", err)
+	}
+	tgtCommit, err := store.Objects.ReadCommit(tgtHash)
+	if err != nil {
+		return nil, fmt.Errorf("read target commit: %w", err)
+	}
 
-	baseFiles, _ := flattenTree(store.Objects, baseCommit.TreeHash, "")
-	srcFiles, _ := flattenTree(store.Objects, srcCommit.TreeHash, "")
-	tgtFiles, _ := flattenTree(store.Objects, tgtCommit.TreeHash, "")
+	baseFiles, err := flattenTree(store.Objects, baseCommit.TreeHash, "")
+	if err != nil {
+		return nil, fmt.Errorf("flatten base tree: %w", err)
+	}
+	srcFiles, err := flattenTree(store.Objects, srcCommit.TreeHash, "")
+	if err != nil {
+		return nil, fmt.Errorf("flatten source tree: %w", err)
+	}
+	tgtFiles, err := flattenTree(store.Objects, tgtCommit.TreeHash, "")
+	if err != nil {
+		return nil, fmt.Errorf("flatten target tree: %w", err)
+	}
 
 	baseMap := indexFiles(baseFiles)
 	srcMap := indexFiles(srcFiles)
@@ -203,13 +223,22 @@ func (s *PRService) MergePreview(ctx context.Context, owner, repo string, pr *mo
 		// Read blob data (empty if not present)
 		var baseData, srcData, tgtData []byte
 		if baseEntry.BlobHash != "" {
-			baseData, _ = readBlobData(store.Objects, object.Hash(baseEntry.BlobHash))
+			baseData, err = readBlobData(store.Objects, object.Hash(baseEntry.BlobHash))
+			if err != nil {
+				return nil, fmt.Errorf("read base blob %s: %w", path, err)
+			}
 		}
 		if srcEntry.BlobHash != "" {
-			srcData, _ = readBlobData(store.Objects, object.Hash(srcEntry.BlobHash))
+			srcData, err = readBlobData(store.Objects, object.Hash(srcEntry.BlobHash))
+			if err != nil {
+				return nil, fmt.Errorf("read source blob %s: %w", path, err)
+			}
 		}
 		if tgtEntry.BlobHash != "" {
-			tgtData, _ = readBlobData(store.Objects, object.Hash(tgtEntry.BlobHash))
+			tgtData, err = readBlobData(store.Objects, object.Hash(tgtEntry.BlobHash))
+			if err != nil {
+				return nil, fmt.Errorf("read target blob %s: %w", path, err)
+			}
 		}
 
 		// Skip files unchanged between all three
@@ -295,13 +324,31 @@ func (s *PRService) Merge(ctx context.Context, owner, repo string, pr *models.Pu
 		return "", fmt.Errorf("find merge base: %w", err)
 	}
 
-	baseCommit, _ := store.Objects.ReadCommit(baseHash)
-	srcCommit, _ := store.Objects.ReadCommit(srcHash)
-	tgtCommit, _ := store.Objects.ReadCommit(tgtHash)
+	baseCommit, err := store.Objects.ReadCommit(baseHash)
+	if err != nil {
+		return "", fmt.Errorf("read base commit: %w", err)
+	}
+	srcCommit, err := store.Objects.ReadCommit(srcHash)
+	if err != nil {
+		return "", fmt.Errorf("read source commit: %w", err)
+	}
+	tgtCommit, err := store.Objects.ReadCommit(tgtHash)
+	if err != nil {
+		return "", fmt.Errorf("read target commit: %w", err)
+	}
 
-	baseFiles, _ := flattenTree(store.Objects, baseCommit.TreeHash, "")
-	srcFiles, _ := flattenTree(store.Objects, srcCommit.TreeHash, "")
-	tgtFiles, _ := flattenTree(store.Objects, tgtCommit.TreeHash, "")
+	baseFiles, err := flattenTree(store.Objects, baseCommit.TreeHash, "")
+	if err != nil {
+		return "", fmt.Errorf("flatten base tree: %w", err)
+	}
+	srcFiles, err := flattenTree(store.Objects, srcCommit.TreeHash, "")
+	if err != nil {
+		return "", fmt.Errorf("flatten source tree: %w", err)
+	}
+	tgtFiles, err := flattenTree(store.Objects, tgtCommit.TreeHash, "")
+	if err != nil {
+		return "", fmt.Errorf("flatten target tree: %w", err)
+	}
 
 	baseMap := indexFiles(baseFiles)
 	srcMap := indexFiles(srcFiles)
@@ -351,10 +398,19 @@ func (s *PRService) Merge(ctx context.Context, owner, repo string, pr *models.Pu
 		// Both changed — three-way merge
 		var baseData, srcData, tgtData []byte
 		if baseEntry.BlobHash != "" {
-			baseData, _ = readBlobData(store.Objects, object.Hash(baseEntry.BlobHash))
+			baseData, err = readBlobData(store.Objects, object.Hash(baseEntry.BlobHash))
+			if err != nil {
+				return "", fmt.Errorf("read base blob %s: %w", path, err)
+			}
 		}
-		srcData, _ = readBlobData(store.Objects, object.Hash(srcEntry.BlobHash))
-		tgtData, _ = readBlobData(store.Objects, object.Hash(tgtEntry.BlobHash))
+		srcData, err = readBlobData(store.Objects, object.Hash(srcEntry.BlobHash))
+		if err != nil {
+			return "", fmt.Errorf("read source blob %s: %w", path, err)
+		}
+		tgtData, err = readBlobData(store.Objects, object.Hash(tgtEntry.BlobHash))
+		if err != nil {
+			return "", fmt.Errorf("read target blob %s: %w", path, err)
+		}
 
 		result, err := merge.MergeFiles(path, baseData, tgtData, srcData)
 		if err != nil || result.HasConflicts {
@@ -372,6 +428,10 @@ func (s *PRService) Merge(ctx context.Context, owner, repo string, pr *models.Pu
 	mergeTreeHash, err := buildTreeFromFiles(store.Objects, mergedEntries)
 	if err != nil {
 		return "", fmt.Errorf("build merge tree: %w", err)
+	}
+	mergeTreeHash, err = enrichTreeWithEntities(store.Objects, mergeTreeHash, "")
+	if err != nil {
+		return "", fmt.Errorf("enrich merge tree entities: %w", err)
 	}
 
 	// Create merge commit
@@ -439,9 +499,6 @@ func buildTreeFromFiles(store *object.Store, files map[string]object.Hash) (obje
 }
 
 func buildTreeDir(store *object.Store, files map[string]object.Hash, prefix string) (object.Hash, error) {
-	type dirChild struct {
-		name string
-	}
 	fileEntries := map[string]object.Hash{}
 	subdirs := map[string]bool{}
 
@@ -495,14 +552,76 @@ func buildTreeDir(store *object.Store, files map[string]object.Hash, prefix stri
 		})
 	}
 
-	// Sort entries by name
-	for i := 0; i < len(entries); i++ {
-		for j := i + 1; j < len(entries); j++ {
-			if entries[j].Name < entries[i].Name {
-				entries[i], entries[j] = entries[j], entries[i]
-			}
-		}
-	}
+	// Keep deterministic tree ordering for stable hashes.
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
 
 	return store.WriteTree(&object.TreeObj{Entries: entries})
+}
+
+func enrichTreeWithEntities(store *object.Store, treeHash object.Hash, prefix string) (object.Hash, error) {
+	tree, err := store.ReadTree(treeHash)
+	if err != nil {
+		return "", err
+	}
+	changed := false
+	updated := make([]object.TreeEntry, len(tree.Entries))
+	for i, e := range tree.Entries {
+		entry := e
+		fullPath := e.Name
+		if prefix != "" {
+			fullPath = prefix + "/" + e.Name
+		}
+		if e.IsDir {
+			newSubtreeHash, err := enrichTreeWithEntities(store, e.SubtreeHash, fullPath)
+			if err != nil {
+				return "", err
+			}
+			if newSubtreeHash != e.SubtreeHash {
+				entry.SubtreeHash = newSubtreeHash
+				changed = true
+			}
+		} else if e.EntityListHash == "" {
+			blob, err := store.ReadBlob(e.BlobHash)
+			if err != nil {
+				return "", err
+			}
+			el, err := entity.Extract(fullPath, blob.Data)
+			if err == nil && len(el.Entities) > 0 {
+				refs := make([]object.Hash, 0, len(el.Entities))
+				for _, ent := range el.Entities {
+					kind := kindNames[ent.Kind]
+					if kind == "" {
+						kind = "unknown"
+					}
+					entHash, err := store.WriteEntity(&object.EntityObj{
+						Kind:     kind,
+						Name:     ent.Name,
+						DeclKind: ent.DeclKind,
+						Receiver: ent.Receiver,
+						Body:     ent.Body,
+						BodyHash: object.Hash(ent.BodyHash),
+					})
+					if err != nil {
+						return "", err
+					}
+					refs = append(refs, entHash)
+				}
+				listHash, err := store.WriteEntityList(&object.EntityListObj{
+					Language:   el.Language,
+					Path:       fullPath,
+					EntityRefs: refs,
+				})
+				if err != nil {
+					return "", err
+				}
+				entry.EntityListHash = listHash
+				changed = true
+			}
+		}
+		updated[i] = entry
+	}
+	if !changed {
+		return treeHash, nil
+	}
+	return store.WriteTree(&object.TreeObj{Entries: updated})
 }

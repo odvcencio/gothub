@@ -29,6 +29,7 @@ type Server struct {
 	codeIntelSvc *service.CodeIntelService
 	lineageSvc   *service.EntityLineageService
 	mux          *http.ServeMux
+	handler      http.Handler
 }
 
 func NewServer(db database.DB, authSvc *auth.Service, repoSvc *service.RepoService) *Server {
@@ -55,12 +56,12 @@ func NewServer(db database.DB, authSvc *auth.Service, repoSvc *service.RepoServi
 		mux:          http.NewServeMux(),
 	}
 	s.routes()
+	s.handler = requestLoggingMiddleware(requestBodyLimitMiddleware(auth.Middleware(s.authSvc)(s.mux)))
 	return s
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	handler := requestLoggingMiddleware(requestBodyLimitMiddleware(auth.Middleware(s.authSvc)(s.mux)))
-	handler.ServeHTTP(w, r)
+	s.handler.ServeHTTP(w, r)
 }
 
 func (s *Server) routes() {

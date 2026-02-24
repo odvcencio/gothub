@@ -1520,6 +1520,127 @@ func TestPRMergeGateEndpoint(t *testing.T) {
 	}
 }
 
+func TestMergeProducesEntityEnrichedTree(t *testing.T) {
+	server, db := setupTestServer(t)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	token := registerAndGetToken(t, ts.URL, "alice")
+	createRepo(t, ts.URL, token, "repo", false)
+
+	repo, err := db.GetRepository(context.Background(), "alice", "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := gotstore.Open(repo.StoragePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	baseBlobHash, err := store.Objects.WriteBlob(&object.Blob{Data: []byte("package main\n\nfunc ProcessOrder() int { return 1 }\n")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseTreeHash, err := store.Objects.WriteTree(&object.TreeObj{
+		Entries: []object.TreeEntry{
+			{Name: "main.go", BlobHash: baseBlobHash},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseCommitHash, err := store.Objects.WriteCommit(&object.CommitObj{
+		TreeHash:  baseTreeHash,
+		Author:    "alice",
+		Timestamp: 1700000000,
+		Message:   "base",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	featureBlobHash, err := store.Objects.WriteBlob(&object.Blob{Data: []byte("package main\n\nfunc ProcessOrder() int { return 2 }\n")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	featureTreeHash, err := store.Objects.WriteTree(&object.TreeObj{
+		Entries: []object.TreeEntry{
+			{Name: "main.go", BlobHash: featureBlobHash},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	featureCommitHash, err := store.Objects.WriteCommit(&object.CommitObj{
+		TreeHash:  featureTreeHash,
+		Parents:   []object.Hash{baseCommitHash},
+		Author:    "alice",
+		Timestamp: 1700000100,
+		Message:   "feature",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Refs.Set("heads/main", baseCommitHash); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Refs.Set("heads/feature", featureCommitHash); err != nil {
+		t.Fatal(err)
+	}
+
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/repos/alice/repo/pulls", bytes.NewBufferString(`{"title":"merge","source_branch":"feature","target_branch":"main"}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create PR: expected 201, got %d", resp.StatusCode)
+	}
+	var prResp struct {
+		Number int `json:"number"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&prResp); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if prResp.Number == 0 {
+		t.Fatal("expected created PR number")
+	}
+
+	req, _ = http.NewRequest("POST", fmt.Sprintf("%s/api/v1/repos/alice/repo/pulls/%d/merge", ts.URL, prResp.Number), nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("merge PR: expected 200, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	mergedHead, err := store.Refs.Get("heads/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mergedCommit, err := store.Objects.ReadCommit(mergedHead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mergedTree, err := store.Objects.ReadTree(mergedCommit.TreeHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mergedTree.Entries) != 1 || mergedTree.Entries[0].Name != "main.go" {
+		t.Fatalf("unexpected merged tree entries: %+v", mergedTree.Entries)
+	}
+	if mergedTree.Entries[0].EntityListHash == "" {
+		t.Fatalf("expected merged tree entry to include entity list hash, got %+v", mergedTree.Entries[0])
+	}
+}
+
 func TestWebhookPingRetriesAndRedelivery(t *testing.T) {
 	server, _ := setupTestServer(t)
 	ts := httptest.NewServer(server)

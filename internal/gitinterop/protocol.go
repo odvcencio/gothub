@@ -833,11 +833,11 @@ func walkGotObjects(store *object.Store, root object.Hash, has func(object.Hash)
 		}
 		seen[h] = true
 		if !store.Has(h) {
-			return nil
+			return fmt.Errorf("object %s missing", h)
 		}
 		objType, _, err := store.Read(h)
 		if err != nil {
-			return nil
+			return err
 		}
 		missing = append(missing, h)
 
@@ -845,22 +845,30 @@ func walkGotObjects(store *object.Store, root object.Hash, has func(object.Hash)
 		case object.TypeCommit:
 			commit, err := store.ReadCommit(h)
 			if err != nil {
-				return nil
+				return err
 			}
-			walk(commit.TreeHash)
+			if err := walk(commit.TreeHash); err != nil {
+				return err
+			}
 			for _, p := range commit.Parents {
-				walk(p)
+				if err := walk(p); err != nil {
+					return err
+				}
 			}
 		case object.TypeTree:
 			tree, err := store.ReadTree(h)
 			if err != nil {
-				return nil
+				return err
 			}
 			for _, e := range tree.Entries {
 				if e.IsDir {
-					walk(e.SubtreeHash)
+					if err := walk(e.SubtreeHash); err != nil {
+						return err
+					}
 				} else {
-					walk(e.BlobHash)
+					if err := walk(e.BlobHash); err != nil {
+						return err
+					}
 				}
 			}
 		}

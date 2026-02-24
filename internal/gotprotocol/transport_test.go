@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/odvcencio/got/pkg/object"
@@ -277,6 +278,141 @@ func TestBatchObjectsUsesWantHaveNegotiation(t *testing.T) {
 	}
 	if containsHashString(second.Objects, string(treeHash)) || containsHashString(second.Objects, string(blobHash)) {
 		t.Fatalf("expected haves to suppress tree/blob transfer, got %+v", second.Objects)
+	}
+}
+
+func TestUpdateRefsCASAcceptsMatchingOldHash(t *testing.T) {
+	store, err := gotstore.Open(filepath.Join(t.TempDir(), "repo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	treeHash, err := store.Objects.WriteTree(&object.TreeObj{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitA, err := store.Objects.WriteCommit(&object.CommitObj{
+		TreeHash:  treeHash,
+		Author:    "Alice <alice@example.com>",
+		Timestamp: 1700000000,
+		Message:   "A",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitB, err := store.Objects.WriteCommit(&object.CommitObj{
+		TreeHash:  treeHash,
+		Author:    "Alice <alice@example.com>",
+		Timestamp: 1700000001,
+		Message:   "B",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Refs.Set("heads/main", commitA); err != nil {
+		t.Fatal(err)
+	}
+
+	h := NewHandler(func(owner, repo string) (*gotstore.RepoStore, error) { return store, nil }, nil, nil)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	reqBody, err := json.Marshal(map[string]any{
+		"updates": []map[string]string{
+			{"name": "heads/main", "old": string(commitA), "new": string(commitB)},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Post(ts.URL+"/got/alice/repo/refs", "application/json", bytes.NewReader(reqBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 for CAS ref update, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	head, err := store.Refs.Get("heads/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if head != commitB {
+		t.Fatalf("expected heads/main to point to %s, got %s", commitB, head)
+	}
+}
+
+func TestUpdateRefsCASRejectsStaleOldHash(t *testing.T) {
+	store, err := gotstore.Open(filepath.Join(t.TempDir(), "repo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	treeHash, err := store.Objects.WriteTree(&object.TreeObj{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitA, err := store.Objects.WriteCommit(&object.CommitObj{
+		TreeHash:  treeHash,
+		Author:    "Alice <alice@example.com>",
+		Timestamp: 1700000000,
+		Message:   "A",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitB, err := store.Objects.WriteCommit(&object.CommitObj{
+		TreeHash:  treeHash,
+		Author:    "Alice <alice@example.com>",
+		Timestamp: 1700000001,
+		Message:   "B",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Refs.Set("heads/main", commitA); err != nil {
+		t.Fatal(err)
+	}
+
+	h := NewHandler(func(owner, repo string) (*gotstore.RepoStore, error) { return store, nil }, nil, nil)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	reqBody, err := json.Marshal(map[string]any{
+		"updates": []map[string]string{
+			{"name": "heads/main", "old": strings.Repeat("f", 64), "new": string(commitB)},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Post(ts.URL+"/got/alice/repo/refs", "application/json", bytes.NewReader(reqBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 409 for stale CAS ref update, got %d", resp.StatusCode)
+	}
+	var body bytes.Buffer
+	if _, err := body.ReadFrom(resp.Body); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if !strings.Contains(body.String(), "stale old hash") {
+		t.Fatalf("expected stale old hash message, got %q", body.String())
+	}
+
+	head, err := store.Refs.Get("heads/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if head != commitA {
+		t.Fatalf("expected heads/main to remain %s, got %s", commitA, head)
 	}
 }
 

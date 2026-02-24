@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/odvcencio/got/pkg/object"
 	"github.com/odvcencio/gothub/internal/database"
@@ -18,31 +19,45 @@ import (
 	"github.com/odvcencio/gts-suite/pkg/xref"
 )
 
-const repoIndexObjectType object.ObjectType = "repoindex"
+const (
+	repoIndexObjectType           object.ObjectType = "repoindex"
+	defaultCodeIntelCacheMaxItems                   = 128
+	defaultCodeIntelCacheTTL                        = 15 * time.Minute
+)
+
+type codeIntelCacheEntry struct {
+	index      *model.Index
+	lastAccess time.Time
+}
 
 // CodeIntelService provides code intelligence powered by gts-suite.
 type CodeIntelService struct {
-	db       database.DB
-	repoSvc  *RepoService
-	browsSvc *BrowseService
+	db        database.DB
+	repoSvc   *RepoService
+	browseSvc *BrowseService
 
 	mu      sync.RWMutex
-	indexes map[string]*model.Index // cache: "owner/repo@commitHash" -> index
+	indexes map[string]codeIntelCacheEntry // cache: "owner/repo@commitHash" -> index
+
+	cacheMaxItems int
+	cacheTTL      time.Duration
 }
 
 func NewCodeIntelService(db database.DB, repoSvc *RepoService, browseSvc *BrowseService) *CodeIntelService {
 	return &CodeIntelService{
-		db:       db,
-		repoSvc:  repoSvc,
-		browsSvc: browseSvc,
-		indexes:  make(map[string]*model.Index),
+		db:            db,
+		repoSvc:       repoSvc,
+		browseSvc:     browseSvc,
+		indexes:       make(map[string]codeIntelCacheEntry),
+		cacheMaxItems: defaultCodeIntelCacheMaxItems,
+		cacheTTL:      defaultCodeIntelCacheTTL,
 	}
 }
 
 // BuildIndex returns a semantic index for a repository at a ref.
 // It first checks in-memory cache, then persisted store-backed index, then falls back to on-demand build.
 func (s *CodeIntelService) BuildIndex(ctx context.Context, owner, repo, ref string) (*model.Index, error) {
-	commitHash, err := s.browsSvc.ResolveRef(ctx, owner, repo, ref)
+	commitHash, err := s.browseSvc.ResolveRef(ctx, owner, repo, ref)
 	if err != nil {
 		return nil, fmt.Errorf("resolve ref: %w", err)
 	}
@@ -74,7 +89,7 @@ func (s *CodeIntelService) BuildIndex(ctx context.Context, owner, repo, ref stri
 
 func (s *CodeIntelService) buildIndexViaTempDir(ctx context.Context, owner, repo, ref string, store *gotstore.RepoStore) (*model.Index, error) {
 	// Materialize tree to temp dir for compatibility with gts-suite v0.3.0.
-	files, err := s.browsSvc.FlattenTree(ctx, owner, repo, ref)
+	files, err := s.browseSvc.FlattenTree(ctx, owner, repo, ref)
 	if err != nil {
 		return nil, fmt.Errorf("flatten tree: %w", err)
 	}
@@ -146,16 +161,46 @@ func (s *CodeIntelService) persistIndex(ctx context.Context, store *gotstore.Rep
 }
 
 func (s *CodeIntelService) getCachedIndex(key string) (*model.Index, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	idx, ok := s.indexes[key]
-	return idx, ok
+	now := time.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry, ok := s.indexes[key]
+	if !ok {
+		return nil, false
+	}
+	if s.cacheTTL > 0 && now.Sub(entry.lastAccess) > s.cacheTTL {
+		delete(s.indexes, key)
+		return nil, false
+	}
+	entry.lastAccess = now
+	s.indexes[key] = entry
+	return entry.index, true
 }
 
 func (s *CodeIntelService) setCachedIndex(key string, idx *model.Index) {
 	s.mu.Lock()
-	s.indexes[key] = idx
-	s.mu.Unlock()
+	defer s.mu.Unlock()
+	s.indexes[key] = codeIntelCacheEntry{
+		index:      idx,
+		lastAccess: time.Now(),
+	}
+	if s.cacheMaxItems <= 0 {
+		return
+	}
+	for len(s.indexes) > s.cacheMaxItems {
+		oldestKey := ""
+		var oldest time.Time
+		for k, entry := range s.indexes {
+			if oldestKey == "" || entry.lastAccess.Before(oldest) {
+				oldestKey = k
+				oldest = entry.lastAccess
+			}
+		}
+		if oldestKey == "" {
+			break
+		}
+		delete(s.indexes, oldestKey)
+	}
 }
 
 // SymbolResult is a symbol with its file path.

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/odvcencio/got/pkg/entity"
@@ -29,6 +30,16 @@ type Handler struct {
 	getStore    func(owner, repo string) (*gotstore.RepoStore, error)
 	authorize   func(r *http.Request, owner, repo string, write bool) (int, error)
 	indexCommit func(ctx context.Context, owner, repo string, commitHash object.Hash) error
+}
+
+type refUpdateRequest struct {
+	Updates []refUpdateItem `json:"updates"`
+}
+
+type refUpdateItem struct {
+	Name string  `json:"name"`
+	Old  *string `json:"old,omitempty"`
+	New  *string `json:"new"`
 }
 
 func NewHandler(
@@ -280,47 +291,79 @@ func (h *Handler) handleUpdateRefs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var updates map[string]string
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRefUpdateBytes)).Decode(&updates); err != nil {
-		http.Error(w, "invalid JSON", http.StatusBadRequest)
+	updates, err := parseRefUpdates(w, r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	applied := make(map[string]string, len(updates))
-	for name, hash := range updates {
-		if hash == "" {
-			if err := store.Refs.Delete(name); err != nil {
-				http.Error(w, fmt.Sprintf("delete ref %s: %v", name, err), http.StatusInternalServerError)
-				return
-			}
-		} else {
-			target := object.Hash(hash)
-			objType, _, err := store.Objects.Read(target)
+	currentRefHash := make(map[string]string, len(updates))
+	for _, u := range updates {
+		currentHash, err := currentRefValue(store, u.Name)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("read ref %s: %v", u.Name, err), http.StatusInternalServerError)
+			return
+		}
+		currentRefHash[u.Name] = currentHash
+		if u.Old != nil && currentHash != *u.Old {
+			http.Error(w, fmt.Sprintf("set ref %s: stale old hash (expected %s, got %s)", u.Name, *u.Old, currentHash), http.StatusConflict)
+			return
+		}
+	}
+
+	// Precompute and validate all new target hashes before applying any ref updates.
+	enrichedByTarget := make(map[object.Hash]object.Hash, len(updates))
+	refTargets := make(map[string]object.Hash, len(updates))
+	for _, u := range updates {
+		if u.New == nil || *u.New == "" {
+			continue
+		}
+		target := object.Hash(*u.New)
+		objType, _, err := store.Objects.Read(target)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("set ref %s: target object missing: %v", u.Name, err), http.StatusBadRequest)
+			return
+		}
+		if objType != object.TypeCommit {
+			http.Error(w, fmt.Sprintf("set ref %s: target must be commit, got %s", u.Name, objType), http.StatusBadRequest)
+			return
+		}
+		enrichedHash, ok := enrichedByTarget[target]
+		if !ok {
+			enrichedHash, err = ensureCommitEntities(store, target)
 			if err != nil {
-				http.Error(w, fmt.Sprintf("set ref %s: target object missing: %v", name, err), http.StatusBadRequest)
-				return
-			}
-			if objType != object.TypeCommit {
-				http.Error(w, fmt.Sprintf("set ref %s: target must be commit, got %s", name, objType), http.StatusBadRequest)
-				return
-			}
-			enrichedHash, err := ensureCommitEntities(store, target)
-			if err != nil {
-				http.Error(w, fmt.Sprintf("set ref %s: entity extraction failed: %v", name, err), http.StatusInternalServerError)
+				http.Error(w, fmt.Sprintf("set ref %s: entity extraction failed: %v", u.Name, err), http.StatusInternalServerError)
 				return
 			}
 			if h.indexCommit != nil {
 				if err := h.indexCommit(r.Context(), owner, repo, enrichedHash); err != nil {
-					http.Error(w, fmt.Sprintf("set ref %s: lineage indexing failed: %v", name, err), http.StatusInternalServerError)
+					http.Error(w, fmt.Sprintf("set ref %s: lineage indexing failed: %v", u.Name, err), http.StatusInternalServerError)
 					return
 				}
 			}
-			if err := store.Refs.Set(name, enrichedHash); err != nil {
-				http.Error(w, fmt.Sprintf("set ref %s: %v", name, err), http.StatusInternalServerError)
-				return
-			}
-			applied[name] = string(enrichedHash)
+			enrichedByTarget[target] = enrichedHash
 		}
+		refTargets[u.Name] = enrichedHash
+	}
+
+	applied := make(map[string]string, len(updates))
+	for _, u := range updates {
+		if u.New == nil || *u.New == "" {
+			if currentRefHash[u.Name] != "" {
+				if err := store.Refs.Delete(u.Name); err != nil {
+					http.Error(w, fmt.Sprintf("delete ref %s: %v", u.Name, err), http.StatusInternalServerError)
+					return
+				}
+			}
+			applied[u.Name] = ""
+			continue
+		}
+		target := refTargets[u.Name]
+		if err := store.Refs.Set(u.Name, target); err != nil {
+			http.Error(w, fmt.Sprintf("set ref %s: %v", u.Name, err), http.StatusInternalServerError)
+			return
+		}
+		applied[u.Name] = string(target)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"status": "ok", "updated": applied})
@@ -347,6 +390,86 @@ func (h *Handler) authorizeRequest(w http.ResponseWriter, r *http.Request, write
 	}
 	http.Error(w, err.Error(), status)
 	return false
+}
+
+func parseRefUpdates(w http.ResponseWriter, r *http.Request) ([]refUpdateItem, error) {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRefUpdateBytes))
+	if err != nil {
+		return nil, fmt.Errorf("invalid JSON")
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, fmt.Errorf("invalid JSON")
+	}
+	_, hasStructuredUpdates := raw["updates"]
+
+	var req refUpdateRequest
+	if hasStructuredUpdates {
+		if err := json.Unmarshal(body, &req); err != nil {
+			return nil, fmt.Errorf("invalid JSON")
+		}
+		if len(req.Updates) == 0 {
+			return nil, fmt.Errorf("at least one ref update is required")
+		}
+		out := make([]refUpdateItem, 0, len(req.Updates))
+		seen := make(map[string]struct{}, len(req.Updates))
+		for _, u := range req.Updates {
+			name := strings.TrimSpace(u.Name)
+			if name == "" {
+				return nil, fmt.Errorf("ref update name is required")
+			}
+			if u.New == nil {
+				return nil, fmt.Errorf("ref %s: new hash must be provided", name)
+			}
+			if _, exists := seen[name]; exists {
+				return nil, fmt.Errorf("duplicate ref update for %s", name)
+			}
+			seen[name] = struct{}{}
+			newHash := strings.TrimSpace(*u.New)
+			var oldHash *string
+			if u.Old != nil {
+				v := strings.TrimSpace(*u.Old)
+				oldHash = &v
+			}
+			out = append(out, refUpdateItem{
+				Name: name,
+				Old:  oldHash,
+				New:  &newHash,
+			})
+		}
+		return out, nil
+	}
+
+	var legacy map[string]string
+	if err := json.Unmarshal(body, &legacy); err != nil {
+		return nil, fmt.Errorf("invalid JSON")
+	}
+	if len(legacy) == 0 {
+		return nil, fmt.Errorf("at least one ref update is required")
+	}
+	out := make([]refUpdateItem, 0, len(legacy))
+	for name, hash := range legacy {
+		n := strings.TrimSpace(name)
+		if n == "" {
+			return nil, fmt.Errorf("ref update name is required")
+		}
+		h := strings.TrimSpace(hash)
+		out = append(out, refUpdateItem{Name: n, New: &h})
+	}
+	return out, nil
+}
+
+func currentRefValue(store *gotstore.RepoStore, name string) (string, error) {
+	h, err := store.Refs.Get(name)
+	if err != nil {
+		msg := strings.ToLower(err.Error())
+		if os.IsNotExist(err) || strings.Contains(msg, "no such file") {
+			return "", nil
+		}
+		return "", err
+	}
+	return string(h), nil
 }
 
 func parsePushedObjectType(raw string) (object.ObjectType, error) {
