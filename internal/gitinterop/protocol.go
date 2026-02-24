@@ -40,6 +40,11 @@ const (
 	gitZeroHash40             = "0000000000000000000000000000000000000000"
 )
 
+const (
+	gitUploadPackCapabilities  = "multi_ack_detailed side-band-64k ofs-delta"
+	gitReceivePackCapabilities = "report-status delete-refs side-band-64k ofs-delta"
+)
+
 func NewSmartHTTPHandler(
 	getStore func(owner, repo string) (*gotstore.RepoStore, error),
 	db database.DB,
@@ -107,6 +112,8 @@ func (h *SmartHTTPHandler) handleInfoRefs(w http.ResponseWriter, r *http.Request
 	w.Write(pktLine(fmt.Sprintf("# service=%s\n", svc)))
 	w.Write(pktFlush())
 
+	capabilities := advertisedCapabilities(svc)
+
 	// Send refs
 	first := true
 	for name, gotHash := range refs {
@@ -118,7 +125,7 @@ func (h *SmartHTTPHandler) handleInfoRefs(w http.ResponseWriter, r *http.Request
 		refName := advertiseGitRefName(name)
 		if first {
 			// First ref includes capabilities
-			w.Write(pktLine(fmt.Sprintf("%s %s\x00report-status delete-refs ofs-delta\n", gitHash, refName)))
+			w.Write(pktLine(fmt.Sprintf("%s %s\x00%s\n", gitHash, refName, capabilities)))
 			first = false
 		} else {
 			w.Write(pktLine(fmt.Sprintf("%s %s\n", gitHash, refName)))
@@ -127,7 +134,7 @@ func (h *SmartHTTPHandler) handleInfoRefs(w http.ResponseWriter, r *http.Request
 
 	if first {
 		// No refs — send zero-id with capabilities
-		w.Write(pktLine(fmt.Sprintf("%s capabilities^{}\x00report-status delete-refs ofs-delta\n", strings.Repeat("0", 40))))
+		w.Write(pktLine(fmt.Sprintf("%s capabilities^{}\x00%s\n", strings.Repeat("0", 40), capabilities)))
 	}
 
 	w.Write(pktFlush())
@@ -157,6 +164,8 @@ func (h *SmartHTTPHandler) handleReceivePack(w http.ResponseWriter, r *http.Requ
 
 	// Read ref update commands
 	var updates []refUpdate
+	useSideband := false
+	firstCommand := true
 
 	for {
 		line, err := readPktLine(br)
@@ -171,10 +180,13 @@ func (h *SmartHTTPHandler) handleReceivePack(w http.ResponseWriter, r *http.Requ
 		if line == nil {
 			break // flush
 		}
-		s := strings.TrimRight(string(line), "\n")
-		// Remove capabilities from first line
-		if idx := strings.IndexByte(s, 0); idx >= 0 {
-			s = s[:idx]
+		raw := strings.TrimRight(string(line), "\n")
+		s := raw
+		if firstCommand {
+			payload, caps := splitPktPayloadAndCapabilities(raw)
+			s = payload
+			useSideband = caps["side-band-64k"] || caps["side-band"]
+			firstCommand = false
 		}
 		parts := strings.SplitN(s, " ", 3)
 		if len(parts) != 3 {
@@ -203,7 +215,7 @@ func (h *SmartHTTPHandler) handleReceivePack(w http.ResponseWriter, r *http.Requ
 		// Parse packfile and convert objects to Got format
 		objects, err := ParsePackfile(bytes.NewReader(packData))
 		if err != nil {
-			h.sendReceivePackResult(w, fmt.Sprintf("unpack error: %v", err), nil, nil)
+			h.sendReceivePackResult(w, fmt.Sprintf("unpack error: %v", err), nil, nil, useSideband)
 			return
 		}
 
@@ -251,7 +263,7 @@ func (h *SmartHTTPHandler) handleReceivePack(w http.ResponseWriter, r *http.Requ
 			case OBJ_BLOB:
 				gotHash, err := store.Objects.WriteBlob(&object.Blob{Data: obj.Data})
 				if err != nil {
-					h.sendReceivePackResult(w, fmt.Sprintf("unpack error: write blob: %v", err), nil, nil)
+					h.sendReceivePackResult(w, fmt.Sprintf("unpack error: write blob: %v", err), nil, nil, useSideband)
 					return
 				}
 				knownGotByGit[string(gitHash)] = string(gotHash)
@@ -278,12 +290,12 @@ func (h *SmartHTTPHandler) handleReceivePack(w http.ResponseWriter, r *http.Requ
 							nextDeferred = append(nextDeferred, obj)
 							continue
 						}
-						h.sendReceivePackResult(w, fmt.Sprintf("unpack error: parse tree: %v", err), nil, nil)
+						h.sendReceivePackResult(w, fmt.Sprintf("unpack error: parse tree: %v", err), nil, nil, useSideband)
 						return
 					}
 					gotHash, err := store.Objects.WriteTree(gotTree)
 					if err != nil {
-						h.sendReceivePackResult(w, fmt.Sprintf("unpack error: write tree: %v", err), nil, nil)
+						h.sendReceivePackResult(w, fmt.Sprintf("unpack error: write tree: %v", err), nil, nil, useSideband)
 						return
 					}
 					knownGotByGit[string(gitHash)] = string(gotHash)
@@ -305,12 +317,12 @@ func (h *SmartHTTPHandler) handleReceivePack(w http.ResponseWriter, r *http.Requ
 							nextDeferred = append(nextDeferred, obj)
 							continue
 						}
-						h.sendReceivePackResult(w, fmt.Sprintf("unpack error: parse commit: %v", err), nil, nil)
+						h.sendReceivePackResult(w, fmt.Sprintf("unpack error: parse commit: %v", err), nil, nil, useSideband)
 						return
 					}
 					gotHash, err := store.Objects.WriteCommit(gotCommit)
 					if err != nil {
-						h.sendReceivePackResult(w, fmt.Sprintf("unpack error: write commit: %v", err), nil, nil)
+						h.sendReceivePackResult(w, fmt.Sprintf("unpack error: write commit: %v", err), nil, nil, useSideband)
 						return
 					}
 					knownGotByGit[string(gitHash)] = string(gotHash)
@@ -322,19 +334,19 @@ func (h *SmartHTTPHandler) handleReceivePack(w http.ResponseWriter, r *http.Requ
 			}
 
 			if !progress {
-				h.sendReceivePackResult(w, "unpack error: unresolved object dependencies", nil, nil)
+				h.sendReceivePackResult(w, "unpack error: unresolved object dependencies", nil, nil, useSideband)
 				return
 			}
 			deferred = nextDeferred
 		}
 
 		if err := h.db.SetHashMappings(r.Context(), pendingMappings); err != nil {
-			h.sendReceivePackResult(w, fmt.Sprintf("unpack error: persist hash mappings: %v", err), nil, nil)
+			h.sendReceivePackResult(w, fmt.Sprintf("unpack error: persist hash mappings: %v", err), nil, nil, useSideband)
 			return
 		}
 		for _, tm := range pendingTreeModes {
 			if err := h.db.SetGitTreeEntryModes(r.Context(), repoID, tm.gotTreeHash, tm.modes); err != nil {
-				h.sendReceivePackResult(w, fmt.Sprintf("unpack error: persist tree modes: %v", err), nil, nil)
+				h.sendReceivePackResult(w, fmt.Sprintf("unpack error: persist tree modes: %v", err), nil, nil, useSideband)
 				return
 			}
 		}
@@ -342,12 +354,12 @@ func (h *SmartHTTPHandler) handleReceivePack(w http.ResponseWriter, r *http.Requ
 		// Run entity extraction and rewrite trees/commits so entity lists are reachable.
 		entityCommitMappings, err := h.extractEntitiesForCommits(r.Context(), store, repoID, updates)
 		if err != nil {
-			h.sendReceivePackResult(w, fmt.Sprintf("unpack error: entity extraction: %v", err), nil, nil)
+			h.sendReceivePackResult(w, fmt.Sprintf("unpack error: entity extraction: %v", err), nil, nil, useSideband)
 			return
 		}
 		if len(entityCommitMappings) > 0 {
 			if err := h.db.SetHashMappings(r.Context(), entityCommitMappings); err != nil {
-				h.sendReceivePackResult(w, fmt.Sprintf("unpack error: persist entity commit mappings: %v", err), nil, nil)
+				h.sendReceivePackResult(w, fmt.Sprintf("unpack error: persist entity commit mappings: %v", err), nil, nil, useSideband)
 				return
 			}
 		}
@@ -410,7 +422,7 @@ func (h *SmartHTTPHandler) handleReceivePack(w http.ResponseWriter, r *http.Requ
 		}
 	}
 
-	h.sendReceivePackResult(w, "", updates, refErrors)
+	h.sendReceivePackResult(w, "", updates, refErrors, useSideband)
 }
 
 func (h *SmartHTTPHandler) resolveExpectedOldGotHash(ctx context.Context, repoID int64, oldGitHash GitHash) (object.Hash, error) {
@@ -463,6 +475,8 @@ func (h *SmartHTTPHandler) handleUploadPack(w http.ResponseWriter, r *http.Reque
 	// Read want/have negotiation
 	var wants []GitHash
 	var haves []GitHash
+	useSideband := false
+	firstWant := true
 
 	for {
 		line, err := readPktLine(br)
@@ -477,15 +491,24 @@ func (h *SmartHTTPHandler) handleUploadPack(w http.ResponseWriter, r *http.Reque
 		if line == nil {
 			break
 		}
-		s := strings.TrimRight(string(line), "\n")
-		// Strip capabilities from first want line
-		if idx := strings.IndexByte(s, 0); idx >= 0 {
-			s = s[:idx]
+		raw := strings.TrimRight(string(line), "\n")
+		s := raw
+		if firstWant && strings.HasPrefix(raw, "want ") {
+			payload, caps := splitPktPayloadAndCapabilities(raw)
+			s = payload
+			useSideband = caps["side-band-64k"] || caps["side-band"]
+			firstWant = false
 		}
 		if strings.HasPrefix(s, "want ") {
-			wants = append(wants, GitHash(strings.Fields(s)[1]))
+			fields := strings.Fields(s)
+			if len(fields) >= 2 {
+				wants = append(wants, GitHash(fields[1]))
+			}
 		} else if strings.HasPrefix(s, "have ") {
-			haves = append(haves, GitHash(strings.Fields(s)[1]))
+			fields := strings.Fields(s)
+			if len(fields) >= 2 {
+				haves = append(haves, GitHash(fields[1]))
+			}
 		} else if s == "done" {
 			break
 		}
@@ -560,27 +583,47 @@ func (h *SmartHTTPHandler) handleUploadPack(w http.ResponseWriter, r *http.Reque
 		if err != nil {
 			return
 		}
+		if useSideband {
+			if err := writeSideband(w, 1, packData); err != nil {
+				return
+			}
+			w.Write(pktFlush())
+			return
+		}
 		w.Write(packData)
 	}
-
-	w.Write(pktFlush())
 }
 
-func (h *SmartHTTPHandler) sendReceivePackResult(w http.ResponseWriter, errMsg string, updates []refUpdate, refErrors map[string]string) {
+func (h *SmartHTTPHandler) sendReceivePackResult(w http.ResponseWriter, errMsg string, updates []refUpdate, refErrors map[string]string, useSideband bool) {
 	w.Header().Set("Content-Type", "application/x-git-receive-pack-result")
 	if errMsg != "" {
-		w.Write(pktLine(fmt.Sprintf("unpack %s\n", errMsg)))
+		h.writeReceivePackLine(w, fmt.Sprintf("unpack %s\n", errMsg), useSideband)
 	} else {
-		w.Write(pktLine("unpack ok\n"))
+		h.writeReceivePackLine(w, "unpack ok\n", useSideband)
 		for _, u := range updates {
 			if msg, failed := refErrors[u.refName]; failed && msg != "" {
-				w.Write(pktLine(fmt.Sprintf("ng %s %s\n", u.refName, msg)))
+				h.writeReceivePackLine(w, fmt.Sprintf("ng %s %s\n", u.refName, msg), useSideband)
 				continue
 			}
-			w.Write(pktLine(fmt.Sprintf("ok %s\n", u.refName)))
+			h.writeReceivePackLine(w, fmt.Sprintf("ok %s\n", u.refName), useSideband)
 		}
 	}
 	w.Write(pktFlush())
+}
+
+func (h *SmartHTTPHandler) writeReceivePackLine(w http.ResponseWriter, line string, useSideband bool) {
+	if useSideband {
+		_, _ = w.Write(sidebandPacket(1, []byte(line)))
+		return
+	}
+	_, _ = w.Write(pktLine(line))
+}
+
+func advertisedCapabilities(service string) string {
+	if service == "git-upload-pack" {
+		return gitUploadPackCapabilities
+	}
+	return gitReceivePackCapabilities
 }
 
 // extractEntitiesForCommits rewrites pushed commits with trees that reference entity lists.

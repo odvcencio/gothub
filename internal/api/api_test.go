@@ -876,7 +876,7 @@ func TestBranchesEndpointAndPRAuthorName(t *testing.T) {
 	}
 }
 
-func TestGitUploadPackAdvertisementNoSidebandCapability(t *testing.T) {
+func TestGitUploadPackAdvertisementIncludesSidebandCapability(t *testing.T) {
 	server, _ := setupTestServer(t)
 	ts := httptest.NewServer(server)
 	defer ts.Close()
@@ -901,11 +901,46 @@ func TestGitUploadPackAdvertisementNoSidebandCapability(t *testing.T) {
 	if !strings.Contains(bodyStr, "# service=git-upload-pack\n") {
 		t.Fatalf("expected upload-pack service announcement, got body %q", bodyStr)
 	}
-	if strings.Contains(bodyStr, "side-band-64k") {
-		t.Fatalf("did not expect side-band-64k capability in advertisement: %q", bodyStr)
+	if !strings.Contains(bodyStr, "side-band-64k") {
+		t.Fatalf("expected side-band-64k capability in advertisement: %q", bodyStr)
 	}
-	if !strings.Contains(bodyStr, "report-status delete-refs ofs-delta") {
-		t.Fatalf("expected base capabilities, got body %q", bodyStr)
+	if !strings.Contains(bodyStr, "multi_ack_detailed") {
+		t.Fatalf("expected upload-pack capability set, got body %q", bodyStr)
+	}
+	if strings.Contains(bodyStr, "report-status") {
+		t.Fatalf("upload-pack advertisement should not include receive-pack capability report-status: %q", bodyStr)
+	}
+}
+
+func TestGitReceivePackAdvertisementIncludesReportStatusAndSideband(t *testing.T) {
+	server, _ := setupTestServer(t)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	token := registerAndGetToken(t, ts.URL, "alice")
+	createRepo(t, ts.URL, token, "repo", false)
+
+	req, _ := http.NewRequest("GET", ts.URL+"/git/alice/repo/info/refs?service=git-receive-pack", nil)
+	req.SetBasicAuth("alice", "secret123")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("git info/refs: expected 200, got %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bodyStr := string(body)
+
+	if !strings.Contains(bodyStr, "# service=git-receive-pack\n") {
+		t.Fatalf("expected receive-pack service announcement, got body %q", bodyStr)
+	}
+	if !strings.Contains(bodyStr, "report-status delete-refs side-band-64k ofs-delta") {
+		t.Fatalf("expected receive-pack capability set, got body %q", bodyStr)
 	}
 }
 
@@ -965,6 +1000,108 @@ func TestGitUploadPackReturnsErrorOnCorruptObjectGraph(t *testing.T) {
 	resp.Body.Close()
 }
 
+func TestGitUploadPackUsesSidebandWhenRequested(t *testing.T) {
+	server, db := setupTestServer(t)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	token := registerAndGetToken(t, ts.URL, "owner")
+	createRepo(t, ts.URL, token, "repo", false)
+
+	repo, err := db.GetRepository(context.Background(), "owner", "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := gotstore.Open(repo.StoragePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	blobData := []byte("hello sideband\n")
+	blobHash, err := store.Objects.WriteBlob(&object.Blob{Data: blobData})
+	if err != nil {
+		t.Fatal(err)
+	}
+	treeHash, err := store.Objects.WriteTree(&object.TreeObj{
+		Entries: []object.TreeEntry{
+			{
+				Name:     "README.md",
+				Mode:     object.TreeModeFile,
+				BlobHash: blobHash,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitHash, err := store.Objects.WriteCommit(&object.CommitObj{
+		TreeHash:  treeHash,
+		Author:    "Owner <owner@example.com>",
+		Timestamp: 1700000000,
+		Message:   "seed",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Refs.Set("heads/main", commitHash); err != nil {
+		t.Fatal(err)
+	}
+
+	gitCommitHash := strings.Repeat("1", 40)
+	if err := db.SetHashMapping(context.Background(), &models.HashMapping{
+		RepoID:     repo.ID,
+		GotHash:    string(commitHash),
+		GitHash:    gitCommitHash,
+		ObjectType: "commit",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetHashMapping(context.Background(), &models.HashMapping{
+		RepoID:     repo.ID,
+		GotHash:    string(treeHash),
+		GitHash:    strings.Repeat("2", 40),
+		ObjectType: "tree",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetHashMapping(context.Background(), &models.HashMapping{
+		RepoID:     repo.ID,
+		GotHash:    string(blobHash),
+		GitHash:    strings.Repeat("3", 40),
+		ObjectType: "blob",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	payload := append(pktLineForTest("want "+gitCommitHash+"\x00side-band-64k ofs-delta\n"), pktFlushForTest()...)
+	payload = append(payload, pktLineForTest("done\n")...)
+	payload = append(payload, pktFlushForTest()...)
+
+	req, _ := http.NewRequest("POST", ts.URL+"/git/owner/repo/git-upload-pack", bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/x-git-upload-pack-request")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("git upload-pack: expected 200, got %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(body, []byte("NAK\n")) {
+		t.Fatalf("expected NAK pkt-line in upload-pack response, got body %q", string(body))
+	}
+	if !bytes.Contains(body, []byte{0x01, 'P', 'A', 'C', 'K'}) {
+		t.Fatalf("expected side-band channel 1 PACK payload in upload-pack response, got %q", string(body))
+	}
+	if !bytes.HasSuffix(body, []byte("0000")) {
+		t.Fatalf("expected pkt flush at end of side-band upload-pack response")
+	}
+}
+
 func TestReceivePackReportsActualRefStatus(t *testing.T) {
 	server, _ := setupTestServer(t)
 	ts := httptest.NewServer(server)
@@ -1004,6 +1141,44 @@ func TestReceivePackReportsActualRefStatus(t *testing.T) {
 	}
 	if strings.Contains(bodyStr, "ok refs/heads/main\n") {
 		t.Fatalf("unexpected hardcoded main ref status in response: %q", bodyStr)
+	}
+}
+
+func TestReceivePackUsesSidebandForStatusWhenRequested(t *testing.T) {
+	server, _ := setupTestServer(t)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	token := registerAndGetToken(t, ts.URL, "owner")
+	createRepo(t, ts.URL, token, "repo", false)
+
+	refName := "refs/heads/feature"
+	line := fmt.Sprintf("%s %s %s\x00report-status side-band-64k\n", strings.Repeat("0", 40), strings.Repeat("1", 40), refName)
+	payload := append(pktLineForTest(line), pktFlushForTest()...)
+
+	req, _ := http.NewRequest("POST", ts.URL+"/git/owner/repo/git-receive-pack", bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/x-git-receive-pack-request")
+	req.SetBasicAuth("owner", "secret123")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("git receive-pack: expected 200, got %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Contains(body, []byte{0x01, 'u', 'n', 'p', 'a', 'c', 'k', ' ', 'o', 'k', '\n'}) {
+		t.Fatalf("expected side-band framed unpack status, got body %q", string(body))
+	}
+	expectedNg := []byte{0x01, 'n', 'g', ' '}
+	if !bytes.Contains(body, expectedNg) {
+		t.Fatalf("expected side-band framed ng status, got body %q", string(body))
 	}
 }
 
