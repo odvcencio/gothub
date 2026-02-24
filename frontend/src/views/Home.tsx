@@ -442,6 +442,11 @@ function Dashboard() {
               {r.owner_name && <span style={{ color: '#8b949e', fontWeight: 'normal' }}>{r.owner_name}/</span>}
               {r.name}
               {r.description && <span style={{ color: '#8b949e', fontWeight: 'normal', marginLeft: '12px', fontSize: '13px' }}>{r.description}</span>}
+              {r.parent_owner && r.parent_name && (
+                <span style={{ color: '#8b949e', fontWeight: 'normal', marginLeft: '12px', fontSize: '13px' }}>
+                  forked from {r.parent_owner}/{r.parent_name}
+                </span>
+              )}
               {r.is_private && <span style={{ color: '#8b949e', fontWeight: 'normal', marginLeft: '8px', fontSize: '11px', border: '1px solid #30363d', padding: '1px 6px', borderRadius: '12px' }}>Private</span>}
             </a>
           ))}

@@ -13,6 +13,7 @@ export function RepoView({ owner, repo }: Props) {
   const [forks, setForks] = useState<any[]>([]);
   const [starring, setStarring] = useState(false);
   const [forking, setForking] = useState(false);
+  const [forkNotice, setForkNotice] = useState('');
   const [entries, setEntries] = useState<any[]>([]);
   const [error, setError] = useState('');
 
@@ -58,11 +59,18 @@ export function RepoView({ owner, repo }: Props) {
     if (entered === null) return;
     const name = entered.trim();
     setForking(true);
+    setError('');
+    setForkNotice('Creating fork...');
     try {
       const created = await forkRepo(owner, repo, name || undefined);
       const targetOwner = created.owner_name || owner;
-      location.href = `/${targetOwner}/${created.name}`;
+      const targetRepo = created.name || name || repo;
+      setForkNotice(`Fork created: ${targetOwner}/${targetRepo}. Redirecting...`);
+      window.setTimeout(() => {
+        window.location.assign(`/${targetOwner}/${targetRepo}`);
+      }, 700);
     } catch (e: any) {
+      setForkNotice('');
       setError(e.message || 'failed to fork repository');
     } finally {
       setForking(false);
@@ -72,6 +80,21 @@ export function RepoView({ owner, repo }: Props) {
   return (
     <div>
       <div style={{ marginBottom: '20px' }}>
+        {forkNotice && (
+          <div
+            style={{
+              color: forking ? '#58a6ff' : '#3fb950',
+              marginBottom: '12px',
+              padding: '10px 12px',
+              background: forking ? '#111b2e' : '#132a1d',
+              border: `1px solid ${forking ? '#1f6feb' : '#3fb950'}`,
+              borderRadius: '6px',
+              fontSize: '13px',
+            }}
+          >
+            {forkNotice}
+          </div>
+        )}
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', flexWrap: 'wrap' }}>
           <h1 style={{ fontSize: '20px', color: '#f0f6fc', marginBottom: '4px' }}>
             <a href={`/${owner}`} style={{ color: '#58a6ff' }}>{owner}</a>
@@ -117,7 +140,7 @@ export function RepoView({ owner, repo }: Props) {
         {repoInfo.description && <p style={{ color: '#8b949e', fontSize: '14px' }}>{repoInfo.description}</p>}
         {repoInfo.parent_owner && repoInfo.parent_name && (
           <p style={{ color: '#8b949e', fontSize: '13px' }}>
-            Forked from <a href={`/${repoInfo.parent_owner}/${repoInfo.parent_name}`} style={{ color: '#58a6ff' }}>{repoInfo.parent_owner}/{repoInfo.parent_name}</a>
+            forked from <a href={`/${repoInfo.parent_owner}/${repoInfo.parent_name}`} style={{ color: '#58a6ff' }}>{repoInfo.parent_owner}/{repoInfo.parent_name}</a>
           </p>
         )}
       </div>

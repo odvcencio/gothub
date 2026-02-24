@@ -126,6 +126,11 @@ export function OrgDetailView({ org }: Props) {
                     {repo.description}
                   </span>
                 )}
+                {repo.parent_owner && repo.parent_name && (
+                  <span style={{ color: '#8b949e', fontWeight: 'normal', marginLeft: '12px', fontSize: '13px' }}>
+                    forked from {repo.parent_owner}/{repo.parent_name}
+                  </span>
+                )}
               </a>
             ))}
           </div>

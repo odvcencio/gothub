@@ -206,6 +206,14 @@ function GeneralTab({ owner, repo, repoInfo }: { owner: string; repo: string; re
             <div style={{ color: colors.text, fontSize: '14px' }}>{repoInfo.description}</div>
           </div>
         )}
+        {repoInfo.parent_owner && repoInfo.parent_name && (
+          <div style={{ marginTop: '12px', color: colors.muted, fontSize: '13px' }}>
+            forked from{' '}
+            <a href={`/${repoInfo.parent_owner}/${repoInfo.parent_name}`} style={{ color: colors.link, textDecoration: 'none' }}>
+              {repoInfo.parent_owner}/{repoInfo.parent_name}
+            </a>
+          </div>
+        )}
       </div>
 
       {/* Danger zone */}
