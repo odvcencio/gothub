@@ -1899,6 +1899,142 @@ func TestWebhookPingRetriesAndRedelivery(t *testing.T) {
 	}
 }
 
+func TestPullRequestWebhookIncludesEntityChanges(t *testing.T) {
+	server, db := setupTestServer(t)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	token := registerAndGetToken(t, ts.URL, "alice")
+	createRepo(t, ts.URL, token, "repo", false)
+
+	repo, err := db.GetRepository(context.Background(), "alice", "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := gotstore.Open(repo.StoragePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	baseBlobHash, err := store.Objects.WriteBlob(&object.Blob{Data: []byte("package main\n\nfunc ProcessOrder() int { return 1 }\n")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseTreeHash, err := store.Objects.WriteTree(&object.TreeObj{
+		Entries: []object.TreeEntry{{Name: "main.go", BlobHash: baseBlobHash}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseCommitHash, err := store.Objects.WriteCommit(&object.CommitObj{
+		TreeHash:  baseTreeHash,
+		Author:    "alice",
+		Timestamp: 1700000000,
+		Message:   "base",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	headBlobHash, err := store.Objects.WriteBlob(&object.Blob{Data: []byte("package main\n\nfunc ProcessOrder() int { return 2 }\n")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	headTreeHash, err := store.Objects.WriteTree(&object.TreeObj{
+		Entries: []object.TreeEntry{{Name: "main.go", BlobHash: headBlobHash}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	headCommitHash, err := store.Objects.WriteCommit(&object.CommitObj{
+		TreeHash:  headTreeHash,
+		Parents:   []object.Hash{baseCommitHash},
+		Author:    "alice",
+		Timestamp: 1700000100,
+		Message:   "feature",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Refs.Set("heads/main", baseCommitHash); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Refs.Set("heads/feature", headCommitHash); err != nil {
+		t.Fatal(err)
+	}
+
+	type prWebhookPayload struct {
+		Action          string `json:"action"`
+		EntitiesChanged []struct {
+			File string `json:"file"`
+			Type string `json:"type"`
+			Key  string `json:"key"`
+		} `json:"entities_changed"`
+		EntitiesAdded    int `json:"entities_added"`
+		EntitiesRemoved  int `json:"entities_removed"`
+		EntitiesModified int `json:"entities_modified"`
+	}
+
+	payloadCh := make(chan prWebhookPayload, 1)
+	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Gothub-Event") != "pull_request" {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		var payload prWebhookPayload
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		select {
+		case payloadCh <- payload:
+		default:
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer receiver.Close()
+
+	createHookBody := fmt.Sprintf(`{"url":"%s","secret":"topsecret","events":["pull_request"],"active":true}`, receiver.URL)
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/repos/alice/repo/webhooks", bytes.NewBufferString(createHookBody))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create webhook: expected 201, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	req, _ = http.NewRequest("POST", ts.URL+"/api/v1/repos/alice/repo/pulls", bytes.NewBufferString(`{"title":"entity webhook","source_branch":"feature","target_branch":"main"}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create PR: expected 201, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	select {
+	case payload := <-payloadCh:
+		if payload.Action != "opened" {
+			t.Fatalf("expected pull_request action opened, got %q", payload.Action)
+		}
+		if payload.EntitiesModified < 1 {
+			t.Fatalf("expected at least one modified entity, got %+v", payload)
+		}
+		if len(payload.EntitiesChanged) == 0 {
+			t.Fatalf("expected entities_changed entries, got %+v", payload)
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatal("timed out waiting for pull_request webhook payload")
+	}
+}
+
 func TestNotificationsLifecycle(t *testing.T) {
 	server, _ := setupTestServer(t)
 	ts := httptest.NewServer(server)

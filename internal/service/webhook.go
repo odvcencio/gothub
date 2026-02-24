@@ -11,10 +11,14 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
+	gitdiff "github.com/odvcencio/got/pkg/diff"
+	"github.com/odvcencio/got/pkg/object"
 	"github.com/odvcencio/gothub/internal/database"
+	"github.com/odvcencio/gothub/internal/gotstore"
 	"github.com/odvcencio/gothub/internal/models"
 )
 
@@ -124,6 +128,16 @@ func (s *WebhookService) EmitPullRequestEvent(ctx context.Context, repoID int64,
 			"created_at":    pr.CreatedAt,
 			"merged_at":     pr.MergedAt,
 		},
+		"entities_changed":  []map[string]string{},
+		"entities_added":    0,
+		"entities_removed":  0,
+		"entities_modified": 0,
+	}
+	if summary, err := s.computePREntityChanges(ctx, repoID, pr); err == nil {
+		payload["entities_changed"] = summary.Changes
+		payload["entities_added"] = summary.Added
+		payload["entities_removed"] = summary.Removed
+		payload["entities_modified"] = summary.Modified
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -131,6 +145,122 @@ func (s *WebhookService) EmitPullRequestEvent(ctx context.Context, repoID int64,
 	}
 	_, err = s.emitRepoEvent(ctx, repoID, "pull_request", body)
 	return err
+}
+
+type prEntityChangeSummary struct {
+	Changes  []map[string]string
+	Added    int
+	Removed  int
+	Modified int
+}
+
+func (s *WebhookService) computePREntityChanges(ctx context.Context, repoID int64, pr *models.PullRequest) (*prEntityChangeSummary, error) {
+	repo, err := s.db.GetRepositoryByID(ctx, repoID)
+	if err != nil {
+		return nil, err
+	}
+	if repo.StoragePath == "" || repo.StoragePath == "pending" {
+		return nil, fmt.Errorf("repo storage path unavailable")
+	}
+	store, err := gotstore.Open(repo.StoragePath)
+	if err != nil {
+		return nil, err
+	}
+
+	srcHash, err := store.Refs.Get("heads/" + pr.SourceBranch)
+	if err != nil {
+		return nil, err
+	}
+	tgtHash, err := store.Refs.Get("heads/" + pr.TargetBranch)
+	if err != nil {
+		return nil, err
+	}
+	srcCommit, err := store.Objects.ReadCommit(srcHash)
+	if err != nil {
+		return nil, err
+	}
+	tgtCommit, err := store.Objects.ReadCommit(tgtHash)
+	if err != nil {
+		return nil, err
+	}
+
+	srcFiles, err := flattenTree(store.Objects, srcCommit.TreeHash, "")
+	if err != nil {
+		return nil, err
+	}
+	tgtFiles, err := flattenTree(store.Objects, tgtCommit.TreeHash, "")
+	if err != nil {
+		return nil, err
+	}
+
+	srcMap := make(map[string]FileEntry, len(srcFiles))
+	for _, f := range srcFiles {
+		srcMap[f.Path] = f
+	}
+	tgtMap := make(map[string]FileEntry, len(tgtFiles))
+	for _, f := range tgtFiles {
+		tgtMap[f.Path] = f
+	}
+
+	pathSet := make(map[string]struct{}, len(srcMap)+len(tgtMap))
+	for path, srcEntry := range srcMap {
+		if tgtEntry, ok := tgtMap[path]; !ok || tgtEntry.BlobHash != srcEntry.BlobHash {
+			pathSet[path] = struct{}{}
+		}
+	}
+	for path := range tgtMap {
+		if _, ok := srcMap[path]; !ok {
+			pathSet[path] = struct{}{}
+		}
+	}
+
+	paths := make([]string, 0, len(pathSet))
+	for path := range pathSet {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+
+	summary := &prEntityChangeSummary{
+		Changes: make([]map[string]string, 0),
+	}
+	for _, path := range paths {
+		srcEntry, hasSrc := srcMap[path]
+		tgtEntry, hasTgt := tgtMap[path]
+		var srcData, tgtData []byte
+		if hasSrc && srcEntry.BlobHash != "" {
+			srcData, err = readBlobData(store.Objects, object.Hash(srcEntry.BlobHash))
+			if err != nil {
+				continue
+			}
+		}
+		if hasTgt && tgtEntry.BlobHash != "" {
+			tgtData, err = readBlobData(store.Objects, object.Hash(tgtEntry.BlobHash))
+			if err != nil {
+				continue
+			}
+		}
+		fd, err := gitdiff.DiffFiles(path, tgtData, srcData)
+		if err != nil {
+			continue
+		}
+		for _, c := range fd.Changes {
+			changeType := changeTypeNames[c.Type]
+			switch changeType {
+			case "added":
+				summary.Added++
+			case "removed":
+				summary.Removed++
+			case "modified":
+				summary.Modified++
+			}
+			summary.Changes = append(summary.Changes, map[string]string{
+				"file": path,
+				"type": changeType,
+				"key":  c.Key,
+			})
+		}
+	}
+	return summary, nil
 }
 
 func (s *WebhookService) EmitIssueEvent(ctx context.Context, repoID int64, action string, number int, title, body, state string) error {
