@@ -290,13 +290,22 @@ export interface SymbolResult {
   name: string;
   kind: string;
   file: string;
+  signature?: string;
+  receiver?: string;
+  start_line?: number;
+  end_line?: number;
   [key: string]: unknown;
 }
 
 export interface ReferenceResult {
   name: string;
   file: string;
+  kind?: string;
   line?: number;
+  start_line?: number;
+  end_line?: number;
+  start_column?: number;
+  end_column?: number;
   [key: string]: unknown;
 }
 
@@ -318,6 +327,14 @@ export interface EntityHistoryHit {
   name: string;
   path: string;
   commit_hash: string;
+  author?: string;
+  timestamp?: number;
+  message?: string;
+  entity_hash?: string;
+  kind?: string;
+  decl_kind?: string;
+  receiver?: string;
+  body_hash?: string;
   [key: string]: unknown;
 }
 
@@ -559,11 +576,12 @@ export const getCallGraph = (owner: string, repo: string, ref: string, symbol: s
 };
 
 // Entity history
-export const getEntityHistory = (owner: string, repo: string, ref: string, opts: { stableId?: string; name?: string; bodyHash?: string }) => {
+export const getEntityHistory = (owner: string, repo: string, ref: string, opts: { stableId?: string; name?: string; bodyHash?: string; limit?: number }) => {
   const params = new URLSearchParams();
   if (opts.stableId) params.set('stable_id', opts.stableId);
   if (opts.name) params.set('name', opts.name);
   if (opts.bodyHash) params.set('body_hash', opts.bodyHash);
+  if (opts.limit && opts.limit > 0) params.set('limit', String(opts.limit));
   return request<EntityHistoryHit[]>('GET', `/repos/${owner}/${repo}/entity-history/${ref}?${params.toString()}`);
 };
 

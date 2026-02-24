@@ -113,7 +113,14 @@ export function CodeView({ owner, repo, ref: gitRef, path }: Props) {
         blob ? (
           <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', gap: '16px' }}>
             <div style={{ flex: '1 1 640px', minWidth: 0 }}>
-              <CodeViewer filename={path || ''} source={blob.content || ''} />
+              <CodeViewer
+                filename={path || ''}
+                source={blob.content || ''}
+                owner={owner}
+                repo={repo}
+                gitRef={gitRef}
+                path={path || ''}
+              />
             </div>
             <EntityBlamePanel
               entities={entities}
