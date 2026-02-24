@@ -4,7 +4,7 @@
 
 **Goal:** Got becomes objectively faster than Git for common operations. GotHub stops blocking on pushes. Foundation is production-grade with full observability.
 
-**Architecture:** Five parallel workstreams — (A) Pack file engine in Got, (B) Async indexing pipeline in GotHub, (C) Code intelligence engine in GotHub, (D) Merge performance in Got+GotHub, (E) Observability. A and B are foundational; C/D/E build on them.
+**Architecture:** Six parallel workstreams — (A) Pack file engine in Got, (B) Async indexing pipeline in GotHub, (C) Code intelligence engine in GotHub, (D) Merge performance in Got+GotHub, (E) Observability, (F) PR intelligence UX in GotHub. A and B are foundational; C/D/E/F build on them.
 
 **Tech Stack:** Go 1.25, SHA-256, Git v2 pack format, zlib/zstd, FTS5/tsvector, bloom filters, OpenTelemetry, pprof, Prometheus client_golang
 
@@ -48,6 +48,10 @@ Task 30 (Obs: OTel tracing)
     → Task 32 (Obs: pprof + health endpoint)
       → Task 33 (Obs: Got benchmarks)
         → Task 34 (Obs: GotHub benchmarks)
+
+Task 40 (PR UX: impact summary card)
+  → Task 41 (PR UX: semver recommendation card)
+    → Task 42 (PR UX: entity owner approval checklist)
 ```
 
 ## Execution Tracker (Live)
@@ -63,16 +67,20 @@ Updated: 2026-02-24
 | 3 | complete | got | `251b62d` | `go test ./pkg/object -run TestReadPack -v`, `go test ./...` |
 | 4 | complete | got | `4b916f1` | `go test ./pkg/object -run TestWritePackIndex -v`, `go test ./...` |
 | 5 | complete | got | `eed3d13` | `go test ./pkg/object -run 'TestReadPackIndex|TestReadPackIndexFromReader' -v`, `go test ./...` |
+| 6 | complete | got | `5c4f60f` | `go test ./pkg/object -run 'TestOfsDelta|TestBuildInsertOnlyDelta|TestPackWriterWriteOfsDelta' -v`, `go test ./...` |
+| 40 | complete | gothub | `d298656` | `go test ./...`, `cd frontend && npm run build` |
+| 41 | complete | gothub | `d298656` | `go test ./...`, `cd frontend && npm run build` |
+| 42 | complete | gothub | `d298656` | `go test ./...`, `cd frontend && npm run build` |
 
 ### In Progress
 
 | Task | Status | Notes |
 |------|--------|-------|
-| 6 | next | implement delta compression writer (`OFS_DELTA`) |
+| 7 | next | implement pack reader delta resolution (`OFS_DELTA` / `REF_DELTA`) |
 
 ### Remaining (Not Yet Implemented)
 
-- Tasks 7-34 are pending.
+- Tasks 8-34 are pending.
 - Tasks 35-39 are queued post-Phase-1 cloud multi-tenancy work.
 
 ---
@@ -2120,6 +2128,34 @@ func BenchmarkXRefQuery(b *testing.B) { ... }
 ```bash
 git commit -m "add(bench): service and database benchmark suites"
 ```
+
+---
+
+## Workstream F: PR Intelligence UX (GotHub)
+
+### Task 40: PR Impact Summary Card
+
+**Status:** Complete (`d298656`)
+
+**Scope delivered:**
+- Added PR impact summary card in the PR detail view (`Files changed` and `Merge preview` tabs).
+- Aggregates structural diff data into file/entity/add/modify/remove counts.
+
+### Task 41: SemVer Recommendation Card in PR Merge View
+
+**Status:** Complete (`d298656`)
+
+**Scope delivered:**
+- Wired PR merge view to semver endpoint (`/api/v1/repos/{owner}/{repo}/semver/{base...head}`).
+- Added SemVer recommendation panel with `major|minor|patch|none` and detail lists (`breaking_changes`, `features`, `fixes`).
+
+### Task 42: Entity Owner Approval Checklist in Merge Gate UI
+
+**Status:** Complete (`d298656`)
+
+**Scope delivered:**
+- Extended merge-gate payload with structured entity owner approval data (`entity_owner_approvals`).
+- Added checklist UI showing entity, required owners, approved users, missing owners, unresolved teams, and pass/fail state.
 
 ---
 
