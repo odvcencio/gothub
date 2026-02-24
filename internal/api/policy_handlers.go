@@ -17,6 +17,7 @@ type upsertBranchProtectionRequest struct {
 	RequiredApprovals          int      `json:"required_approvals"`
 	RequireStatusChecks        bool     `json:"require_status_checks"`
 	RequireEntityOwnerApproval bool     `json:"require_entity_owner_approval"`
+	RequireLintPass            bool     `json:"require_lint_pass"`
 	RequiredChecks             []string `json:"required_checks"`
 }
 
@@ -54,6 +55,7 @@ func (s *Server) handleUpsertBranchProtection(w http.ResponseWriter, r *http.Req
 		RequiredApprovals:          requiredApprovals,
 		RequireStatusChecks:        req.RequireStatusChecks,
 		RequireEntityOwnerApproval: req.RequireEntityOwnerApproval,
+		RequireLintPass:            req.RequireLintPass,
 		RequiredChecks:             req.RequiredChecks,
 	}
 	if err := s.prSvc.UpsertBranchProtectionRule(r.Context(), rule); err != nil {

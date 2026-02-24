@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -12,6 +14,7 @@ import (
 	"github.com/odvcencio/got/pkg/object"
 	"github.com/odvcencio/gothub/internal/gotstore"
 	"github.com/odvcencio/gothub/internal/models"
+	"github.com/odvcencio/gts-suite/pkg/index"
 )
 
 type MergeGateResult struct {
@@ -92,6 +95,14 @@ func (s *PRService) EvaluateMergeGate(ctx context.Context, repoID int64, pr *mod
 		reasons, evalErr := s.evaluateEntityOwnerApprovals(ctx, repoID, pr, reviews)
 		if evalErr != nil {
 			result.Reasons = append(result.Reasons, fmt.Sprintf("unable to evaluate entity owner approvals: %v", evalErr))
+		}
+		result.Reasons = append(result.Reasons, reasons...)
+	}
+
+	if rule.RequireLintPass {
+		reasons, evalErr := s.evaluateLintPass(ctx, repoID, pr)
+		if evalErr != nil {
+			result.Reasons = append(result.Reasons, fmt.Sprintf("unable to evaluate lint gate: %v", evalErr))
 		}
 		result.Reasons = append(result.Reasons, reasons...)
 	}
@@ -184,6 +195,138 @@ func (s *PRService) evaluateEntityOwnerApprovals(ctx context.Context, repoID int
 		}
 	}
 
+	sort.Strings(reasons)
+	return reasons, nil
+}
+
+func (s *PRService) evaluateLintPass(ctx context.Context, repoID int64, pr *models.PullRequest) ([]string, error) {
+	store, err := s.repoSvc.OpenStoreByID(ctx, repoID)
+	if err != nil {
+		return nil, err
+	}
+
+	srcHash, err := store.Refs.Get("heads/" + pr.SourceBranch)
+	if err != nil {
+		return nil, fmt.Errorf("resolve source branch %q: %w", pr.SourceBranch, err)
+	}
+	tgtHash, err := store.Refs.Get("heads/" + pr.TargetBranch)
+	if err != nil {
+		return nil, fmt.Errorf("resolve target branch %q: %w", pr.TargetBranch, err)
+	}
+	srcCommit, err := store.Objects.ReadCommit(srcHash)
+	if err != nil {
+		return nil, fmt.Errorf("read source commit %q: %w", string(srcHash), err)
+	}
+	tgtCommit, err := store.Objects.ReadCommit(tgtHash)
+	if err != nil {
+		return nil, fmt.Errorf("read target commit %q: %w", string(tgtHash), err)
+	}
+
+	srcFiles, err := flattenTree(store.Objects, srcCommit.TreeHash, "")
+	if err != nil {
+		return nil, fmt.Errorf("flatten source tree: %w", err)
+	}
+	tgtFiles, err := flattenTree(store.Objects, tgtCommit.TreeHash, "")
+	if err != nil {
+		return nil, fmt.Errorf("flatten target tree: %w", err)
+	}
+
+	srcMap := make(map[string]FileEntry, len(srcFiles))
+	for _, f := range srcFiles {
+		srcMap[f.Path] = f
+	}
+	tgtMap := make(map[string]FileEntry, len(tgtFiles))
+	for _, f := range tgtFiles {
+		tgtMap[f.Path] = f
+	}
+
+	changedSet := make(map[string]struct{})
+	for path, srcEntry := range srcMap {
+		if tgtEntry, ok := tgtMap[path]; !ok || tgtEntry.BlobHash != srcEntry.BlobHash {
+			changedSet[path] = struct{}{}
+		}
+	}
+	for path := range tgtMap {
+		if _, ok := srcMap[path]; !ok {
+			changedSet[path] = struct{}{}
+		}
+	}
+	if len(changedSet) == 0 {
+		return nil, nil
+	}
+
+	tmpDir, err := os.MkdirTemp("", "gothub-pr-lint-*")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(tmpDir)
+
+	sourceDataByPath := make(map[string][]byte, len(srcFiles))
+	for _, fe := range srcFiles {
+		if strings.TrimSpace(fe.BlobHash) == "" {
+			continue
+		}
+		blob, readErr := store.Objects.ReadBlob(object.Hash(fe.BlobHash))
+		if readErr != nil {
+			continue
+		}
+		fullPath := filepath.Join(tmpDir, fe.Path)
+		if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(fullPath, blob.Data, 0o644); err != nil {
+			return nil, err
+		}
+		if _, tracked := changedSet[fe.Path]; tracked {
+			sourceDataByPath[fe.Path] = blob.Data
+		}
+	}
+
+	builder := index.NewBuilder()
+	idx, err := builder.BuildPath(tmpDir)
+	if err != nil {
+		return nil, err
+	}
+
+	parseErrByPath := make(map[string]string, len(idx.Errors))
+	for _, pe := range idx.Errors {
+		p := strings.TrimPrefix(filepath.ToSlash(strings.TrimSpace(pe.Path)), "./")
+		if p == "" {
+			continue
+		}
+		parseErrByPath[p] = strings.TrimSpace(pe.Error)
+	}
+	symbolCountByPath := make(map[string]int, len(idx.Files))
+	for _, f := range idx.Files {
+		p := strings.TrimPrefix(filepath.ToSlash(strings.TrimSpace(f.Path)), "./")
+		if p == "" {
+			continue
+		}
+		symbolCountByPath[p] = len(f.Symbols)
+	}
+
+	reasons := make([]string, 0)
+	seen := make(map[string]bool)
+	for path := range changedSet {
+		if parseErr, ok := parseErrByPath[path]; ok {
+			reason := fmt.Sprintf("lint parse error in %s: %s", path, parseErr)
+			if !seen[reason] {
+				seen[reason] = true
+				reasons = append(reasons, reason)
+			}
+			continue
+		}
+		if _, existsInSource := srcMap[path]; !existsInSource {
+			continue
+		}
+		if symbolCountByPath[path] == 0 && hasLikelySymbolSyntax(sourceDataByPath[path]) {
+			reason := fmt.Sprintf("lint symbol extraction failed in %s", path)
+			if !seen[reason] {
+				seen[reason] = true
+				reasons = append(reasons, reason)
+			}
+		}
+	}
 	sort.Strings(reasons)
 	return reasons, nil
 }
@@ -350,6 +493,22 @@ func formatTeamRefs(teams []string) string {
 		refs[i] = "@team/" + t
 	}
 	return strings.Join(refs, ", ")
+}
+
+func hasLikelySymbolSyntax(data []byte) bool {
+	if len(data) == 0 {
+		return false
+	}
+	src := strings.ToLower(string(data))
+	keywords := [...]string{
+		"func ", "function ", "class ", "interface ", "struct ", "enum ", "def ", "type ",
+	}
+	for _, kw := range keywords {
+		if strings.Contains(src, kw) {
+			return true
+		}
+	}
+	return false
 }
 
 func parseChecksCSV(csv string) []string {
