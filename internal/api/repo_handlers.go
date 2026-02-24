@@ -1,9 +1,7 @@
 package api
 
 import (
-	"database/sql"
 	"encoding/json"
-	"errors"
 	"net/http"
 
 	"github.com/odvcencio/gothub/internal/auth"
@@ -36,27 +34,10 @@ func (s *Server) handleCreateRepo(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetRepo(w http.ResponseWriter, r *http.Request) {
-	owner := r.PathValue("owner")
-	name := r.PathValue("repo")
-	repo, err := s.repoSvc.Get(r.Context(), owner, name)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			jsonError(w, "repository not found", http.StatusNotFound)
-			return
-		}
-		jsonError(w, "internal error", http.StatusInternalServerError)
+	repo, ok := s.authorizeRepoRequest(w, r, false)
+	if !ok {
 		return
 	}
-
-	// Check access for private repos
-	if repo.IsPrivate {
-		claims := auth.GetClaims(r.Context())
-		if claims == nil || (repo.OwnerUserID != nil && claims.UserID != *repo.OwnerUserID) {
-			jsonError(w, "repository not found", http.StatusNotFound)
-			return
-		}
-	}
-
 	jsonResponse(w, http.StatusOK, repo)
 }
 
@@ -67,17 +48,14 @@ func (s *Server) handleListUserRepos(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	jsonResponse(w, http.StatusOK, repos)
+	page, perPage := parsePagination(r, 30, 200)
+	jsonResponse(w, http.StatusOK, paginateSlice(repos, page, perPage))
 }
 
 func (s *Server) handleDeleteRepo(w http.ResponseWriter, r *http.Request) {
 	claims := auth.GetClaims(r.Context())
-	owner := r.PathValue("owner")
-	name := r.PathValue("repo")
-
-	repo, err := s.repoSvc.Get(r.Context(), owner, name)
-	if err != nil {
-		jsonError(w, "repository not found", http.StatusNotFound)
+	repo, ok := s.authorizeRepoRequest(w, r, true)
+	if !ok {
 		return
 	}
 

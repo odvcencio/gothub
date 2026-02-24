@@ -60,6 +60,7 @@ type PullRequest struct {
 	Body         string     `json:"body"`
 	State        string     `json:"state"` // "open", "closed", "merged"
 	AuthorID     int64      `json:"author_id"`
+	AuthorName   string     `json:"author_name,omitempty"`
 	SourceBranch string     `json:"source_branch"`
 	TargetBranch string     `json:"target_branch"`
 	SourceCommit string     `json:"source_commit"`

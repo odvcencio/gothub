@@ -8,6 +8,9 @@ import (
 )
 
 func (s *Server) handleSearchSymbols(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.authorizeRepoRequest(w, r, false); !ok {
+		return
+	}
 	owner := r.PathValue("owner")
 	repo := r.PathValue("repo")
 	ref := r.PathValue("ref")
@@ -29,6 +32,9 @@ func (s *Server) handleSearchSymbols(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleFindReferences(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.authorizeRepoRequest(w, r, false); !ok {
+		return
+	}
 	owner := r.PathValue("owner")
 	repo := r.PathValue("repo")
 	ref := r.PathValue("ref")
@@ -51,6 +57,9 @@ func (s *Server) handleFindReferences(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCallGraph(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.authorizeRepoRequest(w, r, false); !ok {
+		return
+	}
 	owner := r.PathValue("owner")
 	repo := r.PathValue("repo")
 	ref := r.PathValue("ref")

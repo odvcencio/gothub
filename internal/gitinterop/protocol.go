@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,9 +20,10 @@ import (
 
 // SmartHTTPHandler implements the git smart HTTP protocol.
 type SmartHTTPHandler struct {
-	getStore func(owner, repo string) (*gotstore.RepoStore, error)
-	db       database.DB
-	getRepo  func(ctx context.Context, owner, repo string) (int64, error) // returns repo ID
+	getStore  func(owner, repo string) (*gotstore.RepoStore, error)
+	db        database.DB
+	getRepo   func(ctx context.Context, owner, repo string) (int64, error) // returns repo ID
+	authorize func(r *http.Request, owner, repo string, write bool) (int, error)
 }
 
 type refUpdate struct {
@@ -32,8 +35,9 @@ func NewSmartHTTPHandler(
 	getStore func(owner, repo string) (*gotstore.RepoStore, error),
 	db database.DB,
 	getRepo func(ctx context.Context, owner, repo string) (int64, error),
+	authorize func(r *http.Request, owner, repo string, write bool) (int, error),
 ) *SmartHTTPHandler {
-	return &SmartHTTPHandler{getStore: getStore, db: db, getRepo: getRepo}
+	return &SmartHTTPHandler{getStore: getStore, db: db, getRepo: getRepo, authorize: authorize}
 }
 
 // RegisterRoutes sets up git smart HTTP protocol routes.
@@ -51,6 +55,9 @@ func (h *SmartHTTPHandler) handleInfoRefs(w http.ResponseWriter, r *http.Request
 
 	if svc != "git-upload-pack" && svc != "git-receive-pack" {
 		http.Error(w, "unsupported service", http.StatusBadRequest)
+		return
+	}
+	if ok := h.authorizeRequest(w, r, owner, repo, svc == "git-receive-pack"); !ok {
 		return
 	}
 
@@ -91,7 +98,7 @@ func (h *SmartHTTPHandler) handleInfoRefs(w http.ResponseWriter, r *http.Request
 		refName := name
 		if first {
 			// First ref includes capabilities
-			w.Write(pktLine(fmt.Sprintf("%s %s\x00report-status delete-refs ofs-delta side-band-64k\n", gitHash, refName)))
+			w.Write(pktLine(fmt.Sprintf("%s %s\x00report-status delete-refs ofs-delta\n", gitHash, refName)))
 			first = false
 		} else {
 			w.Write(pktLine(fmt.Sprintf("%s %s\n", gitHash, refName)))
@@ -100,7 +107,7 @@ func (h *SmartHTTPHandler) handleInfoRefs(w http.ResponseWriter, r *http.Request
 
 	if first {
 		// No refs — send zero-id with capabilities
-		w.Write(pktLine(fmt.Sprintf("%s capabilities^{}\x00report-status delete-refs ofs-delta side-band-64k\n", strings.Repeat("0", 40))))
+		w.Write(pktLine(fmt.Sprintf("%s capabilities^{}\x00report-status delete-refs ofs-delta\n", strings.Repeat("0", 40))))
 	}
 
 	w.Write(pktFlush())
@@ -110,6 +117,9 @@ func (h *SmartHTTPHandler) handleInfoRefs(w http.ResponseWriter, r *http.Request
 func (h *SmartHTTPHandler) handleReceivePack(w http.ResponseWriter, r *http.Request) {
 	owner := r.PathValue("owner")
 	repo := strings.TrimSuffix(r.PathValue("repo"), ".git")
+	if ok := h.authorizeRequest(w, r, owner, repo, true); !ok {
+		return
+	}
 
 	store, err := h.getStore(owner, repo)
 	if err != nil {
@@ -164,11 +174,13 @@ func (h *SmartHTTPHandler) handleReceivePack(w http.ResponseWriter, r *http.Requ
 		// Parse packfile and convert objects to Got format
 		objects, err := ParsePackfile(bytes.NewReader(packData))
 		if err != nil {
-			h.sendReceivePackResult(w, fmt.Sprintf("unpack error: %v", err))
+			h.sendReceivePackResult(w, fmt.Sprintf("unpack error: %v", err), nil, nil)
 			return
 		}
 
-		// Convert each git object to a Got object and store it
+		// Convert git objects to Got format.
+		// Blobs can be written immediately; trees/commits may depend on hash mappings.
+		var deferred []PackfileObject
 		for _, obj := range objects {
 			gitHash := GitHash(gitHashRaw(obj.Type, obj.Data))
 
@@ -176,40 +188,81 @@ func (h *SmartHTTPHandler) handleReceivePack(w http.ResponseWriter, r *http.Requ
 			case OBJ_BLOB:
 				gotHash, err := store.Objects.WriteBlob(&object.Blob{Data: obj.Data})
 				if err != nil {
-					continue
+					h.sendReceivePackResult(w, fmt.Sprintf("unpack error: write blob: %v", err), nil, nil)
+					return
 				}
-				h.db.SetHashMapping(r.Context(), &models.HashMapping{
+				if err := h.db.SetHashMapping(r.Context(), &models.HashMapping{
 					RepoID: repoID, GotHash: string(gotHash), GitHash: string(gitHash), ObjectType: "blob",
-				})
-				// Extract entities for the blob
-				// We don't know the filename yet (need tree context), so skip for now
-
-			case OBJ_TREE:
-				gotTree, err := parseGitTree(obj.Data, r.Context(), h.db, repoID)
-				if err != nil {
-					continue
+				}); err != nil {
+					h.sendReceivePackResult(w, fmt.Sprintf("unpack error: map blob hash: %v", err), nil, nil)
+					return
 				}
-				gotHash, err := store.Objects.WriteTree(gotTree)
-				if err != nil {
-					continue
-				}
-				h.db.SetHashMapping(r.Context(), &models.HashMapping{
-					RepoID: repoID, GotHash: string(gotHash), GitHash: string(gitHash), ObjectType: "tree",
-				})
-
-			case OBJ_COMMIT:
-				gotCommit, err := parseGitCommit(obj.Data, r.Context(), h.db, repoID)
-				if err != nil {
-					continue
-				}
-				gotHash, err := store.Objects.WriteCommit(gotCommit)
-				if err != nil {
-					continue
-				}
-				h.db.SetHashMapping(r.Context(), &models.HashMapping{
-					RepoID: repoID, GotHash: string(gotHash), GitHash: string(gitHash), ObjectType: "commit",
-				})
+			case OBJ_TREE, OBJ_COMMIT:
+				deferred = append(deferred, obj)
 			}
+		}
+
+		for len(deferred) > 0 {
+			progress := false
+			nextDeferred := make([]PackfileObject, 0, len(deferred))
+
+			for _, obj := range deferred {
+				gitHash := GitHash(gitHashRaw(obj.Type, obj.Data))
+
+				switch obj.Type {
+				case OBJ_TREE:
+					gotTree, err := parseGitTree(obj.Data, r.Context(), h.db, repoID)
+					if err != nil {
+						if errors.Is(err, sql.ErrNoRows) {
+							nextDeferred = append(nextDeferred, obj)
+							continue
+						}
+						h.sendReceivePackResult(w, fmt.Sprintf("unpack error: parse tree: %v", err), nil, nil)
+						return
+					}
+					gotHash, err := store.Objects.WriteTree(gotTree)
+					if err != nil {
+						h.sendReceivePackResult(w, fmt.Sprintf("unpack error: write tree: %v", err), nil, nil)
+						return
+					}
+					if err := h.db.SetHashMapping(r.Context(), &models.HashMapping{
+						RepoID: repoID, GotHash: string(gotHash), GitHash: string(gitHash), ObjectType: "tree",
+					}); err != nil {
+						h.sendReceivePackResult(w, fmt.Sprintf("unpack error: map tree hash: %v", err), nil, nil)
+						return
+					}
+					progress = true
+
+				case OBJ_COMMIT:
+					gotCommit, err := parseGitCommit(obj.Data, r.Context(), h.db, repoID)
+					if err != nil {
+						if errors.Is(err, sql.ErrNoRows) {
+							nextDeferred = append(nextDeferred, obj)
+							continue
+						}
+						h.sendReceivePackResult(w, fmt.Sprintf("unpack error: parse commit: %v", err), nil, nil)
+						return
+					}
+					gotHash, err := store.Objects.WriteCommit(gotCommit)
+					if err != nil {
+						h.sendReceivePackResult(w, fmt.Sprintf("unpack error: write commit: %v", err), nil, nil)
+						return
+					}
+					if err := h.db.SetHashMapping(r.Context(), &models.HashMapping{
+						RepoID: repoID, GotHash: string(gotHash), GitHash: string(gitHash), ObjectType: "commit",
+					}); err != nil {
+						h.sendReceivePackResult(w, fmt.Sprintf("unpack error: map commit hash: %v", err), nil, nil)
+						return
+					}
+					progress = true
+				}
+			}
+
+			if !progress {
+				h.sendReceivePackResult(w, "unpack error: unresolved object dependencies", nil, nil)
+				return
+			}
+			deferred = nextDeferred
 		}
 
 		// Run entity extraction on blobs with known filenames
@@ -217,25 +270,34 @@ func (h *SmartHTTPHandler) handleReceivePack(w http.ResponseWriter, r *http.Requ
 	}
 
 	// Update refs
+	refErrors := make(map[string]string, len(updates))
 	for _, u := range updates {
 		if string(u.newHash) == strings.Repeat("0", 40) {
-			store.Refs.Delete(u.refName)
+			if err := store.Refs.Delete(u.refName); err != nil {
+				refErrors[u.refName] = err.Error()
+			}
 			continue
 		}
 		gotHash, err := h.db.GetGotHash(r.Context(), repoID, string(u.newHash))
 		if err != nil {
+			refErrors[u.refName] = "missing object mapping"
 			continue
 		}
-		store.Refs.Set(u.refName, object.Hash(gotHash))
+		if err := store.Refs.Set(u.refName, object.Hash(gotHash)); err != nil {
+			refErrors[u.refName] = err.Error()
+		}
 	}
 
-	h.sendReceivePackResult(w, "")
+	h.sendReceivePackResult(w, "", updates, refErrors)
 }
 
 // POST /git/{owner}/{repo}/git-upload-pack
 func (h *SmartHTTPHandler) handleUploadPack(w http.ResponseWriter, r *http.Request) {
 	owner := r.PathValue("owner")
 	repo := strings.TrimSuffix(r.PathValue("repo"), ".git")
+	if ok := h.authorizeRequest(w, r, owner, repo, false); !ok {
+		return
+	}
 
 	store, err := h.getStore(owner, repo)
 	if err != nil {
@@ -343,14 +405,20 @@ func (h *SmartHTTPHandler) handleUploadPack(w http.ResponseWriter, r *http.Reque
 	w.Write(pktFlush())
 }
 
-func (h *SmartHTTPHandler) sendReceivePackResult(w http.ResponseWriter, errMsg string) {
+func (h *SmartHTTPHandler) sendReceivePackResult(w http.ResponseWriter, errMsg string, updates []refUpdate, refErrors map[string]string) {
 	w.Header().Set("Content-Type", "application/x-git-receive-pack-result")
 	if errMsg != "" {
 		w.Write(pktLine(fmt.Sprintf("unpack %s\n", errMsg)))
 	} else {
 		w.Write(pktLine("unpack ok\n"))
+		for _, u := range updates {
+			if msg, failed := refErrors[u.refName]; failed && msg != "" {
+				w.Write(pktLine(fmt.Sprintf("ng %s %s\n", u.refName, msg)))
+				continue
+			}
+			w.Write(pktLine(fmt.Sprintf("ok %s\n", u.refName)))
+		}
 	}
-	w.Write(pktLine("ok refs/heads/main\n"))
 	w.Write(pktFlush())
 }
 
@@ -477,7 +545,10 @@ func parseGitTree(data []byte, ctx context.Context, db database.DB, repoID int64
 		gitHash := bytesToHex(hashBytes[:])
 
 		isDir := string(mode) == "40000"
-		gotHash, _ := db.GetGotHash(ctx, repoID, gitHash)
+		gotHash, err := db.GetGotHash(ctx, repoID, gitHash)
+		if err != nil {
+			return nil, fmt.Errorf("missing hash mapping for tree entry %s: %w", gitHash, err)
+		}
 
 		entry := object.TreeEntry{
 			Name:  string(name),
@@ -515,18 +586,25 @@ func parseGitCommit(data []byte, ctx context.Context, db database.DB, repoID int
 		}
 		switch parts[0] {
 		case "tree":
-			if gotHash, err := db.GetGotHash(ctx, repoID, parts[1]); err == nil {
-				c.TreeHash = object.Hash(gotHash)
+			gotHash, err := db.GetGotHash(ctx, repoID, parts[1])
+			if err != nil {
+				return nil, fmt.Errorf("missing tree hash mapping %s: %w", parts[1], err)
 			}
+			c.TreeHash = object.Hash(gotHash)
 		case "parent":
-			if gotHash, err := db.GetGotHash(ctx, repoID, parts[1]); err == nil {
-				c.Parents = append(c.Parents, object.Hash(gotHash))
+			gotHash, err := db.GetGotHash(ctx, repoID, parts[1])
+			if err != nil {
+				return nil, fmt.Errorf("missing parent hash mapping %s: %w", parts[1], err)
 			}
+			c.Parents = append(c.Parents, object.Hash(gotHash))
 		case "author":
 			// "Name <email> timestamp timezone"
 			c.Author = extractAuthorName(parts[1])
 			c.Timestamp = extractTimestamp(parts[1])
 		}
+	}
+	if c.TreeHash == "" {
+		return nil, fmt.Errorf("commit is missing tree hash")
 	}
 	c.Message = strings.Join(bodyLines, "\n")
 	return c, nil
@@ -666,4 +744,19 @@ func gotTypeToPackType(t object.ObjectType) int {
 	default:
 		return OBJ_BLOB
 	}
+}
+
+func (h *SmartHTTPHandler) authorizeRequest(w http.ResponseWriter, r *http.Request, owner, repo string, write bool) bool {
+	if h.authorize == nil {
+		return true
+	}
+	status, err := h.authorize(r, owner, repo, write)
+	if err == nil {
+		return true
+	}
+	if status == http.StatusUnauthorized {
+		w.Header().Set("WWW-Authenticate", `Basic realm="gothub"`)
+	}
+	http.Error(w, err.Error(), status)
+	return false
 }

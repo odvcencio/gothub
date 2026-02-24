@@ -6,8 +6,30 @@ import (
 	"strings"
 )
 
+// GET /api/v1/repos/{owner}/{repo}/branches
+func (s *Server) handleListBranches(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.authorizeRepoRequest(w, r, false); !ok {
+		return
+	}
+	owner := r.PathValue("owner")
+	repo := r.PathValue("repo")
+
+	branches, err := s.browseSvc.ListBranches(r.Context(), owner, repo)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	if branches == nil {
+		branches = []string{}
+	}
+	jsonResponse(w, http.StatusOK, branches)
+}
+
 // GET /api/v1/repos/{owner}/{repo}/tree/{ref}/{path...}
 func (s *Server) handleListTree(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.authorizeRepoRequest(w, r, false); !ok {
+		return
+	}
 	owner := r.PathValue("owner")
 	repo := r.PathValue("repo")
 	ref := r.PathValue("ref")
@@ -23,6 +45,9 @@ func (s *Server) handleListTree(w http.ResponseWriter, r *http.Request) {
 
 // GET /api/v1/repos/{owner}/{repo}/blob/{ref}/{path...}
 func (s *Server) handleGetBlob(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.authorizeRepoRequest(w, r, false); !ok {
+		return
+	}
 	owner := r.PathValue("owner")
 	repo := r.PathValue("repo")
 	ref := r.PathValue("ref")
@@ -38,14 +63,19 @@ func (s *Server) handleGetBlob(w http.ResponseWriter, r *http.Request) {
 
 // GET /api/v1/repos/{owner}/{repo}/commits/{ref}
 func (s *Server) handleListCommits(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.authorizeRepoRequest(w, r, false); !ok {
+		return
+	}
 	owner := r.PathValue("owner")
 	repo := r.PathValue("repo")
 	ref := r.PathValue("ref")
 
-	limit := 30
+	page, perPage := parsePagination(r, 30, 200)
+	limit := page * perPage
 	if l := r.URL.Query().Get("limit"); l != "" {
 		if n, err := strconv.Atoi(l); err == nil && n > 0 {
-			limit = n
+			perPage = n
+			limit = page * perPage
 		}
 	}
 
@@ -54,11 +84,14 @@ func (s *Server) handleListCommits(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	jsonResponse(w, http.StatusOK, commits)
+	jsonResponse(w, http.StatusOK, paginateSlice(commits, page, perPage))
 }
 
 // GET /api/v1/repos/{owner}/{repo}/commit/{hash}
 func (s *Server) handleGetCommit(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.authorizeRepoRequest(w, r, false); !ok {
+		return
+	}
 	owner := r.PathValue("owner")
 	repo := r.PathValue("repo")
 	hash := r.PathValue("hash")
@@ -73,6 +106,9 @@ func (s *Server) handleGetCommit(w http.ResponseWriter, r *http.Request) {
 
 // GET /api/v1/repos/{owner}/{repo}/entities/{ref}/{path...}
 func (s *Server) handleListEntities(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.authorizeRepoRequest(w, r, false); !ok {
+		return
+	}
 	owner := r.PathValue("owner")
 	repo := r.PathValue("repo")
 	ref := r.PathValue("ref")
@@ -89,6 +125,9 @@ func (s *Server) handleListEntities(w http.ResponseWriter, r *http.Request) {
 // GET /api/v1/repos/{owner}/{repo}/diff/{spec}
 // spec is "base...head" where base and head are refs or commit hashes
 func (s *Server) handleDiff(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.authorizeRepoRequest(w, r, false); !ok {
+		return
+	}
 	owner := r.PathValue("owner")
 	repo := r.PathValue("repo")
 	spec := r.PathValue("spec")

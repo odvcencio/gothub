@@ -11,11 +11,15 @@ import (
 
 // Handler provides HTTP endpoints for the Got protocol (push/pull).
 type Handler struct {
-	getStore func(owner, repo string) (*gotstore.RepoStore, error)
+	getStore  func(owner, repo string) (*gotstore.RepoStore, error)
+	authorize func(r *http.Request, owner, repo string, write bool) (int, error)
 }
 
-func NewHandler(getStore func(owner, repo string) (*gotstore.RepoStore, error)) *Handler {
-	return &Handler{getStore: getStore}
+func NewHandler(
+	getStore func(owner, repo string) (*gotstore.RepoStore, error),
+	authorize func(r *http.Request, owner, repo string, write bool) (int, error),
+) *Handler {
+	return &Handler{getStore: getStore, authorize: authorize}
 }
 
 // RegisterRoutes sets up Got protocol routes on the given mux.
@@ -28,6 +32,9 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 
 // GET /{owner}/{repo}.got/refs — list all refs
 func (h *Handler) handleListRefs(w http.ResponseWriter, r *http.Request) {
+	if ok := h.authorizeRequest(w, r, false); !ok {
+		return
+	}
 	store, err := h.repoStore(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
@@ -44,6 +51,9 @@ func (h *Handler) handleListRefs(w http.ResponseWriter, r *http.Request) {
 
 // GET /{owner}/{repo}.got/objects/{hash} — fetch a single object
 func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
+	if ok := h.authorizeRequest(w, r, false); !ok {
+		return
+	}
 	store, err := h.repoStore(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
@@ -66,6 +76,9 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 
 // POST /{owner}/{repo}.got/objects — push objects (newline-delimited JSON)
 func (h *Handler) handlePushObjects(w http.ResponseWriter, r *http.Request) {
+	if ok := h.authorizeRequest(w, r, true); !ok {
+		return
+	}
 	store, err := h.repoStore(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
@@ -95,6 +108,9 @@ func (h *Handler) handlePushObjects(w http.ResponseWriter, r *http.Request) {
 
 // POST /{owner}/{repo}.got/refs — update refs
 func (h *Handler) handleUpdateRefs(w http.ResponseWriter, r *http.Request) {
+	if ok := h.authorizeRequest(w, r, true); !ok {
+		return
+	}
 	store, err := h.repoStore(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
@@ -128,6 +144,23 @@ func (h *Handler) repoStore(r *http.Request) (*gotstore.RepoStore, error) {
 	owner := r.PathValue("owner")
 	repo := r.PathValue("repo")
 	return h.getStore(owner, repo)
+}
+
+func (h *Handler) authorizeRequest(w http.ResponseWriter, r *http.Request, write bool) bool {
+	if h.authorize == nil {
+		return true
+	}
+	owner := r.PathValue("owner")
+	repo := r.PathValue("repo")
+	status, err := h.authorize(r, owner, repo, write)
+	if err == nil {
+		return true
+	}
+	if status == http.StatusUnauthorized {
+		w.Header().Set("WWW-Authenticate", `Basic realm="gothub"`)
+	}
+	http.Error(w, err.Error(), status)
+	return false
 }
 
 // WalkObjects walks the object graph from a commit hash, calling fn for each

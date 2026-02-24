@@ -218,8 +218,13 @@ func (p *PostgresDB) DeleteSSHKey(ctx context.Context, id, userID int64) error {
 func (p *PostgresDB) CreateRepository(ctx context.Context, r *models.Repository) error {
 	return p.db.QueryRowContext(ctx,
 		`INSERT INTO repositories (owner_user_id, owner_org_id, name, description, default_branch, is_private, storage_path)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, created_at`,
+			 VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, created_at`,
 		r.OwnerUserID, r.OwnerOrgID, r.Name, r.Description, r.DefaultBranch, r.IsPrivate, r.StoragePath).Scan(&r.ID, &r.CreatedAt)
+}
+
+func (p *PostgresDB) UpdateRepositoryStoragePath(ctx context.Context, id int64, storagePath string) error {
+	_, err := p.db.ExecContext(ctx, `UPDATE repositories SET storage_path = $1 WHERE id = $2`, storagePath, id)
+	return err
 }
 
 func (p *PostgresDB) GetRepository(ctx context.Context, ownerName, repoName string) (*models.Repository, error) {
@@ -348,25 +353,45 @@ func (p *PostgresDB) RemoveCollaborator(ctx context.Context, repoID, userID int6
 // --- Pull Requests ---
 
 func (p *PostgresDB) CreatePullRequest(ctx context.Context, pr *models.PullRequest) error {
-	// Auto-assign next PR number for this repo
+	tx, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// Lock repository row to serialize PR number assignment per repository.
+	var repoID int64
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM repositories WHERE id = $1 FOR UPDATE`, pr.RepoID).Scan(&repoID); err != nil {
+		return err
+	}
+
 	var maxNum int
-	p.db.QueryRowContext(ctx,
-		`SELECT COALESCE(MAX(number), 0) FROM pull_requests WHERE repo_id = $1`, pr.RepoID).Scan(&maxNum)
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COALESCE(MAX(number), 0) FROM pull_requests WHERE repo_id = $1`, pr.RepoID).Scan(&maxNum); err != nil {
+		return err
+	}
 	pr.Number = maxNum + 1
 
-	return p.db.QueryRowContext(ctx,
+	if err := tx.QueryRowContext(ctx,
 		`INSERT INTO pull_requests (repo_id, number, title, body, state, author_id, source_branch, target_branch, source_commit, target_commit)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id, created_at`,
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id, created_at`,
 		pr.RepoID, pr.Number, pr.Title, pr.Body, pr.State, pr.AuthorID, pr.SourceBranch, pr.TargetBranch, pr.SourceCommit, pr.TargetCommit).
-		Scan(&pr.ID, &pr.CreatedAt)
+		Scan(&pr.ID, &pr.CreatedAt); err != nil {
+		return err
+	}
+
+	return tx.Commit()
 }
 
 func (p *PostgresDB) GetPullRequest(ctx context.Context, repoID int64, number int) (*models.PullRequest, error) {
 	pr := &models.PullRequest{}
 	err := p.db.QueryRowContext(ctx,
-		`SELECT id, repo_id, number, title, body, state, author_id, source_branch, target_branch, source_commit, target_commit, merge_commit, merge_method, created_at, merged_at
-		 FROM pull_requests WHERE repo_id = $1 AND number = $2`, repoID, number).
-		Scan(&pr.ID, &pr.RepoID, &pr.Number, &pr.Title, &pr.Body, &pr.State, &pr.AuthorID,
+		`SELECT pr.id, pr.repo_id, pr.number, pr.title, pr.body, pr.state, pr.author_id, u.username,
+		        pr.source_branch, pr.target_branch, pr.source_commit, pr.target_commit, pr.merge_commit, pr.merge_method, pr.created_at, pr.merged_at
+		 FROM pull_requests pr
+		 JOIN users u ON u.id = pr.author_id
+		 WHERE pr.repo_id = $1 AND pr.number = $2`, repoID, number).
+		Scan(&pr.ID, &pr.RepoID, &pr.Number, &pr.Title, &pr.Body, &pr.State, &pr.AuthorID, &pr.AuthorName,
 			&pr.SourceBranch, &pr.TargetBranch, &pr.SourceCommit, &pr.TargetCommit,
 			&pr.MergeCommit, &pr.MergeMethod, &pr.CreatedAt, &pr.MergedAt)
 	if err != nil {
@@ -376,14 +401,17 @@ func (p *PostgresDB) GetPullRequest(ctx context.Context, repoID int64, number in
 }
 
 func (p *PostgresDB) ListPullRequests(ctx context.Context, repoID int64, state string) ([]models.PullRequest, error) {
-	query := `SELECT id, repo_id, number, title, body, state, author_id, source_branch, target_branch, source_commit, target_commit, merge_commit, merge_method, created_at, merged_at
-		 FROM pull_requests WHERE repo_id = $1`
+	query := `SELECT pr.id, pr.repo_id, pr.number, pr.title, pr.body, pr.state, pr.author_id, u.username,
+	         pr.source_branch, pr.target_branch, pr.source_commit, pr.target_commit, pr.merge_commit, pr.merge_method, pr.created_at, pr.merged_at
+		 FROM pull_requests pr
+		 JOIN users u ON u.id = pr.author_id
+		 WHERE pr.repo_id = $1`
 	args := []any{repoID}
 	if state != "" {
-		query += ` AND state = $2`
+		query += ` AND pr.state = $2`
 		args = append(args, state)
 	}
-	query += ` ORDER BY number DESC`
+	query += ` ORDER BY pr.number DESC`
 
 	rows, err := p.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -393,7 +421,7 @@ func (p *PostgresDB) ListPullRequests(ctx context.Context, repoID int64, state s
 	var prs []models.PullRequest
 	for rows.Next() {
 		var pr models.PullRequest
-		if err := rows.Scan(&pr.ID, &pr.RepoID, &pr.Number, &pr.Title, &pr.Body, &pr.State, &pr.AuthorID,
+		if err := rows.Scan(&pr.ID, &pr.RepoID, &pr.Number, &pr.Title, &pr.Body, &pr.State, &pr.AuthorID, &pr.AuthorName,
 			&pr.SourceBranch, &pr.TargetBranch, &pr.SourceCommit, &pr.TargetCommit,
 			&pr.MergeCommit, &pr.MergeMethod, &pr.CreatedAt, &pr.MergedAt); err != nil {
 			return nil, err

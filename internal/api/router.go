@@ -46,7 +46,7 @@ func NewServer(db database.DB, authSvc *auth.Service, repoSvc *service.RepoServi
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	handler := auth.Middleware(s.authSvc)(s.mux)
+	handler := requestLoggingMiddleware(auth.Middleware(s.authSvc)(s.mux))
 	handler.ServeHTTP(w, r)
 }
 
@@ -68,6 +68,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("DELETE /api/v1/repos/{owner}/{repo}", s.requireAuth(s.handleDeleteRepo))
 
 	// Code browsing
+	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/branches", s.handleListBranches)
 	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/tree/{ref}/{path...}", s.handleListTree)
 	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/tree/{ref}", s.handleListTree)
 	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/blob/{ref}/{path...}", s.handleGetBlob)
@@ -108,7 +109,7 @@ func (s *Server) routes() {
 	// Got protocol
 	gotProto := gotprotocol.NewHandler(func(owner, repo string) (*gotstore.RepoStore, error) {
 		return s.repoSvc.OpenStore(context.Background(), owner, repo)
-	})
+	}, s.authorizeProtocolRepoAccess)
 	gotProto.RegisterRoutes(s.mux)
 
 	// Git smart HTTP protocol
@@ -127,6 +128,7 @@ func (s *Server) routes() {
 			}
 			return r.ID, nil
 		},
+		s.authorizeProtocolRepoAccess,
 	)
 	gitHandler.RegisterRoutes(s.mux)
 

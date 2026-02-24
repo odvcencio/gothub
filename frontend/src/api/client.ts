@@ -46,6 +46,8 @@ export const listUserRepos = () => request<any[]>('GET', '/user/repos');
 // Browsing
 export const listTree = (owner: string, repo: string, ref: string, path?: string) =>
   request<any[]>('GET', `/repos/${owner}/${repo}/tree/${ref}${path ? '/' + path : ''}`);
+export const listBranches = (owner: string, repo: string) =>
+  request<string[]>('GET', `/repos/${owner}/${repo}/branches`);
 export const getBlob = (owner: string, repo: string, ref: string, path: string) =>
   request<any>('GET', `/repos/${owner}/${repo}/blob/${ref}/${path}`);
 export const listCommits = (owner: string, repo: string, ref: string) =>
@@ -62,8 +64,14 @@ export const getDiff = (owner: string, repo: string, spec: string) =>
 // Pull Requests
 export const createPR = (owner: string, repo: string, data: any) =>
   request<any>('POST', `/repos/${owner}/${repo}/pulls`, data);
-export const listPRs = (owner: string, repo: string, state?: string) =>
-  request<any[]>('GET', `/repos/${owner}/${repo}/pulls${state ? '?state=' + state : ''}`);
+export const listPRs = (owner: string, repo: string, state?: string, page?: number, perPage?: number) => {
+  const query = new URLSearchParams();
+  if (state) query.set('state', state);
+  if (page && page > 0) query.set('page', String(page));
+  if (perPage && perPage > 0) query.set('per_page', String(perPage));
+  const suffix = query.toString();
+  return request<any[]>('GET', `/repos/${owner}/${repo}/pulls${suffix ? '?' + suffix : ''}`);
+};
 export const getPR = (owner: string, repo: string, number: number) =>
   request<any>('GET', `/repos/${owner}/${repo}/pulls/${number}`);
 export const getPRDiff = (owner: string, repo: string, number: number) =>

@@ -25,7 +25,12 @@ export function CodeView({ owner, repo, ref: gitRef, path }: Props) {
     if (isBlobUrl && path) {
       setIsDir(false);
       getBlob(owner, repo, gitRef, path)
-        .then(setBlob)
+        .then((b) => {
+          setBlob({
+            ...b,
+            content: decodeBlobContent(b?.data),
+          });
+        })
         .catch(e => setError(e.message));
     } else {
       setIsDir(true);
@@ -85,4 +90,19 @@ function buildBreadcrumbs(owner: string, repo: string, ref: string, path?: strin
     const subpath = parts.slice(0, i + 1).join('/');
     return { name: part, href: `/${owner}/${repo}/tree/${ref}/${subpath}` };
   });
+}
+
+function decodeBlobContent(data: unknown): string {
+  if (typeof data !== 'string' || data === '') return '';
+
+  try {
+    const binary = atob(data);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return new TextDecoder().decode(bytes);
+  } catch {
+    return '';
+  }
 }

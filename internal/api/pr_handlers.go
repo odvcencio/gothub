@@ -20,12 +20,8 @@ type createPRRequest struct {
 
 func (s *Server) handleCreatePR(w http.ResponseWriter, r *http.Request) {
 	claims := auth.GetClaims(r.Context())
-	owner := r.PathValue("owner")
-	repoName := r.PathValue("repo")
-
-	repo, err := s.repoSvc.Get(r.Context(), owner, repoName)
-	if err != nil {
-		jsonError(w, "repository not found", http.StatusNotFound)
+	repo, ok := s.authorizeRepoRequest(w, r, true)
+	if !ok {
 		return
 	}
 
@@ -51,12 +47,8 @@ func (s *Server) handleCreatePR(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListPRs(w http.ResponseWriter, r *http.Request) {
-	owner := r.PathValue("owner")
-	repoName := r.PathValue("repo")
-
-	repo, err := s.repoSvc.Get(r.Context(), owner, repoName)
-	if err != nil {
-		jsonError(w, "repository not found", http.StatusNotFound)
+	repo, ok := s.authorizeRepoRequest(w, r, false)
+	if !ok {
 		return
 	}
 
@@ -66,17 +58,15 @@ func (s *Server) handleListPRs(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	jsonResponse(w, http.StatusOK, prs)
+	page, perPage := parsePagination(r, 30, 200)
+	jsonResponse(w, http.StatusOK, paginateSlice(prs, page, perPage))
 }
 
 func (s *Server) handleGetPR(w http.ResponseWriter, r *http.Request) {
-	owner := r.PathValue("owner")
-	repoName := r.PathValue("repo")
 	number, _ := strconv.Atoi(r.PathValue("number"))
 
-	repo, err := s.repoSvc.Get(r.Context(), owner, repoName)
-	if err != nil {
-		jsonError(w, "repository not found", http.StatusNotFound)
+	repo, ok := s.authorizeRepoRequest(w, r, false)
+	if !ok {
 		return
 	}
 
@@ -97,9 +87,8 @@ func (s *Server) handlePRDiff(w http.ResponseWriter, r *http.Request) {
 	repoName := r.PathValue("repo")
 	number, _ := strconv.Atoi(r.PathValue("number"))
 
-	repo, err := s.repoSvc.Get(r.Context(), owner, repoName)
-	if err != nil {
-		jsonError(w, "repository not found", http.StatusNotFound)
+	repo, ok := s.authorizeRepoRequest(w, r, false)
+	if !ok {
 		return
 	}
 
@@ -122,9 +111,8 @@ func (s *Server) handleMergePreview(w http.ResponseWriter, r *http.Request) {
 	repoName := r.PathValue("repo")
 	number, _ := strconv.Atoi(r.PathValue("number"))
 
-	repo, err := s.repoSvc.Get(r.Context(), owner, repoName)
-	if err != nil {
-		jsonError(w, "repository not found", http.StatusNotFound)
+	repo, ok := s.authorizeRepoRequest(w, r, false)
+	if !ok {
 		return
 	}
 
@@ -148,9 +136,8 @@ func (s *Server) handleMergePR(w http.ResponseWriter, r *http.Request) {
 	repoName := r.PathValue("repo")
 	number, _ := strconv.Atoi(r.PathValue("number"))
 
-	repo, err := s.repoSvc.Get(r.Context(), owner, repoName)
-	if err != nil {
-		jsonError(w, "repository not found", http.StatusNotFound)
+	repo, ok := s.authorizeRepoRequest(w, r, true)
+	if !ok {
 		return
 	}
 
@@ -191,13 +178,10 @@ type createPRCommentRequest struct {
 
 func (s *Server) handleCreatePRComment(w http.ResponseWriter, r *http.Request) {
 	claims := auth.GetClaims(r.Context())
-	owner := r.PathValue("owner")
-	repoName := r.PathValue("repo")
 	number, _ := strconv.Atoi(r.PathValue("number"))
 
-	repo, err := s.repoSvc.Get(r.Context(), owner, repoName)
-	if err != nil {
-		jsonError(w, "repository not found", http.StatusNotFound)
+	repo, ok := s.authorizeRepoRequest(w, r, true)
+	if !ok {
 		return
 	}
 
@@ -234,13 +218,10 @@ func (s *Server) handleCreatePRComment(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListPRComments(w http.ResponseWriter, r *http.Request) {
-	owner := r.PathValue("owner")
-	repoName := r.PathValue("repo")
 	number, _ := strconv.Atoi(r.PathValue("number"))
 
-	repo, err := s.repoSvc.Get(r.Context(), owner, repoName)
-	if err != nil {
-		jsonError(w, "repository not found", http.StatusNotFound)
+	repo, ok := s.authorizeRepoRequest(w, r, false)
+	if !ok {
 		return
 	}
 
@@ -255,7 +236,8 @@ func (s *Server) handleListPRComments(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	jsonResponse(w, http.StatusOK, comments)
+	page, perPage := parsePagination(r, 50, 200)
+	jsonResponse(w, http.StatusOK, paginateSlice(comments, page, perPage))
 }
 
 // PR Reviews
@@ -268,13 +250,10 @@ type createPRReviewRequest struct {
 
 func (s *Server) handleCreatePRReview(w http.ResponseWriter, r *http.Request) {
 	claims := auth.GetClaims(r.Context())
-	owner := r.PathValue("owner")
-	repoName := r.PathValue("repo")
 	number, _ := strconv.Atoi(r.PathValue("number"))
 
-	repo, err := s.repoSvc.Get(r.Context(), owner, repoName)
-	if err != nil {
-		jsonError(w, "repository not found", http.StatusNotFound)
+	repo, ok := s.authorizeRepoRequest(w, r, true)
+	if !ok {
 		return
 	}
 
@@ -305,13 +284,10 @@ func (s *Server) handleCreatePRReview(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListPRReviews(w http.ResponseWriter, r *http.Request) {
-	owner := r.PathValue("owner")
-	repoName := r.PathValue("repo")
 	number, _ := strconv.Atoi(r.PathValue("number"))
 
-	repo, err := s.repoSvc.Get(r.Context(), owner, repoName)
-	if err != nil {
-		jsonError(w, "repository not found", http.StatusNotFound)
+	repo, ok := s.authorizeRepoRequest(w, r, false)
+	if !ok {
 		return
 	}
 
@@ -326,5 +302,6 @@ func (s *Server) handleListPRReviews(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	jsonResponse(w, http.StatusOK, reviews)
+	page, perPage := parsePagination(r, 50, 200)
+	jsonResponse(w, http.StatusOK, paginateSlice(reviews, page, perPage))
 }

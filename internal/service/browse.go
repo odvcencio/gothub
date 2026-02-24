@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path"
+	"sort"
 	"strings"
 
 	"github.com/odvcencio/got/pkg/object"
@@ -69,6 +70,24 @@ func (s *BrowseService) ResolveRef(ctx context.Context, owner, repo, ref string)
 		return object.Hash(ref), nil
 	}
 	return "", fmt.Errorf("ref not found: %s", ref)
+}
+
+// ListBranches returns all branch names (without the heads/ prefix).
+func (s *BrowseService) ListBranches(ctx context.Context, owner, repo string) ([]string, error) {
+	store, err := s.repoSvc.OpenStore(ctx, owner, repo)
+	if err != nil {
+		return nil, err
+	}
+	refs, err := store.Refs.List("heads")
+	if err != nil {
+		return nil, err
+	}
+	branches := make([]string, 0, len(refs))
+	for refName := range refs {
+		branches = append(branches, strings.TrimPrefix(refName, "heads/"))
+	}
+	sort.Strings(branches)
+	return branches, nil
 }
 
 // ListTree returns the entries of a directory at the given path within a commit.

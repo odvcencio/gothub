@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/odvcencio/gothub/internal/models"
 
@@ -233,13 +235,18 @@ func (s *SQLiteDB) DeleteSSHKey(ctx context.Context, id, userID int64) error {
 func (s *SQLiteDB) CreateRepository(ctx context.Context, r *models.Repository) error {
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO repositories (owner_user_id, owner_org_id, name, description, default_branch, is_private, storage_path)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		r.OwnerUserID, r.OwnerOrgID, r.Name, r.Description, r.DefaultBranch, r.IsPrivate, r.StoragePath)
 	if err != nil {
 		return err
 	}
 	r.ID, _ = res.LastInsertId()
 	return nil
+}
+
+func (s *SQLiteDB) UpdateRepositoryStoragePath(ctx context.Context, id int64, storagePath string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE repositories SET storage_path = ? WHERE id = ?`, storagePath, id)
+	return err
 }
 
 func (s *SQLiteDB) GetRepository(ctx context.Context, ownerName, repoName string) (*models.Repository, error) {
@@ -249,6 +256,19 @@ func (s *SQLiteDB) GetRepository(ctx context.Context, ownerName, repoName string
 		 FROM repositories r
 		 JOIN users u ON u.id = r.owner_user_id
 		 WHERE u.username = ? AND r.name = ?`, ownerName, repoName).
+		Scan(&r.ID, &r.OwnerUserID, &r.OwnerOrgID, &r.Name, &r.Description, &r.DefaultBranch, &r.IsPrivate, &r.StoragePath, &r.CreatedAt, &r.OwnerName)
+	if err == nil {
+		return r, nil
+	}
+	if err != sql.ErrNoRows {
+		return nil, err
+	}
+	// Fallback to org-owned repositories.
+	err = s.db.QueryRowContext(ctx,
+		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at, o.name
+		 FROM repositories r
+		 JOIN orgs o ON o.id = r.owner_org_id
+		 WHERE o.name = ? AND r.name = ?`, ownerName, repoName).
 		Scan(&r.ID, &r.OwnerUserID, &r.OwnerOrgID, &r.Name, &r.Description, &r.DefaultBranch, &r.IsPrivate, &r.StoragePath, &r.CreatedAt, &r.OwnerName)
 	if err != nil {
 		return nil, err
@@ -342,29 +362,80 @@ func (s *SQLiteDB) RemoveCollaborator(ctx context.Context, repoID, userID int64)
 // --- Pull Requests ---
 
 func (s *SQLiteDB) CreatePullRequest(ctx context.Context, pr *models.PullRequest) error {
-	// Auto-assign next PR number for this repo
-	var maxNum int
-	s.db.QueryRowContext(ctx,
-		`SELECT COALESCE(MAX(number), 0) FROM pull_requests WHERE repo_id = ?`, pr.RepoID).Scan(&maxNum)
-	pr.Number = maxNum + 1
+	const maxAttempts = 8
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			if isSQLiteBusyErr(err) && attempt < maxAttempts-1 {
+				time.Sleep(time.Duration(attempt+1) * 5 * time.Millisecond)
+				continue
+			}
+			return err
+		}
 
-	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO pull_requests (repo_id, number, title, body, state, author_id, source_branch, target_branch, source_commit, target_commit)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		pr.RepoID, pr.Number, pr.Title, pr.Body, pr.State, pr.AuthorID, pr.SourceBranch, pr.TargetBranch, pr.SourceCommit, pr.TargetCommit)
-	if err != nil {
-		return err
+		// Allocate number and insert atomically within one transaction.
+		var maxNum int
+		if err := tx.QueryRowContext(ctx,
+			`SELECT COALESCE(MAX(number), 0) FROM pull_requests WHERE repo_id = ?`, pr.RepoID).Scan(&maxNum); err != nil {
+			tx.Rollback()
+			if isSQLiteBusyErr(err) && attempt < maxAttempts-1 {
+				time.Sleep(time.Duration(attempt+1) * 5 * time.Millisecond)
+				continue
+			}
+			return err
+		}
+		pr.Number = maxNum + 1
+
+		res, err := tx.ExecContext(ctx,
+			`INSERT INTO pull_requests (repo_id, number, title, body, state, author_id, source_branch, target_branch, source_commit, target_commit)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			pr.RepoID, pr.Number, pr.Title, pr.Body, pr.State, pr.AuthorID, pr.SourceBranch, pr.TargetBranch, pr.SourceCommit, pr.TargetCommit)
+		if err != nil {
+			tx.Rollback()
+			if (isSQLiteBusyErr(err) || isPRNumberUniqueConstraintErr(err)) && attempt < maxAttempts-1 {
+				time.Sleep(time.Duration(attempt+1) * 5 * time.Millisecond)
+				continue
+			}
+			return err
+		}
+		pr.ID, _ = res.LastInsertId()
+
+		if err := tx.Commit(); err != nil {
+			if (isSQLiteBusyErr(err) || isPRNumberUniqueConstraintErr(err)) && attempt < maxAttempts-1 {
+				time.Sleep(time.Duration(attempt+1) * 5 * time.Millisecond)
+				continue
+			}
+			return err
+		}
+		return nil
 	}
-	pr.ID, _ = res.LastInsertId()
-	return nil
+	return fmt.Errorf("create pull request: retries exhausted")
+}
+
+func isSQLiteBusyErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "SQLITE_BUSY") || strings.Contains(s, "database is locked")
+}
+
+func isPRNumberUniqueConstraintErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "UNIQUE constraint failed: pull_requests.repo_id, pull_requests.number")
 }
 
 func (s *SQLiteDB) GetPullRequest(ctx context.Context, repoID int64, number int) (*models.PullRequest, error) {
 	pr := &models.PullRequest{}
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, repo_id, number, title, body, state, author_id, source_branch, target_branch, source_commit, target_commit, merge_commit, merge_method, created_at, merged_at
-		 FROM pull_requests WHERE repo_id = ? AND number = ?`, repoID, number).
-		Scan(&pr.ID, &pr.RepoID, &pr.Number, &pr.Title, &pr.Body, &pr.State, &pr.AuthorID,
+		`SELECT pr.id, pr.repo_id, pr.number, pr.title, pr.body, pr.state, pr.author_id, u.username,
+		        pr.source_branch, pr.target_branch, pr.source_commit, pr.target_commit, pr.merge_commit, pr.merge_method, pr.created_at, pr.merged_at
+		 FROM pull_requests pr
+		 JOIN users u ON u.id = pr.author_id
+		 WHERE pr.repo_id = ? AND pr.number = ?`, repoID, number).
+		Scan(&pr.ID, &pr.RepoID, &pr.Number, &pr.Title, &pr.Body, &pr.State, &pr.AuthorID, &pr.AuthorName,
 			&pr.SourceBranch, &pr.TargetBranch, &pr.SourceCommit, &pr.TargetCommit,
 			&pr.MergeCommit, &pr.MergeMethod, &pr.CreatedAt, &pr.MergedAt)
 	if err != nil {
@@ -374,14 +445,17 @@ func (s *SQLiteDB) GetPullRequest(ctx context.Context, repoID int64, number int)
 }
 
 func (s *SQLiteDB) ListPullRequests(ctx context.Context, repoID int64, state string) ([]models.PullRequest, error) {
-	query := `SELECT id, repo_id, number, title, body, state, author_id, source_branch, target_branch, source_commit, target_commit, merge_commit, merge_method, created_at, merged_at
-		 FROM pull_requests WHERE repo_id = ?`
+	query := `SELECT pr.id, pr.repo_id, pr.number, pr.title, pr.body, pr.state, pr.author_id, u.username,
+	         pr.source_branch, pr.target_branch, pr.source_commit, pr.target_commit, pr.merge_commit, pr.merge_method, pr.created_at, pr.merged_at
+		 FROM pull_requests pr
+		 JOIN users u ON u.id = pr.author_id
+		 WHERE pr.repo_id = ?`
 	args := []any{repoID}
 	if state != "" {
-		query += ` AND state = ?`
+		query += ` AND pr.state = ?`
 		args = append(args, state)
 	}
-	query += ` ORDER BY number DESC`
+	query += ` ORDER BY pr.number DESC`
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -391,7 +465,7 @@ func (s *SQLiteDB) ListPullRequests(ctx context.Context, repoID int64, state str
 	var prs []models.PullRequest
 	for rows.Next() {
 		var pr models.PullRequest
-		if err := rows.Scan(&pr.ID, &pr.RepoID, &pr.Number, &pr.Title, &pr.Body, &pr.State, &pr.AuthorID,
+		if err := rows.Scan(&pr.ID, &pr.RepoID, &pr.Number, &pr.Title, &pr.Body, &pr.State, &pr.AuthorID, &pr.AuthorName,
 			&pr.SourceBranch, &pr.TargetBranch, &pr.SourceCommit, &pr.TargetCommit,
 			&pr.MergeCommit, &pr.MergeMethod, &pr.CreatedAt, &pr.MergedAt); err != nil {
 			return nil, err

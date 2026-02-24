@@ -43,6 +43,9 @@ func cmdServe(args []string) {
 	if err != nil {
 		log.Fatalf("load config: %v", err)
 	}
+	if err := validateServeConfig(cfg); err != nil {
+		log.Fatalf("invalid config: %v", err)
+	}
 
 	db, err := openDB(cfg)
 	if err != nil {
@@ -120,4 +123,17 @@ func openDB(cfg *config.Config) (database.DB, error) {
 	default:
 		return nil, fmt.Errorf("unsupported database driver: %s", cfg.Database.Driver)
 	}
+}
+
+func validateServeConfig(cfg *config.Config) error {
+	if cfg.Auth.JWTSecret == "" || cfg.Auth.JWTSecret == "change-me-in-production" {
+		return fmt.Errorf("GOTHUB_JWT_SECRET must be set to a non-default value")
+	}
+	if len(cfg.Auth.JWTSecret) < 16 {
+		return fmt.Errorf("GOTHUB_JWT_SECRET must be at least 16 characters")
+	}
+	if cfg.Storage.Path == "" {
+		return fmt.Errorf("storage.path must be configured")
+	}
+	return nil
 }

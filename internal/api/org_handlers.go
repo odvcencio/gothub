@@ -65,7 +65,8 @@ func (s *Server) handleListUserOrgs(w http.ResponseWriter, r *http.Request) {
 	if orgs == nil {
 		orgs = []models.Org{}
 	}
-	jsonResponse(w, http.StatusOK, orgs)
+	page, perPage := parsePagination(r, 30, 200)
+	jsonResponse(w, http.StatusOK, paginateSlice(orgs, page, perPage))
 }
 
 func (s *Server) handleDeleteOrg(w http.ResponseWriter, r *http.Request) {
@@ -116,7 +117,8 @@ func (s *Server) handleListOrgMembers(w http.ResponseWriter, r *http.Request) {
 	if members == nil {
 		members = []models.OrgMember{}
 	}
-	jsonResponse(w, http.StatusOK, members)
+	page, perPage := parsePagination(r, 50, 200)
+	jsonResponse(w, http.StatusOK, paginateSlice(members, page, perPage))
 }
 
 func (s *Server) handleAddOrgMember(w http.ResponseWriter, r *http.Request) {
@@ -226,5 +228,29 @@ func (s *Server) handleListOrgRepos(w http.ResponseWriter, r *http.Request) {
 	if repos == nil {
 		repos = []models.Repository{}
 	}
-	jsonResponse(w, http.StatusOK, repos)
+	claims := auth.GetClaims(r.Context())
+	if claims == nil {
+		visible := repos[:0]
+		for _, repo := range repos {
+			if !repo.IsPrivate {
+				visible = append(visible, repo)
+			}
+		}
+		repos = visible
+	} else if _, err := s.db.GetOrgMember(r.Context(), org.ID, claims.UserID); err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			jsonError(w, "failed to verify org membership", http.StatusInternalServerError)
+			return
+		}
+		visible := repos[:0]
+		for _, repo := range repos {
+			if !repo.IsPrivate {
+				visible = append(visible, repo)
+			}
+		}
+		repos = visible
+	}
+
+	page, perPage := parsePagination(r, 30, 200)
+	jsonResponse(w, http.StatusOK, paginateSlice(repos, page, perPage))
 }

@@ -49,7 +49,9 @@ func (s *RepoService) Create(ctx context.Context, ownerID int64, name, descripti
 		return nil, fmt.Errorf("init repo store: %w", err)
 	}
 
-	// TODO: update storage_path in DB (for now it works since Open creates the dirs)
+	if err := s.db.UpdateRepositoryStoragePath(ctx, repo.ID, repo.StoragePath); err != nil {
+		return nil, fmt.Errorf("persist storage path: %w", err)
+	}
 
 	return repo, nil
 }
@@ -75,6 +77,10 @@ func (s *RepoService) OpenStore(ctx context.Context, owner, name string) (*gotst
 	repo, err := s.db.GetRepository(ctx, owner, name)
 	if err != nil {
 		return nil, fmt.Errorf("repo %s/%s: %w", owner, name, err)
+	}
+	// Backward compatibility: older rows may still have "pending".
+	if repo.StoragePath == "" || repo.StoragePath == "pending" {
+		repo.StoragePath = filepath.Join(s.storagePath, fmt.Sprintf("%d", repo.ID))
 	}
 	return gotstore.Open(repo.StoragePath)
 }

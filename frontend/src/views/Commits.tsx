@@ -50,9 +50,10 @@ export function CommitsView({ owner, repo, ref: gitRef }: Props) {
   );
 }
 
-function formatDate(ts: string): string {
+function formatDate(ts: unknown): string {
   if (!ts) return '';
-  const d = new Date(ts);
+  const d = commitTimestampToDate(ts);
+  if (Number.isNaN(d.getTime())) return '';
   const now = new Date();
   const diff = now.getTime() - d.getTime();
   const days = Math.floor(diff / 86400000);
@@ -60,4 +61,18 @@ function formatDate(ts: string): string {
   if (days === 1) return 'yesterday';
   if (days < 30) return `${days} days ago`;
   return d.toLocaleDateString();
+}
+
+function commitTimestampToDate(ts: unknown): Date {
+  if (typeof ts === 'number') {
+    return new Date(ts < 1e12 ? ts * 1000 : ts);
+  }
+  if (typeof ts === 'string') {
+    const n = Number(ts);
+    if (!Number.isNaN(n)) {
+      return new Date(n < 1e12 ? n * 1000 : n);
+    }
+    return new Date(ts);
+  }
+  return new Date(NaN);
 }
