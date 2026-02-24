@@ -32,6 +32,11 @@ type refUpdate struct {
 	storageRef       string
 }
 
+const (
+	maxReceivePackBytes int64 = 256 << 20
+	maxUploadPackBytes  int64 = 8 << 20
+)
+
 func NewSmartHTTPHandler(
 	getStore func(owner, repo string) (*gotstore.RepoStore, error),
 	db database.DB,
@@ -134,7 +139,7 @@ func (h *SmartHTTPHandler) handleReceivePack(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	br := bufio.NewReader(r.Body)
+	br := bufio.NewReader(http.MaxBytesReader(w, r.Body, maxReceivePackBytes))
 
 	// Read ref update commands
 	var updates []refUpdate
@@ -142,6 +147,10 @@ func (h *SmartHTTPHandler) handleReceivePack(w http.ResponseWriter, r *http.Requ
 	for {
 		line, err := readPktLine(br)
 		if err != nil {
+			if isRequestTooLarge(err) {
+				http.Error(w, "request too large", http.StatusRequestEntityTooLarge)
+				return
+			}
 			http.Error(w, "protocol error", http.StatusBadRequest)
 			return
 		}
@@ -168,6 +177,10 @@ func (h *SmartHTTPHandler) handleReceivePack(w http.ResponseWriter, r *http.Requ
 	// Read packfile (rest of body)
 	packData, err := io.ReadAll(br)
 	if err != nil {
+		if isRequestTooLarge(err) {
+			http.Error(w, "request too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "read packfile error", http.StatusBadRequest)
 		return
 	}
@@ -351,7 +364,7 @@ func (h *SmartHTTPHandler) handleUploadPack(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	br := bufio.NewReader(r.Body)
+	br := bufio.NewReader(http.MaxBytesReader(w, r.Body, maxUploadPackBytes))
 
 	// Read want/have negotiation
 	var wants []GitHash
@@ -360,6 +373,10 @@ func (h *SmartHTTPHandler) handleUploadPack(w http.ResponseWriter, r *http.Reque
 	for {
 		line, err := readPktLine(br)
 		if err != nil {
+			if isRequestTooLarge(err) {
+				http.Error(w, "request too large", http.StatusRequestEntityTooLarge)
+				return
+			}
 			http.Error(w, "protocol error", http.StatusBadRequest)
 			return
 		}
@@ -383,7 +400,14 @@ func (h *SmartHTTPHandler) handleUploadPack(w http.ResponseWriter, r *http.Reque
 	// Read remaining "done" if not already consumed
 	for {
 		line, err := readPktLine(br)
-		if err != nil || line == nil {
+		if err != nil {
+			if isRequestTooLarge(err) {
+				http.Error(w, "request too large", http.StatusRequestEntityTooLarge)
+				return
+			}
+			break
+		}
+		if line == nil {
 			break
 		}
 		if strings.TrimSpace(string(line)) == "done" {
@@ -875,4 +899,9 @@ func advertiseGitRefName(storageRef string) string {
 		return storageRef
 	}
 	return "refs/" + storageRef
+}
+
+func isRequestTooLarge(err error) bool {
+	var maxErr *http.MaxBytesError
+	return errors.As(err, &maxErr)
 }

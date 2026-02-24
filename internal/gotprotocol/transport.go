@@ -17,6 +17,7 @@ const (
 	maxPushBodyBytes   int64 = 64 << 20
 	maxPushObjectBytes int   = 16 << 20
 	maxPushObjectCount int   = 50000
+	maxRefUpdateBytes  int64 = 4 << 20
 )
 
 // Handler provides HTTP endpoints for the Got protocol (push/pull).
@@ -168,7 +169,7 @@ func (h *Handler) handleUpdateRefs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var updates map[string]string
-	if err := json.NewDecoder(r.Body).Decode(&updates); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRefUpdateBytes)).Decode(&updates); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
