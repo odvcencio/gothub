@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -973,6 +974,88 @@ func TestProtocolAuthForbiddenForPrivateRepoNonMember(t *testing.T) {
 		t.Fatalf("non-member got batch fetch on private repo: expected 403, got %d", resp.StatusCode)
 	}
 	resp.Body.Close()
+
+	req, _ = http.NewRequest("GET", ts.URL+"/git/alice/private-repo/info/refs?service=git-upload-pack", nil)
+	req.Header.Set("Authorization", "Bearer "+bobToken)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("non-member git info/refs on private repo: expected 403, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	req, _ = http.NewRequest("GET", ts.URL+"/got/alice/missing-repo/refs", nil)
+	req.Header.Set("Authorization", "Bearer "+bobToken)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("got refs on missing repo: expected 404, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	req, _ = http.NewRequest("GET", ts.URL+"/git/alice/missing-repo/info/refs?service=git-upload-pack", nil)
+	req.Header.Set("Authorization", "Bearer "+bobToken)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("git info/refs on missing repo: expected 404, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestGitSmartHTTPMaskedNotFoundAuthMapsToForbiddenWhenRepoExists(t *testing.T) {
+	store, err := gotstore.Open(t.TempDir() + "/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	authorizeMasked := func(r *http.Request, owner, repo string, write bool) (int, error) {
+		return http.StatusNotFound, errors.New("repository not found")
+	}
+	getStore := func(ownerArg, repoArg string) (*gotstore.RepoStore, error) {
+		if ownerArg == "alice" && repoArg == "repo" {
+			return store, nil
+		}
+		return nil, errors.New("repository not found")
+	}
+
+	h := gitinterop.NewSmartHTTPHandler(
+		getStore,
+		nil,
+		func(ctx context.Context, owner, repo string) (int64, error) {
+			return 1, nil
+		},
+		authorizeMasked,
+		nil,
+	)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/git/alice/repo/info/refs?service=git-upload-pack")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("masked not-found auth for existing repo: expected 403, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	resp, err = http.Get(ts.URL + "/git/alice/missing-repo/info/refs?service=git-upload-pack")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("masked not-found auth for missing repo: expected 404, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
 }
 
 func TestPrivateRepoReadAccessAcrossAPI(t *testing.T) {
@@ -1688,7 +1771,17 @@ func TestGitUploadPackReturnsErrorOnCorruptObjectGraph(t *testing.T) {
 	if resp.StatusCode != http.StatusUnprocessableEntity {
 		t.Fatalf("git upload-pack: expected 422 for corrupt graph, got %d", resp.StatusCode)
 	}
+	if !strings.Contains(resp.Header.Get("Content-Type"), "application/x-git-upload-pack-result") {
+		t.Fatalf("git upload-pack: expected upload-pack result content-type, got %q", resp.Header.Get("Content-Type"))
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
 	resp.Body.Close()
+	if !bytes.Contains(body, []byte("ERR invalid object graph")) {
+		t.Fatalf("git upload-pack: expected protocol ERR packet with object graph detail, got %q", string(body))
+	}
 }
 
 func TestGitUploadPackUsesSidebandWhenRequested(t *testing.T) {
