@@ -27,7 +27,7 @@ func (s *IssueService) Create(ctx context.Context, repoID, authorID int64, title
 		RepoID:   repoID,
 		Title:    title,
 		Body:     body,
-		State:    "open",
+		State:    models.IssueStateOpen,
 		AuthorID: authorID,
 	}
 	if err := s.db.CreateIssue(ctx, issue); err != nil {
@@ -41,7 +41,7 @@ func (s *IssueService) Get(ctx context.Context, repoID int64, number int) (*mode
 }
 
 func (s *IssueService) List(ctx context.Context, repoID int64, state string, page, perPage int) ([]models.Issue, error) {
-	if state != "" && state != "open" && state != "closed" {
+	if state != "" && !models.IsIssueState(state) {
 		return nil, fmt.Errorf("state must be open or closed")
 	}
 	limit, offset := normalizePage(page, perPage, 30, 200)
@@ -53,9 +53,9 @@ func (s *IssueService) Update(ctx context.Context, issue *models.Issue) error {
 		return fmt.Errorf("title is required")
 	}
 	switch issue.State {
-	case "open":
+	case models.IssueStateOpen:
 		issue.ClosedAt = nil
-	case "closed":
+	case models.IssueStateClosed:
 		if issue.ClosedAt == nil {
 			now := time.Now()
 			issue.ClosedAt = &now

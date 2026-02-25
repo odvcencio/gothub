@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/odvcencio/gothub/internal/auth"
+	"github.com/odvcencio/gothub/internal/models"
 )
 
 type createIssueRequest struct {
@@ -40,7 +41,7 @@ func (s *Server) handleCreateIssue(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.runWebhookAsync(r.Context(), "webhook issue opened", []any{"repo_id", repo.ID, "issue", issue.Number}, func(ctx context.Context) error {
-		return s.webhookSvc.EmitIssueEvent(ctx, repo.ID, "opened", issue.Number, issue.Title, issue.Body, "open")
+		return s.webhookSvc.EmitIssueEvent(ctx, repo.ID, models.WebhookActionOpened, issue.Number, issue.Title, issue.Body, models.IssueStateOpen)
 	})
 	s.publishRepoEvent(repo.ID, "issue.opened", map[string]any{
 		"number": issue.Number,
@@ -136,14 +137,7 @@ func (s *Server) handleUpdateIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	action := "edited"
-	if beforeState != issue.State {
-		if issue.State == "closed" {
-			action = "closed"
-		} else if issue.State == "open" {
-			action = "reopened"
-		}
-	}
+	action := issueWebhookAction(beforeState, issue.State)
 	s.runWebhookAsync(r.Context(), "webhook issue event", []any{"repo_id", repo.ID, "issue", issue.Number, "action", action}, func(ctx context.Context) error {
 		return s.webhookSvc.EmitIssueEvent(ctx, repo.ID, action, issue.Number, issue.Title, issue.Body, issue.State)
 	})
@@ -235,4 +229,18 @@ func (s *Server) handleListIssueComments(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	jsonResponse(w, http.StatusOK, comments)
+}
+
+func issueWebhookAction(beforeState, afterState string) string {
+	if beforeState == afterState {
+		return models.WebhookActionEdited
+	}
+	switch afterState {
+	case models.IssueStateClosed:
+		return models.WebhookActionClosed
+	case models.IssueStateOpen:
+		return models.WebhookActionReopened
+	default:
+		return models.WebhookActionEdited
+	}
 }

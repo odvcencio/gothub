@@ -93,6 +93,58 @@ type Collaborator struct {
 	Role   string `json:"role"` // "admin", "write", "read"
 }
 
+const (
+	PullRequestStateOpen   = "open"
+	PullRequestStateClosed = "closed"
+	PullRequestStateMerged = "merged"
+)
+
+const (
+	IssueStateOpen   = "open"
+	IssueStateClosed = "closed"
+)
+
+const (
+	ReviewStateApproved         = "approved"
+	ReviewStateChangesRequested = "changes_requested"
+	ReviewStateCommented        = "commented"
+)
+
+const (
+	WebhookActionOpened   = "opened"
+	WebhookActionEdited   = "edited"
+	WebhookActionClosed   = "closed"
+	WebhookActionReopened = "reopened"
+	WebhookActionMerged   = "merged"
+)
+
+func IsIssueState(state string) bool {
+	switch state {
+	case IssueStateOpen, IssueStateClosed:
+		return true
+	default:
+		return false
+	}
+}
+
+func IsPullRequestState(state string) bool {
+	switch state {
+	case PullRequestStateOpen, PullRequestStateClosed, PullRequestStateMerged:
+		return true
+	default:
+		return false
+	}
+}
+
+func IsPRReviewState(state string) bool {
+	switch state {
+	case ReviewStateApproved, ReviewStateChangesRequested, ReviewStateCommented:
+		return true
+	default:
+		return false
+	}
+}
+
 type PullRequest struct {
 	ID           int64      `json:"id"`
 	RepoID       int64      `json:"repo_id"`

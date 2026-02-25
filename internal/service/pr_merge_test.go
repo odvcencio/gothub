@@ -117,7 +117,7 @@ func TestPRMergeStateSyncErrorRollsBackTargetRefOnDBFailure(t *testing.T) {
 		RepoID:       repo.ID,
 		Title:        "merge db failure",
 		Body:         "",
-		State:        "open",
+		State:        models.PullRequestStateOpen,
 		AuthorID:     1,
 		SourceBranch: "feature",
 		TargetBranch: "main",
@@ -169,14 +169,14 @@ func TestPRMergeStateSyncErrorRollsBackTargetRefOnDBFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if persisted.State != "open" {
+	if persisted.State != models.PullRequestStateOpen {
 		t.Fatalf("db PR state should remain open, got %q", persisted.State)
 	}
 	if persisted.MergeCommit != "" {
 		t.Fatalf("db PR merge_commit should remain empty, got %q", persisted.MergeCommit)
 	}
 
-	if pr.State != "open" {
+	if pr.State != models.PullRequestStateOpen {
 		t.Fatalf("input PR state should remain open on failed state sync, got %q", pr.State)
 	}
 	if pr.MergeCommit != "" {
@@ -202,7 +202,7 @@ func TestPRMergeStateSyncErrorSurfacesDesyncWhenRollbackFails(t *testing.T) {
 		RepoID:       repo.ID,
 		Title:        "merge db failure rollback failure",
 		Body:         "",
-		State:        "open",
+		State:        models.PullRequestStateOpen,
 		AuthorID:     1,
 		SourceBranch: "feature",
 		TargetBranch: "main",
@@ -278,14 +278,14 @@ func TestPRMergeStateSyncErrorSurfacesDesyncWhenRollbackFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if persisted.State != "open" {
+	if persisted.State != models.PullRequestStateOpen {
 		t.Fatalf("db PR state should remain open, got %q", persisted.State)
 	}
 	if persisted.MergeCommit != "" {
 		t.Fatalf("db PR merge_commit should remain empty, got %q", persisted.MergeCommit)
 	}
 
-	if pr.State != "open" {
+	if pr.State != models.PullRequestStateOpen {
 		t.Fatalf("input PR state should remain open on failed state sync, got %q", pr.State)
 	}
 	if pr.MergeCommit != "" {

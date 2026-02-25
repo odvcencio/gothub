@@ -196,7 +196,7 @@ func (s *PRService) Create(ctx context.Context, repoID, authorID int64, title, b
 		RepoID:       repoID,
 		Title:        title,
 		Body:         body,
-		State:        "open",
+		State:        models.PullRequestStateOpen,
 		AuthorID:     authorID,
 		SourceBranch: srcBranch,
 		TargetBranch: tgtBranch,
@@ -513,7 +513,7 @@ func (s *PRService) Merge(ctx context.Context, owner, repo string, pr *models.Pu
 	// Update PR state
 	mergedPR := *pr
 	now := time.Now()
-	mergedPR.State = "merged"
+	mergedPR.State = models.PullRequestStateMerged
 	mergedPR.MergeCommit = string(mergeCommitHash)
 	mergedPR.MergeMethod = "structural"
 	mergedPR.MergedAt = &now

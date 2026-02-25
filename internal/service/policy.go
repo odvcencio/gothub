@@ -225,7 +225,7 @@ func (s *PRService) evaluateEntityOwnerApprovals(ctx context.Context, repoID int
 		if authorID == pr.AuthorID {
 			continue
 		}
-		if strings.EqualFold(strings.TrimSpace(review.State), "approved") {
+		if strings.EqualFold(strings.TrimSpace(review.State), models.ReviewStateApproved) {
 			u := strings.ToLower(strings.TrimSpace(review.AuthorName))
 			if u != "" {
 				approvedUsers[u] = true
@@ -844,9 +844,9 @@ func evaluateApprovals(reviews []models.PRReview, prAuthorID int64) (approvals i
 			continue
 		}
 		switch strings.ToLower(strings.TrimSpace(review.State)) {
-		case "approved":
+		case models.ReviewStateApproved:
 			approvals++
-		case "changes_requested":
+		case models.ReviewStateChangesRequested:
 			hasChangesRequested = true
 		}
 	}

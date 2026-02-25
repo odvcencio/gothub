@@ -52,7 +52,7 @@ func (s *Server) handleCreatePR(w http.ResponseWriter, r *http.Request) {
 
 	// Best-effort webhook emission; does not block PR creation success.
 	s.runWebhookAsync(r.Context(), "webhook pr opened", []any{"repo_id", repo.ID, "pr", pr.Number}, func(ctx context.Context) error {
-		return s.webhookSvc.EmitPullRequestEvent(ctx, repo.ID, "opened", pr)
+		return s.webhookSvc.EmitPullRequestEvent(ctx, repo.ID, models.WebhookActionOpened, pr)
 	})
 	s.publishRepoEvent(repo.ID, "pull_request.opened", map[string]any{
 		"number":        pr.Number,
@@ -202,7 +202,7 @@ func (s *Server) handleMergePR(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "pull request not found", http.StatusNotFound)
 		return
 	}
-	if pr.State != "open" {
+	if pr.State != models.PullRequestStateOpen {
 		jsonError(w, "pull request is not open", http.StatusBadRequest)
 		return
 	}
@@ -231,12 +231,12 @@ func (s *Server) handleMergePR(w http.ResponseWriter, r *http.Request) {
 
 	jsonResponse(w, http.StatusOK, map[string]string{
 		"merge_commit": string(mergeHash),
-		"status":       "merged",
+		"status":       models.PullRequestStateMerged,
 	})
 	s.publishRepoEvent(repo.ID, "pull_request.merged", map[string]any{
 		"number":        pr.Number,
 		"title":         pr.Title,
-		"state":         "merged",
+		"state":         models.PullRequestStateMerged,
 		"merge_commit":  string(mergeHash),
 		"source_branch": pr.SourceBranch,
 		"target_branch": pr.TargetBranch,
@@ -244,7 +244,7 @@ func (s *Server) handleMergePR(w http.ResponseWriter, r *http.Request) {
 
 	// Best-effort webhook emission after merge.
 	s.runWebhookAsync(r.Context(), "webhook pr merged", []any{"repo_id", repo.ID, "pr", pr.Number}, func(ctx context.Context) error {
-		return s.webhookSvc.EmitPullRequestEvent(ctx, repo.ID, "merged", pr)
+		return s.webhookSvc.EmitPullRequestEvent(ctx, repo.ID, models.WebhookActionMerged, pr)
 	})
 }
 
@@ -269,7 +269,7 @@ func (s *Server) handleUpdatePR(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	if pr.State != "open" {
+	if pr.State != models.PullRequestStateOpen {
 		jsonError(w, "pull request is not open", http.StatusConflict)
 		return
 	}
