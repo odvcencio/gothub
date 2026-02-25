@@ -7,6 +7,7 @@ import {
   type RepoCreationPolicy,
   type APIUser,
 } from '../api/client';
+import { useRef, useCallback } from 'preact/hooks';
 
 interface Props {
   path?: string;
@@ -219,7 +220,12 @@ export function NewRepoView(_props: Props) {
                 {policy.private_reason}
               </div>
             )}
-            <div id="polar-checkout-mount" />
+            <PolarCheckout onSuccess={async () => {
+              try {
+                const p = await getRepoCreationPolicy();
+                setPolicy(p);
+              } catch {}
+            }} />
           </div>
         )}
 
@@ -336,3 +342,71 @@ const quotaContainerStyle = {
   border: '1px solid #30363d',
   borderRadius: '6px',
 };
+
+function PolarCheckout({ onSuccess }: { onSuccess: () => void }) {
+  const [scriptLoading, setScriptLoading] = useState(true);
+  const [checkoutError, setCheckoutError] = useState('');
+  const loaded = useRef(false);
+
+  const loadScript = useCallback(() => {
+    if (loaded.current || (window as any).Polar) {
+      setScriptLoading(false);
+      return;
+    }
+    const script = document.createElement('script');
+    script.src = 'https://checkout.polar.sh/embed.js';
+    script.async = true;
+    script.onload = () => { loaded.current = true; setScriptLoading(false); };
+    script.onerror = () => { setCheckoutError('Failed to load checkout.'); setScriptLoading(false); };
+    document.head.appendChild(script);
+  }, []);
+
+  useEffect(() => { loadScript(); }, [loadScript]);
+
+  if (scriptLoading) {
+    return <div style={{ color: '#8b949e', fontSize: '13px' }}>Loading checkout...</div>;
+  }
+  if (checkoutError) {
+    return <div style={{ color: '#f85149', fontSize: '13px' }}>{checkoutError}</div>;
+  }
+
+  return (
+    <div style={{ marginTop: '8px' }}>
+      <a
+        href="https://polar.sh/odvcencio/checkout?product=gothub-pro"
+        data-polar-checkout
+        data-polar-checkout-theme="dark"
+        style={{
+          display: 'inline-block',
+          background: '#1f6feb',
+          color: '#fff',
+          padding: '8px 16px',
+          borderRadius: '6px',
+          fontWeight: 600,
+          fontSize: '14px',
+          textDecoration: 'none',
+          cursor: 'pointer',
+        }}
+      >
+        Subscribe to GotHub Pro
+      </a>
+      <div style={{ marginTop: '8px' }}>
+        <button
+          type="button"
+          onClick={onSuccess}
+          style={{
+            background: 'transparent',
+            color: '#58a6ff',
+            border: 'none',
+            padding: '4px 0',
+            cursor: 'pointer',
+            fontSize: '13px',
+            textDecoration: 'underline',
+          }}
+        >
+          I already subscribed — refresh status
+        </button>
+      </div>
+    </div>
+  );
+}
