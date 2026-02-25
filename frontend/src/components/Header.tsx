@@ -46,7 +46,7 @@ export function Header() {
             </button>
           </>
         ) : (
-          <a href="/" style={{ color: '#c9d1d9' }}>Sign in</a>
+          <a href="/login" style={{ color: '#c9d1d9' }}>Sign in</a>
         )}
       </nav>
     </header>

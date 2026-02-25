@@ -1,290 +1,30 @@
 import { useState, useEffect } from 'preact/hooks';
 import {
-  login,
-  register,
-  requestMagicLink,
-  verifyMagicLink,
-  beginWebAuthnLogin,
-  finishWebAuthnLogin,
-  getAuthCapabilities,
-  createInterestSignup,
-  setToken,
   getToken,
   listUserRepos,
+  getRepoCreationPolicy,
   createRepo,
   getRepo,
   listPRs,
   listTree,
   searchSymbols,
   type PullRequest,
+  type RepoCreationPolicy,
   type Repository,
   type TreeEntry,
 } from '../api/client';
-import { browserSupportsPasskeys, getPasskeyAssertion } from '../lib/webauthn';
+import { Landing } from './Landing';
 
 export function Home() {
   const loggedIn = !!getToken();
 
   if (loggedIn) return <Dashboard />;
-  return <AuthForm />;
-}
-
-function AuthForm() {
-  const [mode, setMode] = useState<'login' | 'register'>('login');
-  const [username, setUsername] = useState('');
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [magicToken, setMagicToken] = useState('');
-  const [magicSent, setMagicSent] = useState(false);
-  const [authCapabilities, setAuthCapabilities] = useState({
-    passwordAuthEnabled: false,
-    magicLinkEnabled: true,
-    passkeyEnabled: true,
-  });
-  const [info, setInfo] = useState('');
-  const [notice, setNotice] = useState('');
-  const [error, setError] = useState('');
-  const [submitting, setSubmitting] = useState(false);
-  const [interestEmail, setInterestEmail] = useState('');
-  const [interestName, setInterestName] = useState('');
-  const [interestSubmitting, setInterestSubmitting] = useState(false);
-  const [interestInfo, setInterestInfo] = useState('');
-  const [interestError, setInterestError] = useState('');
-  const sessionExpired = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('session') === 'expired';
-  const passkeysAvailable = browserSupportsPasskeys() && authCapabilities.passkeyEnabled;
-  const passwordAuthEnabled = authCapabilities.passwordAuthEnabled;
-  const passkeyLabel = !authCapabilities.passkeyEnabled
-    ? 'Passkeys disabled by server'
-    : passkeysAvailable
-      ? 'Sign in with passkey'
-      : 'Passkeys unavailable in this browser';
-
-  useEffect(() => {
-    getAuthCapabilities()
-      .then((caps) =>
-        setAuthCapabilities({
-          passwordAuthEnabled: !!caps.password_auth_enabled,
-          magicLinkEnabled: !!caps.magic_link_enabled,
-          passkeyEnabled: !!caps.passkey_enabled,
-        })
-      )
-      .catch((e: any) => {
-        setAuthCapabilities({
-          passwordAuthEnabled: false,
-          magicLinkEnabled: true,
-          passkeyEnabled: true,
-        });
-        setNotice(e?.message || 'Some sign-in methods could not be verified. Showing fallback options.');
-      });
-  }, []);
-
-  const completeAuth = (tokenValue: string) => {
-    setToken(tokenValue);
-    if (typeof window !== 'undefined') {
-      window.location.assign(resolvePostAuthRedirect());
-    }
-  };
-
-  const submitLegacy = async (e: Event) => {
-    e.preventDefault();
-    setError('');
-    setInfo('');
-    setNotice('');
-    setSubmitting(true);
-    try {
-      const res = mode === 'login'
-        ? await login(username, password)
-        : await register(username, email, password);
-      completeAuth(res.token);
-    } catch (err: any) {
-      setError(err.message);
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const submitMagicRequest = async (e: Event) => {
-    e.preventDefault();
-    setError('');
-    setInfo('');
-    setNotice('');
-    setSubmitting(true);
-    try {
-      const res = await requestMagicLink(email);
-      setMagicSent(true);
-      if (res.token) setMagicToken(res.token);
-      setInfo(res.token
-        ? 'Magic link token generated for local/dev mode. Verify below.'
-        : 'Magic link sent. Check your inbox.');
-    } catch (err: any) {
-      setError(err.message);
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const submitMagicVerify = async (e: Event) => {
-    e.preventDefault();
-    setError('');
-    setInfo('');
-    setNotice('');
-    setSubmitting(true);
-    try {
-      const res = await verifyMagicLink(magicToken);
-      completeAuth(res.token);
-    } catch (err: any) {
-      setError(err.message);
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const submitPasskey = async (e: Event) => {
-    e.preventDefault();
-    setError('');
-    setInfo('');
-    setNotice('');
-    setSubmitting(true);
-    try {
-      const begin = await beginWebAuthnLogin(username);
-      const credential = await getPasskeyAssertion(begin.options);
-      const res = await finishWebAuthnLogin(begin.session_id, credential);
-      completeAuth(res.token);
-    } catch (err: any) {
-      setError(err.message || 'passkey sign-in failed');
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const submitInterest = async (e: Event) => {
-    e.preventDefault();
-    setInterestInfo('');
-    setInterestError('');
-    setInterestSubmitting(true);
-    try {
-      await createInterestSignup({
-        email: interestEmail.trim(),
-        name: interestName.trim(),
-        source: 'homepage_auth',
-      });
-      setInterestInfo('You are on the launch list. We will email early access updates.');
-      setInterestEmail('');
-      setInterestName('');
-    } catch (err: any) {
-      setInterestError(err?.message || 'Failed to submit interest signup');
-    } finally {
-      setInterestSubmitting(false);
-    }
-  };
-
-  return (
-    <div style={{ maxWidth: '400px', margin: '60px auto' }}>
-      <h1 style={{ fontSize: '24px', marginBottom: '24px', color: '#f0f6fc' }}>
-        {mode === 'login' ? 'Sign in to gothub' : 'Create an account'}
-      </h1>
-      {sessionExpired && (
-        <div style={{ color: '#f0f6fc', marginBottom: '16px', padding: '12px', background: '#1b2a42', border: '1px solid #1f6feb', borderRadius: '6px' }}>
-          Session expired. Sign in again.
-        </div>
-      )}
-      {notice && <div style={{ color: '#d29922', marginBottom: '16px', padding: '12px', background: '#2b230f', border: '1px solid #d29922', borderRadius: '6px' }}>{notice}</div>}
-      {info && <div style={{ color: '#3fb950', marginBottom: '16px', padding: '12px', background: '#132a1d', border: '1px solid #3fb950', borderRadius: '6px' }}>{info}</div>}
-      {error && <div style={{ color: '#f85149', marginBottom: '16px', padding: '12px', background: '#1c1214', border: '1px solid #f85149', borderRadius: '6px' }}>{error}</div>}
-      {mode === 'login' ? (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
-          <form onSubmit={submitPasskey} style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-            <input value={username} onInput={(e: any) => setUsername(e.target.value)} placeholder="Username" style={inputStyle} />
-            <button
-              type="submit"
-              disabled={submitting || !username || !passkeysAvailable}
-              style={{ ...primaryButtonStyle, opacity: submitting || !username || !passkeysAvailable ? 0.6 : 1 }}
-            >
-              {passkeyLabel}
-            </button>
-          </form>
-
-          {authCapabilities.magicLinkEnabled && (
-            <div style={{ borderTop: '1px solid #30363d', paddingTop: '14px' }}>
-              <form onSubmit={submitMagicRequest} style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                <input value={email} onInput={(e: any) => setEmail(e.target.value)} placeholder="Email" type="email" style={inputStyle} />
-                <button type="submit" disabled={submitting || !email} style={{ ...secondaryButtonStyle, opacity: submitting || !email ? 0.6 : 1 }}>
-                  Send magic link
-                </button>
-              </form>
-              {magicSent && (
-                <form onSubmit={submitMagicVerify} style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '10px' }}>
-                  <input value={magicToken} onInput={(e: any) => setMagicToken(e.target.value)} placeholder="Magic token" style={inputStyle} />
-                  <button type="submit" disabled={submitting || !magicToken} style={{ ...secondaryButtonStyle, opacity: submitting || !magicToken ? 0.6 : 1 }}>
-                    Verify magic link
-                  </button>
-                </form>
-              )}
-            </div>
-          )}
-
-          {passwordAuthEnabled && (
-            <details style={{ borderTop: '1px solid #30363d', paddingTop: '14px' }}>
-              <summary style={{ color: '#8b949e', cursor: 'pointer', fontSize: '13px' }}>Legacy password sign-in</summary>
-              <form onSubmit={submitLegacy} style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '10px' }}>
-                <input value={username} onInput={(e: any) => setUsername(e.target.value)} placeholder="Username" style={inputStyle} />
-                <input value={password} onInput={(e: any) => setPassword(e.target.value)} placeholder="Password" type="password" style={inputStyle} />
-                <button type="submit" disabled={submitting || !username || !password} style={{ ...secondaryButtonStyle, opacity: submitting || !username || !password ? 0.6 : 1 }}>
-                  Sign in with password
-                </button>
-              </form>
-            </details>
-          )}
-        </div>
-      ) : (
-        <form onSubmit={submitLegacy} style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-          <input value={username} onInput={(e: any) => setUsername(e.target.value)} placeholder="Username" style={inputStyle} />
-          <input value={email} onInput={(e: any) => setEmail(e.target.value)} placeholder="Email" type="email" style={inputStyle} />
-          {passwordAuthEnabled && (
-            <input value={password} onInput={(e: any) => setPassword(e.target.value)} placeholder="Password (optional)" type="password" style={inputStyle} />
-          )}
-          <button type="submit" disabled={submitting || !username || !email || (!passwordAuthEnabled && !!password)} style={{ ...primaryButtonStyle, opacity: submitting || !username || !email ? 0.6 : 1 }}>
-            Create account
-          </button>
-          <p style={{ color: '#8b949e', margin: 0, fontSize: '12px' }}>
-            {passwordAuthEnabled
-              ? 'Leave password blank for a passwordless account, then add a passkey in Settings.'
-              : 'Password auth is disabled on this instance. Accounts are passwordless by default.'}
-          </p>
-        </form>
-      )}
-      <p style={{ marginTop: '16px', color: '#8b949e', fontSize: '13px' }}>
-        {mode === 'login' ? (
-          <span>New to gothub? <a href="#" onClick={(e) => { e.preventDefault(); setMode('register'); }} style={{ color: '#58a6ff' }}>Create an account</a></span>
-        ) : (
-          <span>Already have an account? <a href="#" onClick={(e) => { e.preventDefault(); setMode('login'); }} style={{ color: '#58a6ff' }}>Sign in</a></span>
-        )}
-      </p>
-      <div style={{ marginTop: '24px', paddingTop: '16px', borderTop: '1px solid #30363d' }}>
-        <div style={{ color: '#f0f6fc', fontSize: '14px', fontWeight: 'bold', marginBottom: '6px' }}>Launch Updates</div>
-        <div style={{ color: '#8b949e', fontSize: '12px', marginBottom: '10px' }}>
-          Public repos and BYO-runner support are rolling out. Join the list for access updates.
-        </div>
-        {interestInfo && <div style={{ color: '#3fb950', marginBottom: '10px', fontSize: '12px' }}>{interestInfo}</div>}
-        {interestError && <div style={{ color: '#f85149', marginBottom: '10px', fontSize: '12px' }}>{interestError}</div>}
-        <form onSubmit={submitInterest} style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-          <input value={interestName} onInput={(e: any) => setInterestName(e.target.value)} placeholder="Name (optional)" style={inputStyle} />
-          <input value={interestEmail} onInput={(e: any) => setInterestEmail(e.target.value)} placeholder="Email" type="email" style={inputStyle} />
-          <button
-            type="submit"
-            disabled={interestSubmitting || !interestEmail.trim()}
-            style={{ ...secondaryButtonStyle, opacity: interestSubmitting || !interestEmail.trim() ? 0.6 : 1 }}
-          >
-            {interestSubmitting ? 'Submitting...' : 'Join mailing list'}
-          </button>
-        </form>
-      </div>
-    </div>
-  );
+  return <Landing />;
 }
 
 function Dashboard() {
   const [repos, setRepos] = useState<Repository[]>([]);
+  const [repoPolicy, setRepoPolicy] = useState<RepoCreationPolicy | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [name, setName] = useState('');
   const [desc, setDesc] = useState('');
@@ -308,12 +48,20 @@ function Dashboard() {
   };
 
   useEffect(() => {
-    listUserRepos()
-      .then((items) => {
+    const loadDashboard = async () => {
+      try {
+        const [items, policy] = await Promise.all([
+          listUserRepos(),
+          getRepoCreationPolicy(),
+        ]);
         setRepos(items);
+        setRepoPolicy(policy);
         setError('');
-      })
-      .catch((e: any) => setError(e.message || 'failed to load repositories'));
+      } catch (e: any) {
+        setError(e.message || 'failed to load dashboard');
+      }
+    };
+    loadDashboard();
   }, []);
 
   const startDemo = async () => {
@@ -349,20 +97,31 @@ function Dashboard() {
   const handleCreate = async (e: Event) => {
     e.preventDefault();
     setError('');
+    if (priv && repoPolicy && !repoPolicy.can_create_private) {
+      setError(repoPolicy.private_reason || 'private repositories are not available for this account');
+      return;
+    }
+    if (!priv && repoPolicy && !repoPolicy.can_create_public) {
+      setError(repoPolicy.public_reason || 'public repositories are not available for this account');
+      return;
+    }
     try {
       await createRepo(name, desc, priv);
       setShowCreate(false);
       setName(''); setDesc('');
-      listUserRepos()
-        .then((items) => {
-          setRepos(items);
-          setError('');
-        })
-        .catch((err: any) => setError(err?.message || 'repository created but failed to refresh repository list'));
+      const [items, policy] = await Promise.all([
+        listUserRepos(),
+        getRepoCreationPolicy(),
+      ]);
+      setRepos(items);
+      setRepoPolicy(policy);
+      setError('');
     } catch (err: any) {
       setError(err.message);
     }
   };
+
+  const createBlocked = showCreate && (!!repoPolicy && (priv ? !repoPolicy.can_create_private : !repoPolicy.can_create_public));
 
   return (
     <div>
@@ -494,10 +253,46 @@ function Dashboard() {
           <form onSubmit={handleCreate} style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
             <input value={name} onInput={(e: any) => setName(e.target.value)} placeholder="Repository name" style={inputStyle} />
             <input value={desc} onInput={(e: any) => setDesc(e.target.value)} placeholder="Description (optional)" style={inputStyle} />
+            {repoPolicy && (
+              <div style={{ color: '#8b949e', fontSize: '12px', lineHeight: 1.5 }}>
+                {repoPolicy.max_public_repos > 0 && (
+                  <div>Public repos: {repoPolicy.public_repo_count}/{repoPolicy.max_public_repos}</div>
+                )}
+                {repoPolicy.max_private_repos > 0 && (
+                  <div>Private repos: {repoPolicy.private_repo_count}/{repoPolicy.max_private_repos}</div>
+                )}
+                {!repoPolicy.can_create_private && repoPolicy.private_reason && (
+                  <div style={{ color: '#d29922' }}>Private: {repoPolicy.private_reason}</div>
+                )}
+                {!repoPolicy.can_create_public && repoPolicy.public_reason && (
+                  <div style={{ color: '#d29922' }}>Public: {repoPolicy.public_reason}</div>
+                )}
+              </div>
+            )}
             <label style={{ color: '#c9d1d9', fontSize: '13px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <input type="checkbox" checked={priv} onChange={(e: any) => setPriv(e.target.checked)} /> Private
+              <input
+                type="checkbox"
+                checked={priv}
+                onChange={(e: any) => setPriv(e.target.checked)}
+                disabled={!!repoPolicy && !repoPolicy.can_create_private}
+              />
+              Private
             </label>
-            <button type="submit" style={{ background: '#238636', color: '#fff', border: 'none', padding: '8px 16px', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold', alignSelf: 'flex-start' }}>
+            <button
+              type="submit"
+              disabled={createBlocked}
+              style={{
+                background: '#238636',
+                color: '#fff',
+                border: 'none',
+                padding: '8px 16px',
+                borderRadius: '6px',
+                cursor: createBlocked ? 'not-allowed' : 'pointer',
+                fontWeight: 'bold',
+                alignSelf: 'flex-start',
+                opacity: createBlocked ? 0.6 : 1,
+              }}
+            >
               Create repository
             </button>
           </form>
@@ -554,18 +349,6 @@ function Dashboard() {
       )}
     </div>
   );
-}
-
-function resolvePostAuthRedirect(): string {
-  if (typeof window === 'undefined') return '/';
-
-  const params = new URLSearchParams(window.location.search);
-  const returnTo = params.get('returnTo') || '/';
-
-  if (!returnTo.startsWith('/') || returnTo.startsWith('//') || returnTo.startsWith('/login')) {
-    return '/';
-  }
-  return returnTo;
 }
 
 type DemoContext = {
@@ -817,27 +600,5 @@ const inputStyle = {
   borderRadius: '6px',
   padding: '10px 12px',
   color: '#c9d1d9',
-  fontSize: '14px',
-};
-
-const primaryButtonStyle = {
-  background: '#238636',
-  color: '#fff',
-  border: 'none',
-  padding: '10px',
-  borderRadius: '6px',
-  cursor: 'pointer',
-  fontWeight: 'bold',
-  fontSize: '14px',
-};
-
-const secondaryButtonStyle = {
-  background: '#21262d',
-  color: '#c9d1d9',
-  border: '1px solid #30363d',
-  padding: '10px',
-  borderRadius: '6px',
-  cursor: 'pointer',
-  fontWeight: 'bold',
   fontSize: '14px',
 };

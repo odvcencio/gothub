@@ -19,7 +19,8 @@ import { ReferencesView } from './views/References';
 import { CallGraphView } from './views/CallGraph';
 import { EntityHistoryView } from './views/EntityHistory';
 import { NotFoundView } from './views/NotFound';
-import { ChangePasswordView } from './views/ChangePassword';
+import { LoginView } from './views/Login';
+import { SignupView } from './views/Signup';
 
 export function App() {
   return (
@@ -28,9 +29,10 @@ export function App() {
       <main style={{ maxWidth: '1200px', margin: '0 auto', padding: '20px' }}>
         <Router>
           <Home path="/" />
+          <LoginView path="/login" />
+          <SignupView path="/signup" />
           <NotificationsView path="/notifications" />
           <SettingsView path="/settings" />
-          <ChangePasswordView path="/settings/password" />
           <OrgDetailView path="/orgs/:org" />
           <RepoSettingsView path="/:owner/:repo/settings" />
           <CodeView path="/:owner/:repo/tree/:ref/:path*" />
