@@ -37,9 +37,8 @@ type Server struct {
 	asyncIndex         bool
 	rateLimiter        *requestRateLimiter
 	httpMetrics        *httpMetrics
-	passkey            *webauthn.WebAuthn
-	passwordAuth       bool
-	enableAdminHealth  bool
+	passkey           *webauthn.WebAuthn
+	enableAdminHealth bool
 	enablePprof        bool
 	corsAllowedOrigins []string
 	restrictPublicOnly bool
@@ -58,7 +57,6 @@ type Server struct {
 }
 
 type ServerOptions struct {
-	EnablePasswordAuth  bool
 	EnableAsyncIndexing bool
 	IndexWorkerCount    int
 	IndexWorkerPoll     time.Duration
@@ -134,9 +132,8 @@ func NewServerWithOptions(db database.DB, authSvc *auth.Service, repoSvc *servic
 		asyncIndex:         opts.EnableAsyncIndexing,
 		rateLimiter:        newRequestRateLimiter(),
 		httpMetrics:        httpMetrics,
-		passkey:            initWebAuthn(),
-		passwordAuth:       opts.EnablePasswordAuth,
-		enableAdminHealth:  opts.EnableAdminHealth,
+		passkey:           initWebAuthn(),
+		enableAdminHealth: opts.EnableAdminHealth,
 		enablePprof:        opts.EnablePprof,
 		corsAllowedOrigins: append([]string(nil), opts.CORSAllowedOrigins...),
 		restrictPublicOnly: opts.RestrictToPublic,
@@ -221,7 +218,6 @@ func (s *Server) routes() {
 
 	// Auth
 	s.mux.HandleFunc("POST /api/v1/auth/register", s.handleRegister)
-	s.mux.HandleFunc("POST /api/v1/auth/login", s.handleLogin)
 	s.mux.HandleFunc("POST /api/v1/auth/magic/request", s.handleRequestMagicLink)
 	s.mux.HandleFunc("POST /api/v1/auth/magic/verify", s.handleVerifyMagicLink)
 	s.mux.HandleFunc("POST /api/v1/auth/ssh/challenge", s.handleSSHChallenge)
@@ -232,7 +228,6 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/auth/webauthn/login/finish", s.handleFinishWebAuthnLogin)
 	s.mux.HandleFunc("GET /api/v1/auth/capabilities", s.handleAuthCapabilities)
 	s.mux.HandleFunc("POST /api/v1/auth/refresh", s.requireAuth(s.handleRefreshToken))
-	s.mux.HandleFunc("POST /api/v1/auth/change-password", s.requireAuth(s.handleChangePassword))
 	s.mux.HandleFunc("POST /api/v1/billing/polar/webhook", s.handlePolarWebhook)
 	s.mux.HandleFunc("POST /api/v1/interest-signups", s.handleCreateInterestSignup)
 	s.mux.HandleFunc("GET /api/v1/admin/interest-signups", s.requireAuth(s.handleListInterestSignups))

@@ -31,9 +31,7 @@ import (
 )
 
 func setupTestServer(t *testing.T) (*api.Server, database.DB) {
-	return setupTestServerWithOptions(t, api.ServerOptions{
-		EnablePasswordAuth: true,
-	})
+	return setupTestServerWithOptions(t, api.ServerOptions{})
 }
 
 func setupTestServerWithOptions(t *testing.T, opts api.ServerOptions) (*api.Server, database.DB) {
@@ -59,18 +57,17 @@ func setupTestServerWithOptions(t *testing.T, opts api.ServerOptions) (*api.Serv
 
 func setupTestServerAsyncIndexing(t *testing.T) (*api.Server, database.DB) {
 	return setupTestServerWithOptions(t, api.ServerOptions{
-		EnablePasswordAuth:  true,
 		EnableAsyncIndexing: true,
 	})
 }
 
-func TestRegisterAndLogin(t *testing.T) {
+func TestRegisterPasswordless(t *testing.T) {
 	server, _ := setupTestServer(t)
 	ts := httptest.NewServer(server)
 	defer ts.Close()
 
-	// Register
-	body := `{"username":"alice","email":"alice@example.com","password":"secret123"}`
+	// Register (passwordless — only username + email)
+	body := `{"username":"alice","email":"alice@example.com"}`
 	resp, err := http.Post(ts.URL+"/api/v1/auth/register", "application/json", bytes.NewBufferString(body))
 	if err != nil {
 		t.Fatal(err)
@@ -95,27 +92,9 @@ func TestRegisterAndLogin(t *testing.T) {
 		t.Fatalf("expected username alice, got %s", regResp.User.Username)
 	}
 
-	// Login
-	body = `{"username":"alice","password":"secret123"}`
-	resp, err = http.Post(ts.URL+"/api/v1/auth/login", "application/json", bytes.NewBufferString(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("login: expected 200, got %d", resp.StatusCode)
-	}
-	var loginResp struct {
-		Token string `json:"token"`
-	}
-	json.NewDecoder(resp.Body).Decode(&loginResp)
-	resp.Body.Close()
-	if loginResp.Token == "" {
-		t.Fatal("expected token in login response")
-	}
-
 	// Get current user with token
 	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/user", nil)
-	req.Header.Set("Authorization", "Bearer "+loginResp.Token)
+	req.Header.Set("Authorization", "Bearer "+regResp.Token)
 	resp, err = http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -126,69 +105,32 @@ func TestRegisterAndLogin(t *testing.T) {
 	resp.Body.Close()
 }
 
-func TestPasswordAuthDisabledByDefault(t *testing.T) {
-	tmpDir := t.TempDir()
-	db, err := database.OpenSQLite(tmpDir + "/test.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Migrate(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
-
-	authSvc := auth.NewService("test-secret", 24*time.Hour)
-	repoSvc := service.NewRepoService(db, tmpDir+"/repos")
-	server := api.NewServer(db, authSvc, repoSvc)
+func TestAuthCapabilitiesNoPasswordAuth(t *testing.T) {
+	server, _ := setupTestServer(t)
 	ts := httptest.NewServer(server)
 	defer ts.Close()
 
-	// Password registration should be rejected when password auth is disabled.
-	resp, err := http.Post(ts.URL+"/api/v1/auth/register", "application/json", bytes.NewBufferString(`{"username":"pw","email":"pw@example.com","password":"secret123"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("password register with auth disabled: expected 403, got %d", resp.StatusCode)
-	}
-	resp.Body.Close()
-
-	// Passwordless registration remains available.
-	resp, err = http.Post(ts.URL+"/api/v1/auth/register", "application/json", bytes.NewBufferString(`{"username":"passless","email":"passless@example.com"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("passwordless register with auth disabled: expected 201, got %d", resp.StatusCode)
-	}
-	resp.Body.Close()
-
-	// Password login endpoint should be disabled.
-	resp, err = http.Post(ts.URL+"/api/v1/auth/login", "application/json", bytes.NewBufferString(`{"username":"passless","password":"irrelevant"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("password login with auth disabled: expected 403, got %d", resp.StatusCode)
-	}
-	resp.Body.Close()
-
-	resp, err = http.Get(ts.URL + "/api/v1/auth/capabilities")
+	resp, err := http.Get(ts.URL + "/api/v1/auth/capabilities")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("auth capabilities: expected 200, got %d", resp.StatusCode)
 	}
-	var caps struct {
-		PasswordAuthEnabled bool `json:"password_auth_enabled"`
-	}
+	var caps map[string]any
 	if err := json.NewDecoder(resp.Body).Decode(&caps); err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if caps.PasswordAuthEnabled {
-		t.Fatal("expected password_auth_enabled=false by default")
+
+	if _, exists := caps["password_auth_enabled"]; exists {
+		t.Fatal("expected no password_auth_enabled field in capabilities response")
+	}
+	if caps["magic_link_enabled"] != true {
+		t.Fatal("expected magic_link_enabled=true")
+	}
+	if caps["ssh_auth_enabled"] != true {
+		t.Fatal("expected ssh_auth_enabled=true")
 	}
 }
 
@@ -197,7 +139,7 @@ func TestMagicLinkAuthFlow(t *testing.T) {
 	ts := httptest.NewServer(server)
 	defer ts.Close()
 
-	regBody := `{"username":"magicuser","email":"magic@example.com","password":"secret123"}`
+	regBody := `{"username":"magicuser","email":"magic@example.com"}`
 	resp, err := http.Post(ts.URL+"/api/v1/auth/register", "application/json", bytes.NewBufferString(regBody))
 	if err != nil {
 		t.Fatal(err)
@@ -352,7 +294,7 @@ func TestCreateAndGetRepo(t *testing.T) {
 	defer ts.Close()
 
 	// Register user
-	body := `{"username":"bob","email":"bob@example.com","password":"secret123"}`
+	body := `{"username":"bob","email":"bob@example.com"}`
 	resp, _ := http.Post(ts.URL+"/api/v1/auth/register", "application/json", bytes.NewBufferString(body))
 	var regResp struct {
 		Token string `json:"token"`
@@ -780,7 +722,6 @@ func TestCORSPreflightReturnsHeaders(t *testing.T) {
 
 func TestCORSPreflightRespectsConfiguredAllowlist(t *testing.T) {
 	server, _ := setupTestServerWithOptions(t, api.ServerOptions{
-		EnablePasswordAuth: true,
 		CORSAllowedOrigins: []string{"https://allowed.test"},
 	})
 	ts := httptest.NewServer(server)
@@ -824,7 +765,7 @@ func TestRateLimitMiddlewareBlocksAuthBurst(t *testing.T) {
 
 	limited := false
 	for i := 0; i < 80; i++ {
-		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/auth/login", bytes.NewBufferString(`{"username":"","password":""}`))
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/auth/register", bytes.NewBufferString(`{"username":"","email":""}`))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("X-Forwarded-For", "203.0.113.7")
 		resp, err := http.DefaultClient.Do(req)
@@ -849,7 +790,7 @@ func TestProtocolAuthForPrivateRepo(t *testing.T) {
 	defer ts.Close()
 
 	// Owner account + private repo.
-	regBody := `{"username":"alice","email":"alice@example.com","password":"secret123"}`
+	regBody := `{"username":"alice","email":"alice@example.com"}`
 	resp, err := http.Post(ts.URL+"/api/v1/auth/register", "application/json", bytes.NewBufferString(regBody))
 	if err != nil {
 		t.Fatal(err)
@@ -888,9 +829,9 @@ func TestProtocolAuthForPrivateRepo(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	// Owner can read via Basic auth.
+	// Owner can read via Bearer token auth.
 	req, _ = http.NewRequest("GET", ts.URL+"/git/alice/private-repo/info/refs?service=git-upload-pack", nil)
-	req.SetBasicAuth("alice", "secret123")
+	req.Header.Set("Authorization", "Bearer "+regResp.Token)
 	resp, err = http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -911,32 +852,33 @@ func TestProtocolAuthForPrivateRepo(t *testing.T) {
 	resp.Body.Close()
 }
 
-func TestProtocolAuthInvalidBasicCredentialsReturn401Not404(t *testing.T) {
+func TestProtocolAuthBasicAuthDisabledReturns401(t *testing.T) {
 	server, _ := setupTestServer(t)
 	ts := httptest.NewServer(server)
 	defer ts.Close()
 
 	registerAndGetToken(t, ts.URL, "alice")
 
+	// Basic auth is permanently disabled — any attempt must return 401.
 	req, _ := http.NewRequest("GET", ts.URL+"/git/alice/missing-repo/info/refs?service=git-upload-pack", nil)
-	req.SetBasicAuth("alice", "wrong-password")
+	req.SetBasicAuth("alice", "anything")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("git info/refs with invalid credentials: expected 401, got %d", resp.StatusCode)
+		t.Fatalf("git info/refs with basic auth: expected 401, got %d", resp.StatusCode)
 	}
 	resp.Body.Close()
 
 	req, _ = http.NewRequest("GET", ts.URL+"/got/alice/missing-repo/refs", nil)
-	req.SetBasicAuth("alice", "wrong-password")
+	req.SetBasicAuth("alice", "anything")
 	resp, err = http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("got refs with invalid credentials: expected 401, got %d", resp.StatusCode)
+		t.Fatalf("got refs with basic auth: expected 401, got %d", resp.StatusCode)
 	}
 	resp.Body.Close()
 }
@@ -1612,6 +1554,19 @@ func TestBranchesEndpointAndPRAuthorName(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
+	if len(branches) == 0 {
+		t.Fatal("expected at least one branch for new repository")
+	}
+	foundMain := false
+	for _, branch := range branches {
+		if branch == "main" {
+			foundMain = true
+			break
+		}
+	}
+	if !foundMain {
+		t.Fatalf("expected branches to include main, got %v", branches)
+	}
 
 	// Create PR as owner and verify author_name is present in list response.
 	createPRReq := `{"title":"My PR","source_branch":"feature","target_branch":"main"}`
@@ -1695,7 +1650,7 @@ func TestGitReceivePackAdvertisementIncludesReportStatusAndSideband(t *testing.T
 	createRepo(t, ts.URL, token, "repo", false)
 
 	req, _ := http.NewRequest("GET", ts.URL+"/git/alice/repo/info/refs?service=git-receive-pack", nil)
-	req.SetBasicAuth("alice", "secret123")
+	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -1900,7 +1855,7 @@ func TestReceivePackReportsActualRefStatus(t *testing.T) {
 
 	req, _ := http.NewRequest("POST", ts.URL+"/git/owner/repo/git-receive-pack", bytes.NewReader(payload))
 	req.Header.Set("Content-Type", "application/x-git-receive-pack-request")
-	req.SetBasicAuth("owner", "secret123")
+	req.Header.Set("Authorization", "Bearer "+token)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -1942,7 +1897,7 @@ func TestReceivePackUsesSidebandForStatusWhenRequested(t *testing.T) {
 
 	req, _ := http.NewRequest("POST", ts.URL+"/git/owner/repo/git-receive-pack", bytes.NewReader(payload))
 	req.Header.Set("Content-Type", "application/x-git-receive-pack-request")
-	req.SetBasicAuth("owner", "secret123")
+	req.Header.Set("Authorization", "Bearer "+token)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -2012,7 +1967,7 @@ func TestReceivePackRejectsStaleOldHash(t *testing.T) {
 
 	req, _ := http.NewRequest("POST", ts.URL+"/git/owner/repo/git-receive-pack", bytes.NewReader(payload))
 	req.Header.Set("Content-Type", "application/x-git-receive-pack-request")
-	req.SetBasicAuth("owner", "secret123")
+	req.Header.Set("Authorization", "Bearer "+token)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -2079,7 +2034,7 @@ func TestGitReceivePackPersistsEntityListHash(t *testing.T) {
 
 	req, _ := http.NewRequest("POST", ts.URL+"/git/owner/repo/git-receive-pack", bytes.NewReader(payload))
 	req.Header.Set("Content-Type", "application/x-git-receive-pack-request")
-	req.SetBasicAuth("owner", "secret123")
+	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -2159,7 +2114,7 @@ func TestGitReceivePackSupportsSubmoduleTreeEntries(t *testing.T) {
 
 	req, _ := http.NewRequest("POST", ts.URL+"/git/owner/repo/git-receive-pack", bytes.NewReader(payload))
 	req.Header.Set("Content-Type", "application/x-git-receive-pack-request")
-	req.SetBasicAuth("owner", "secret123")
+	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -2197,7 +2152,7 @@ func TestIndexStatusEndpointQueuedState(t *testing.T) {
 	token := registerAndGetToken(t, ts.URL, "owner")
 	createRepo(t, ts.URL, token, "repo", false)
 
-	gitCommitHash := pushSimpleGoCommit(t, ts.URL, "owner", "repo")
+	gitCommitHash := pushSimpleGoCommit(t, ts.URL, "owner", "repo", token)
 
 	ctx := context.Background()
 	repo, err := db.GetRepository(ctx, "owner", "repo")
@@ -2258,7 +2213,7 @@ func TestIndexStatusEndpointCompletedState(t *testing.T) {
 	token := registerAndGetToken(t, ts.URL, "owner")
 	createRepo(t, ts.URL, token, "repo", false)
 
-	gitCommitHash := pushSimpleGoCommit(t, ts.URL, "owner", "repo")
+	gitCommitHash := pushSimpleGoCommit(t, ts.URL, "owner", "repo", token)
 
 	ctx := context.Background()
 	repo, err := db.GetRepository(ctx, "owner", "repo")
@@ -2371,7 +2326,7 @@ func TestCodeIntelPersistsCommitIndex(t *testing.T) {
 
 	req, _ := http.NewRequest("POST", ts.URL+"/git/owner/repo/git-receive-pack", bytes.NewReader(payload))
 	req.Header.Set("Content-Type", "application/x-git-receive-pack-request")
-	req.SetBasicAuth("owner", "secret123")
+	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -2488,7 +2443,7 @@ func TestEntityHistoryEndpointReturnsMatchesAcrossCommitHistory(t *testing.T) {
 
 	req, _ := http.NewRequest("POST", ts.URL+"/git/owner/repo/git-receive-pack", bytes.NewReader(payload))
 	req.Header.Set("Content-Type", "application/x-git-receive-pack-request")
-	req.SetBasicAuth("owner", "secret123")
+	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -4560,7 +4515,7 @@ func TestDeleteCommentEndpointsRejectInvalidCommentID(t *testing.T) {
 	}
 }
 
-func pushSimpleGoCommit(t *testing.T, baseURL, owner, repo string) string {
+func pushSimpleGoCommit(t *testing.T, baseURL, owner, repo, token string) string {
 	t.Helper()
 
 	blobData := []byte("package main\n\nfunc ProcessOrder() int { return 1 }\n")
@@ -4597,7 +4552,7 @@ func pushSimpleGoCommit(t *testing.T, baseURL, owner, repo string) string {
 
 	req, _ := http.NewRequest("POST", fmt.Sprintf("%s/git/%s/%s/git-receive-pack", baseURL, owner, repo), bytes.NewReader(payload))
 	req.Header.Set("Content-Type", "application/x-git-receive-pack-request")
-	req.SetBasicAuth(owner, "secret123")
+	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -4770,7 +4725,7 @@ func writeSemanticDiffCommit(t *testing.T, store *gotstore.RepoStore, path, cont
 
 func registerAndGetToken(t *testing.T, baseURL, username string) string {
 	t.Helper()
-	body := fmt.Sprintf(`{"username":"%s","email":"%s@example.com","password":"secret123"}`, username, username)
+	body := fmt.Sprintf(`{"username":"%s","email":"%s@example.com"}`, username, username)
 	resp, err := http.Post(baseURL+"/api/v1/auth/register", "application/json", bytes.NewBufferString(body))
 	if err != nil {
 		t.Fatal(err)

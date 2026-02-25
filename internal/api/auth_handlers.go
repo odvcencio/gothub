@@ -2,9 +2,7 @@ package api
 
 import (
 	"crypto/rand"
-	"database/sql"
 	"encoding/json"
-	"errors"
 	"net/http"
 
 	"github.com/odvcencio/gothub/internal/auth"
@@ -14,12 +12,6 @@ import (
 type registerRequest struct {
 	Username string `json:"username"`
 	Email    string `json:"email"`
-	Password string `json:"password"`
-}
-
-type loginRequest struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
 }
 
 type tokenResponse struct {
@@ -38,32 +30,16 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hash := ""
-	if !s.passwordAuth && req.Password != "" {
-		jsonError(w, "password registration is disabled", http.StatusForbidden)
+	// All accounts are passwordless — store an unusable hash
+	random := make([]byte, 32)
+	if _, err := rand.Read(random); err != nil {
+		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	if req.Password == "" || !s.passwordAuth {
-		// Passwordless accounts keep an unusable password hash so legacy password
-		// login remains explicitly disabled for this user.
-		random := make([]byte, 32)
-		if _, err := rand.Read(random); err != nil {
-			jsonError(w, "internal error", http.StatusInternalServerError)
-			return
-		}
-		var err error
-		hash, err = s.authSvc.HashPassword(string(random))
-		if err != nil {
-			jsonError(w, "internal error", http.StatusInternalServerError)
-			return
-		}
-	} else {
-		var err error
-		hash, err = s.authSvc.HashPassword(req.Password)
-		if err != nil {
-			jsonError(w, "internal error", http.StatusInternalServerError)
-			return
-		}
+	hash, err := s.authSvc.HashPassword(string(random))
+	if err != nil {
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
 	}
 
 	user := &models.User{
@@ -85,41 +61,6 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusCreated, tokenResponse{Token: token, User: user})
 }
 
-func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	if !s.passwordAuth {
-		jsonError(w, "password login is disabled; use passkey, magic link, or SSH auth", http.StatusForbidden)
-		return
-	}
-	var req loginRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonError(w, "invalid request body", http.StatusBadRequest)
-		return
-	}
-
-	user, err := s.db.GetUserByUsername(r.Context(), req.Username)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			jsonError(w, "invalid credentials", http.StatusUnauthorized)
-			return
-		}
-		jsonError(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-
-	if err := s.authSvc.CheckPassword(user.PasswordHash, req.Password); err != nil {
-		jsonError(w, "invalid credentials", http.StatusUnauthorized)
-		return
-	}
-
-	token, err := s.authSvc.GenerateToken(user.ID, user.Username)
-	if err != nil {
-		jsonError(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-
-	jsonResponse(w, http.StatusOK, tokenResponse{Token: token, User: user})
-}
-
 func (s *Server) handleRefreshToken(w http.ResponseWriter, r *http.Request) {
 	claims := auth.GetClaims(r.Context())
 	token, err := s.authSvc.GenerateToken(claims.UserID, claims.Username)
@@ -130,56 +71,6 @@ func (s *Server) handleRefreshToken(w http.ResponseWriter, r *http.Request) {
 	user, err := s.db.GetUserByID(r.Context(), claims.UserID)
 	if err != nil {
 		jsonError(w, "user not found", http.StatusNotFound)
-		return
-	}
-	jsonResponse(w, http.StatusOK, tokenResponse{Token: token, User: user})
-}
-
-func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
-	if !s.passwordAuth {
-		jsonError(w, "password auth is disabled", http.StatusForbidden)
-		return
-	}
-	claims := auth.GetClaims(r.Context())
-	var req struct {
-		CurrentPassword string `json:"current_password"`
-		NewPassword     string `json:"new_password"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonError(w, "invalid request body", http.StatusBadRequest)
-		return
-	}
-	if req.CurrentPassword == "" || req.NewPassword == "" {
-		jsonError(w, "current_password and new_password are required", http.StatusBadRequest)
-		return
-	}
-	if len(req.NewPassword) < 8 {
-		jsonError(w, "new password must be at least 8 characters", http.StatusBadRequest)
-		return
-	}
-
-	user, err := s.db.GetUserByID(r.Context(), claims.UserID)
-	if err != nil {
-		jsonError(w, "user not found", http.StatusNotFound)
-		return
-	}
-	if err := s.authSvc.CheckPassword(user.PasswordHash, req.CurrentPassword); err != nil {
-		jsonError(w, "current password is incorrect", http.StatusUnauthorized)
-		return
-	}
-	newHash, err := s.authSvc.HashPassword(req.NewPassword)
-	if err != nil {
-		jsonError(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	if err := s.db.UpdateUserPassword(r.Context(), claims.UserID, newHash); err != nil {
-		jsonError(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-
-	token, err := s.authSvc.GenerateToken(claims.UserID, claims.Username)
-	if err != nil {
-		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 	jsonResponse(w, http.StatusOK, tokenResponse{Token: token, User: user})

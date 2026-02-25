@@ -33,6 +33,15 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Launch.MaxPublicReposPerUser != 0 {
 		t.Fatalf("Launch.MaxPublicReposPerUser = %d, want default 0", cfg.Launch.MaxPublicReposPerUser)
 	}
+	if cfg.Launch.RequirePrivateRepoPlan {
+		t.Fatal("Launch.RequirePrivateRepoPlan = true, want default false")
+	}
+	if cfg.Launch.MaxPrivateReposPerUser != 0 {
+		t.Fatalf("Launch.MaxPrivateReposPerUser = %d, want default 0", cfg.Launch.MaxPrivateReposPerUser)
+	}
+	if cfg.Launch.PrivateRepoAllowedUsers != nil {
+		t.Fatalf("Launch.PrivateRepoAllowedUsers = %#v, want nil", cfg.Launch.PrivateRepoAllowedUsers)
+	}
 }
 
 func TestLoadAppliesEnvOverrides(t *testing.T) {
@@ -43,12 +52,14 @@ func TestLoadAppliesEnvOverrides(t *testing.T) {
 	t.Setenv("GOTHUB_DB_DSN", "postgres://example")
 	t.Setenv("GOTHUB_STORAGE_PATH", "/tmp/repos")
 	t.Setenv("GOTHUB_JWT_SECRET", "unit-test-secret-123")
-	t.Setenv("GOTHUB_ENABLE_PASSWORD_AUTH", "true")
 	t.Setenv("GOTHUB_ENABLE_TENANCY", "true")
 	t.Setenv("GOTHUB_TENANCY_HEADER", "X-Tenant-ID")
 	t.Setenv("GOTHUB_DEFAULT_TENANT_ID", "tenant-default")
 	t.Setenv("GOTHUB_RESTRICT_TO_PUBLIC_REPOS", "true")
 	t.Setenv("GOTHUB_MAX_PUBLIC_REPOS_PER_USER", "7")
+	t.Setenv("GOTHUB_REQUIRE_PRIVATE_REPO_PLAN", "true")
+	t.Setenv("GOTHUB_MAX_PRIVATE_REPOS_PER_USER", "3")
+	t.Setenv("GOTHUB_PRIVATE_REPO_ALLOWED_USERS", "alice, bob")
 
 	cfg, err := Load("")
 	if err != nil {
@@ -82,9 +93,6 @@ func TestLoadAppliesEnvOverrides(t *testing.T) {
 	if cfg.Auth.JWTSecret != "unit-test-secret-123" {
 		t.Fatalf("Auth.JWTSecret = %q, want override", cfg.Auth.JWTSecret)
 	}
-	if !cfg.Auth.EnablePasswordAuth {
-		t.Fatal("Auth.EnablePasswordAuth = false, want true")
-	}
 	if !cfg.Tenancy.Enabled {
 		t.Fatal("Tenancy.Enabled = false, want true")
 	}
@@ -99,6 +107,21 @@ func TestLoadAppliesEnvOverrides(t *testing.T) {
 	}
 	if cfg.Launch.MaxPublicReposPerUser != 7 {
 		t.Fatalf("Launch.MaxPublicReposPerUser = %d, want 7", cfg.Launch.MaxPublicReposPerUser)
+	}
+	if !cfg.Launch.RequirePrivateRepoPlan {
+		t.Fatal("Launch.RequirePrivateRepoPlan = false, want true")
+	}
+	if cfg.Launch.MaxPrivateReposPerUser != 3 {
+		t.Fatalf("Launch.MaxPrivateReposPerUser = %d, want 3", cfg.Launch.MaxPrivateReposPerUser)
+	}
+	if len(cfg.Launch.PrivateRepoAllowedUsers) != 2 {
+		t.Fatalf("Launch.PrivateRepoAllowedUsers length = %d, want 2", len(cfg.Launch.PrivateRepoAllowedUsers))
+	}
+	if cfg.Launch.PrivateRepoAllowedUsers[0] != "alice" {
+		t.Fatalf("Launch.PrivateRepoAllowedUsers[0] = %q, want %q", cfg.Launch.PrivateRepoAllowedUsers[0], "alice")
+	}
+	if cfg.Launch.PrivateRepoAllowedUsers[1] != "bob" {
+		t.Fatalf("Launch.PrivateRepoAllowedUsers[1] = %q, want %q", cfg.Launch.PrivateRepoAllowedUsers[1], "bob")
 	}
 }
 
@@ -120,7 +143,6 @@ storage:
 auth:
   jwt_secret: yaml-secret-123456
   token_duration: 12h
-  enable_password_auth: true
 tenancy:
   enabled: true
   header: X-Tenant-ID
@@ -128,6 +150,11 @@ tenancy:
 launch:
   restrict_to_public_repos: true
   max_public_repos_per_user: 9
+  require_private_repo_plan: true
+  max_private_repos_per_user: 2
+  private_repo_allowed_users:
+    - alice
+    - bob
 `)
 	if err := os.WriteFile(path, body, 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
@@ -153,9 +180,6 @@ launch:
 	if cfg.Auth.TokenDuration != "12h" {
 		t.Fatalf("Auth.TokenDuration = %q, want %q", cfg.Auth.TokenDuration, "12h")
 	}
-	if !cfg.Auth.EnablePasswordAuth {
-		t.Fatal("Auth.EnablePasswordAuth = false, want true")
-	}
 	if !cfg.Tenancy.Enabled {
 		t.Fatal("Tenancy.Enabled = false, want true")
 	}
@@ -170,5 +194,20 @@ launch:
 	}
 	if cfg.Launch.MaxPublicReposPerUser != 9 {
 		t.Fatalf("Launch.MaxPublicReposPerUser = %d, want 9", cfg.Launch.MaxPublicReposPerUser)
+	}
+	if !cfg.Launch.RequirePrivateRepoPlan {
+		t.Fatal("Launch.RequirePrivateRepoPlan = false, want true")
+	}
+	if cfg.Launch.MaxPrivateReposPerUser != 2 {
+		t.Fatalf("Launch.MaxPrivateReposPerUser = %d, want 2", cfg.Launch.MaxPrivateReposPerUser)
+	}
+	if len(cfg.Launch.PrivateRepoAllowedUsers) != 2 {
+		t.Fatalf("Launch.PrivateRepoAllowedUsers length = %d, want 2", len(cfg.Launch.PrivateRepoAllowedUsers))
+	}
+	if cfg.Launch.PrivateRepoAllowedUsers[0] != "alice" {
+		t.Fatalf("Launch.PrivateRepoAllowedUsers[0] = %q, want %q", cfg.Launch.PrivateRepoAllowedUsers[0], "alice")
+	}
+	if cfg.Launch.PrivateRepoAllowedUsers[1] != "bob" {
+		t.Fatalf("Launch.PrivateRepoAllowedUsers[1] = %q, want %q", cfg.Launch.PrivateRepoAllowedUsers[1], "bob")
 	}
 }

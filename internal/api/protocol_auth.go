@@ -57,25 +57,12 @@ func (s *Server) authenticateProtocolUser(r *http.Request) (*models.User, bool, 
 		return u, true, http.StatusOK, nil
 	}
 
-	username, password, ok := r.BasicAuth()
-	if !ok {
-		return nil, false, http.StatusOK, nil
-	}
-	if !s.passwordAuth {
-		return nil, false, http.StatusUnauthorized, fmt.Errorf("basic auth is disabled")
+	// Basic auth (password) is permanently disabled — use token or SSH auth.
+	if _, _, ok := r.BasicAuth(); ok {
+		return nil, false, http.StatusUnauthorized, fmt.Errorf("basic auth is disabled; use token or SSH authentication")
 	}
 
-	u, err := s.db.GetUserByUsername(r.Context(), username)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, false, http.StatusUnauthorized, fmt.Errorf("invalid credentials")
-		}
-		return nil, false, http.StatusInternalServerError, fmt.Errorf("user lookup failed")
-	}
-	if err := s.authSvc.CheckPassword(u.PasswordHash, password); err != nil {
-		return nil, false, http.StatusUnauthorized, fmt.Errorf("invalid credentials")
-	}
-	return u, true, http.StatusOK, nil
+	return nil, false, http.StatusOK, nil
 }
 
 func (s *Server) userHasRepoAccess(ctx context.Context, repo *models.Repository, userID int64, write bool) (bool, error) {

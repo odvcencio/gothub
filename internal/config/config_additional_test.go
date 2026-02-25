@@ -68,10 +68,12 @@ func TestLoadParsesTrustedProxiesAndCORSOriginsFromEnv(t *testing.T) {
 
 func TestLoadInvalidEnvValuesDoNotOverrideDefaults(t *testing.T) {
 	t.Setenv("GOTHUB_PORT", "not-an-int")
-	t.Setenv("GOTHUB_ENABLE_PASSWORD_AUTH", "not-a-bool")
 	t.Setenv("GOTHUB_ENABLE_TENANCY", "not-a-bool")
 	t.Setenv("GOTHUB_RESTRICT_TO_PUBLIC_REPOS", "not-a-bool")
 	t.Setenv("GOTHUB_MAX_PUBLIC_REPOS_PER_USER", "-5")
+	t.Setenv("GOTHUB_REQUIRE_PRIVATE_REPO_PLAN", "not-a-bool")
+	t.Setenv("GOTHUB_MAX_PRIVATE_REPOS_PER_USER", "-2")
+	t.Setenv("GOTHUB_PRIVATE_REPO_ALLOWED_USERS", ",, ,")
 	t.Setenv("GOTHUB_TRUSTED_PROXIES", ",, ,")
 	t.Setenv("GOTHUB_CORS_ALLOW_ORIGINS", ",  ,")
 
@@ -83,9 +85,6 @@ func TestLoadInvalidEnvValuesDoNotOverrideDefaults(t *testing.T) {
 	if cfg.Server.Port != 3000 {
 		t.Fatalf("Server.Port = %d, want default 3000", cfg.Server.Port)
 	}
-	if cfg.Auth.EnablePasswordAuth {
-		t.Fatal("Auth.EnablePasswordAuth = true, want default false")
-	}
 	if cfg.Tenancy.Enabled {
 		t.Fatal("Tenancy.Enabled = true, want default false")
 	}
@@ -94,6 +93,15 @@ func TestLoadInvalidEnvValuesDoNotOverrideDefaults(t *testing.T) {
 	}
 	if cfg.Launch.MaxPublicReposPerUser != 0 {
 		t.Fatalf("Launch.MaxPublicReposPerUser = %d, want default 0", cfg.Launch.MaxPublicReposPerUser)
+	}
+	if cfg.Launch.RequirePrivateRepoPlan {
+		t.Fatal("Launch.RequirePrivateRepoPlan = true, want default false")
+	}
+	if cfg.Launch.MaxPrivateReposPerUser != 0 {
+		t.Fatalf("Launch.MaxPrivateReposPerUser = %d, want default 0", cfg.Launch.MaxPrivateReposPerUser)
+	}
+	if cfg.Launch.PrivateRepoAllowedUsers != nil {
+		t.Fatalf("Launch.PrivateRepoAllowedUsers = %#v, want nil", cfg.Launch.PrivateRepoAllowedUsers)
 	}
 	if cfg.Server.TrustedProxies != nil {
 		t.Fatalf("Server.TrustedProxies = %#v, want nil", cfg.Server.TrustedProxies)

@@ -91,7 +91,6 @@ func cmdServe(args []string) {
 	authSvc := auth.NewService(cfg.Auth.JWTSecret, dur)
 	repoSvc := service.NewRepoService(db, cfg.Storage.Path)
 	serverOpts := api.ServerOptions{
-		EnablePasswordAuth:  cfg.Auth.EnablePasswordAuth,
 		EnableAsyncIndexing: envBool("GOTHUB_ENABLE_ASYNC_INDEXING"),
 		IndexWorkerCount:    envInt("GOTHUB_INDEX_WORKER_COUNT", 2),
 		IndexWorkerPoll:     envDuration("GOTHUB_INDEX_WORKER_POLL_INTERVAL", 250*time.Millisecond),
@@ -105,6 +104,11 @@ func cmdServe(args []string) {
 		DefaultTenantID:     cfg.Tenancy.DefaultTenantID,
 		RestrictToPublic:    cfg.Launch.RestrictToPublicRepos,
 		MaxPublicRepos:      cfg.Launch.MaxPublicReposPerUser,
+		RequirePrivatePlan:  cfg.Launch.RequirePrivateRepoPlan,
+		MaxPrivateRepos:     cfg.Launch.MaxPrivateReposPerUser,
+		PrivateRepoAllowed:  cfg.Launch.PrivateRepoAllowedUsers,
+		PolarWebhookSecret:  strings.TrimSpace(os.Getenv("GOTHUB_POLAR_WEBHOOK_SECRET")),
+		PolarProductIDs:     parseCSVEnv("GOTHUB_POLAR_PRIVATE_REPO_PRODUCT_IDS"),
 	}
 	server := api.NewServerWithOptions(db, authSvc, repoSvc, serverOpts)
 	workerCtx, workerCancel := context.WithCancel(context.Background())

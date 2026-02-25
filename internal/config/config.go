@@ -35,9 +35,8 @@ type StorageConfig struct {
 }
 
 type AuthConfig struct {
-	JWTSecret          string `yaml:"jwt_secret"`
-	TokenDuration      string `yaml:"token_duration"` // e.g. "24h"
-	EnablePasswordAuth bool   `yaml:"enable_password_auth"`
+	JWTSecret     string `yaml:"jwt_secret"`
+	TokenDuration string `yaml:"token_duration"` // e.g. "24h"
 }
 
 type TenancyConfig struct {
@@ -47,8 +46,11 @@ type TenancyConfig struct {
 }
 
 type LaunchConfig struct {
-	RestrictToPublicRepos bool `yaml:"restrict_to_public_repos"`
-	MaxPublicReposPerUser int  `yaml:"max_public_repos_per_user"`
+	RestrictToPublicRepos   bool     `yaml:"restrict_to_public_repos"`
+	MaxPublicReposPerUser   int      `yaml:"max_public_repos_per_user"`
+	RequirePrivateRepoPlan  bool     `yaml:"require_private_repo_plan"`
+	MaxPrivateReposPerUser  int      `yaml:"max_private_repos_per_user"`
+	PrivateRepoAllowedUsers []string `yaml:"private_repo_allowed_users"`
 }
 
 func (c *Config) Addr() string {
@@ -85,17 +87,18 @@ func Default() *Config {
 			Path: "data/repos",
 		},
 		Auth: AuthConfig{
-			JWTSecret:          "change-me-in-production",
-			TokenDuration:      "24h",
-			EnablePasswordAuth: false,
+			JWTSecret:     "change-me-in-production",
+			TokenDuration: "24h",
 		},
 		Tenancy: TenancyConfig{
 			Enabled: false,
 			Header:  "X-Gothub-Tenant-ID",
 		},
 		Launch: LaunchConfig{
-			RestrictToPublicRepos: false,
-			MaxPublicReposPerUser: 0,
+			RestrictToPublicRepos:  false,
+			MaxPublicReposPerUser:  0,
+			RequirePrivateRepoPlan: false,
+			MaxPrivateReposPerUser: 0,
 		},
 	}
 }
@@ -144,11 +147,6 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("GOTHUB_JWT_SECRET"); v != "" {
 		cfg.Auth.JWTSecret = v
 	}
-	if v := os.Getenv("GOTHUB_ENABLE_PASSWORD_AUTH"); v != "" {
-		if enabled, err := strconv.ParseBool(v); err == nil {
-			cfg.Auth.EnablePasswordAuth = enabled
-		}
-	}
 	if v := os.Getenv("GOTHUB_ENABLE_TENANCY"); v != "" {
 		if enabled, err := strconv.ParseBool(v); err == nil {
 			cfg.Tenancy.Enabled = enabled
@@ -169,6 +167,19 @@ func applyEnv(cfg *Config) {
 		if value, err := strconv.Atoi(v); err == nil && value >= 0 {
 			cfg.Launch.MaxPublicReposPerUser = value
 		}
+	}
+	if v := os.Getenv("GOTHUB_REQUIRE_PRIVATE_REPO_PLAN"); v != "" {
+		if enabled, err := strconv.ParseBool(v); err == nil {
+			cfg.Launch.RequirePrivateRepoPlan = enabled
+		}
+	}
+	if v := os.Getenv("GOTHUB_MAX_PRIVATE_REPOS_PER_USER"); v != "" {
+		if value, err := strconv.Atoi(v); err == nil && value >= 0 {
+			cfg.Launch.MaxPrivateReposPerUser = value
+		}
+	}
+	if v := os.Getenv("GOTHUB_PRIVATE_REPO_ALLOWED_USERS"); v != "" {
+		cfg.Launch.PrivateRepoAllowedUsers = parseCSV(v)
 	}
 }
 
