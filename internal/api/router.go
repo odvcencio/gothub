@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/odvcencio/got/pkg/object"
@@ -32,6 +33,7 @@ type Server struct {
 	codeIntelSvc       *service.CodeIntelService
 	lineageSvc         *service.EntityLineageService
 	indexQueue         *jobs.Queue
+	indexWorker        *jobs.WorkerPool
 	asyncIndex         bool
 	rateLimiter        *requestRateLimiter
 	httpMetrics        *httpMetrics
@@ -50,6 +52,8 @@ type Server struct {
 type ServerOptions struct {
 	EnablePasswordAuth  bool
 	EnableAsyncIndexing bool
+	IndexWorkerCount    int
+	IndexWorkerPoll     time.Duration
 	EnableAdminHealth   bool
 	EnablePprof         bool
 	AdminAllowedCIDRs   []string
@@ -104,6 +108,9 @@ func NewServerWithOptions(db database.DB, authSvc *auth.Service, repoSvc *servic
 		adminRouteAccess:   newAdminRouteAccess(adminCIDRs, clientIPResolver.clientIPFromRequest),
 		realtime:           newRepoEventBroker(),
 		mux:                http.NewServeMux(),
+	}
+	if s.asyncIndex {
+		s.indexWorker = s.newIndexWorker(opts.IndexWorkerCount, opts.IndexWorkerPoll)
 	}
 	s.routes()
 	s.handler = requestTracingMiddleware(

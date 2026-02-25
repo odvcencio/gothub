@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"time"
 
@@ -90,14 +91,26 @@ func cmdServe(args []string) {
 	authSvc := auth.NewService(cfg.Auth.JWTSecret, dur)
 	repoSvc := service.NewRepoService(db, cfg.Storage.Path)
 	serverOpts := api.ServerOptions{
-		EnablePasswordAuth: cfg.Auth.EnablePasswordAuth,
-		EnableAdminHealth:  envBool("GOTHUB_ENABLE_ADMIN_HEALTH"),
-		EnablePprof:        envBool("GOTHUB_ENABLE_PPROF"),
-		AdminAllowedCIDRs:  parseAdminCIDRs("GOTHUB_ADMIN_ALLOWED_CIDRS"),
-		CORSAllowedOrigins: parseCSVEnv("GOTHUB_CORS_ALLOW_ORIGINS"),
-		TrustedProxyCIDRs:  trustedProxyCIDRs(cfg),
+		EnablePasswordAuth:  cfg.Auth.EnablePasswordAuth,
+		EnableAsyncIndexing: envBool("GOTHUB_ENABLE_ASYNC_INDEXING"),
+		IndexWorkerCount:    envInt("GOTHUB_INDEX_WORKER_COUNT", 2),
+		IndexWorkerPoll:     envDuration("GOTHUB_INDEX_WORKER_POLL_INTERVAL", 250*time.Millisecond),
+		EnableAdminHealth:   envBool("GOTHUB_ENABLE_ADMIN_HEALTH"),
+		EnablePprof:         envBool("GOTHUB_ENABLE_PPROF"),
+		AdminAllowedCIDRs:   parseAdminCIDRs("GOTHUB_ADMIN_ALLOWED_CIDRS"),
+		CORSAllowedOrigins:  parseCSVEnv("GOTHUB_CORS_ALLOW_ORIGINS"),
+		TrustedProxyCIDRs:   trustedProxyCIDRs(cfg),
 	}
 	server := api.NewServerWithOptions(db, authSvc, repoSvc, serverOpts)
+	workerCtx, workerCancel := context.WithCancel(context.Background())
+	defer workerCancel()
+	if serverOpts.EnableAsyncIndexing {
+		if err := server.StartBackgroundWorkers(workerCtx); err != nil {
+			slog.Error("start background workers", "error", err)
+			os.Exit(1)
+		}
+		defer server.StopBackgroundWorkersNow()
+	}
 
 	httpServer := &http.Server{
 		Addr:         cfg.Addr(),
@@ -121,6 +134,8 @@ func cmdServe(args []string) {
 
 	<-done
 	slog.Info("shutting down")
+	workerCancel()
+	server.StopBackgroundWorkersNow()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	httpServer.Shutdown(ctx)
@@ -210,4 +225,28 @@ func parseCSVEnv(name string) []string {
 		out = append(out, item)
 	}
 	return out
+}
+
+func envInt(name string, fallback int) int {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value <= 0 {
+		return fallback
+	}
+	return value
+}
+
+func envDuration(name string, fallback time.Duration) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+	value, err := time.ParseDuration(raw)
+	if err != nil || value <= 0 {
+		return fallback
+	}
+	return value
 }

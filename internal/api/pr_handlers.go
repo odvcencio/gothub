@@ -269,6 +269,10 @@ func (s *Server) handleUpdatePR(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	if pr.State != "open" {
+		jsonError(w, "pull request is not open", http.StatusConflict)
+		return
+	}
 
 	// Only the PR author or repo owner can edit
 	if pr.AuthorID != claims.UserID {

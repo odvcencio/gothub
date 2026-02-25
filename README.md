@@ -15,6 +15,11 @@ Open `http://localhost:3000`.
 
 Default compose settings enable password auth for local development and set a non-empty dev JWT secret. Change these values before any shared deployment.
 
+## Requirements
+
+- Go 1.25+
+- Node.js 20+ and npm (frontend build)
+
 ## Quick start (local)
 
 ```bash
@@ -45,6 +50,9 @@ go run ./cmd/gothub serve
 - `GOTHUB_TRUSTED_PROXIES`: comma-separated trusted proxy CIDRs/IPs for `X-Forwarded-For` (default loopback only)
 - `GOTHUB_TRUST_PROXY`: legacy trust-all proxy mode (`true`/`false`), only used when `GOTHUB_TRUSTED_PROXIES` is unset
 - `GOTHUB_CORS_ALLOW_ORIGINS`: comma-separated allowlist for CORS origins (default `*`)
+- `GOTHUB_ENABLE_ASYNC_INDEXING`: enable background indexing job workers (`true`/`false`)
+- `GOTHUB_INDEX_WORKER_COUNT`: number of indexing workers (default `2`)
+- `GOTHUB_INDEX_WORKER_POLL_INTERVAL`: queue poll interval duration (default `250ms`)
 - `GOTHUB_ENABLE_ADMIN_HEALTH`: expose `/admin/health` (`true`/`false`)
 - `GOTHUB_ENABLE_PPROF`: expose `/debug/pprof/*` (`true`/`false`)
 - `GOTHUB_ADMIN_ALLOWED_CIDRS`: comma-separated CIDRs allowed for admin routes

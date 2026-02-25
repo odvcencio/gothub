@@ -1205,6 +1205,61 @@ func TestCollaboratorWriteAccessLifecycle(t *testing.T) {
 	resp.Body.Close()
 }
 
+func TestUpdatePRRejectsNonOpenState(t *testing.T) {
+	server, db := setupTestServer(t)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	token := registerAndGetToken(t, ts.URL, "alice")
+	createRepo(t, ts.URL, token, "repo", false)
+	prNumber := createPRNumber(t, ts.URL, token, "alice", "repo", "feature", "main")
+
+	ctx := context.Background()
+	repo, err := db.GetRepository(ctx, "alice", "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr, err := db.GetPullRequest(ctx, repo.ID, prNumber)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mergedAt := time.Now().UTC()
+	pr.State = "merged"
+	pr.MergedAt = &mergedAt
+	if err := db.UpdatePullRequest(ctx, pr); err != nil {
+		t.Fatal(err)
+	}
+
+	req, _ := http.NewRequest(http.MethodPatch, fmt.Sprintf("%s/api/v1/repos/alice/repo/pulls/%d", ts.URL, prNumber), bytes.NewBufferString(`{"title":"should-not-apply"}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("update merged PR: expected 409, got %d", resp.StatusCode)
+	}
+	var errResp struct {
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&errResp); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if errResp.Error != "pull request is not open" {
+		t.Fatalf("unexpected update error: %q", errResp.Error)
+	}
+
+	updated, err := db.GetPullRequest(ctx, repo.ID, prNumber)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Title != "test pr" {
+		t.Fatalf("expected title to remain unchanged, got %q", updated.Title)
+	}
+}
+
 func TestIssueLifecycleAndComments(t *testing.T) {
 	server, _ := setupTestServer(t)
 	ts := httptest.NewServer(server)
