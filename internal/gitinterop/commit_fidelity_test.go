@@ -74,6 +74,103 @@ func TestGotToGitCommitUsesCommitterMetadata(t *testing.T) {
 	}
 }
 
+func TestParseGitCommitDoesNotSynthesizeCommitterOrTimezone(t *testing.T) {
+	treeGitHash := strings.Repeat("1", 40)
+	gotTreeHash := strings.Repeat("a", 64)
+	resolve := func(gitHash string) (string, error) {
+		if gitHash == treeGitHash {
+			return gotTreeHash, nil
+		}
+		return "", fmt.Errorf("missing mapping for %s", gitHash)
+	}
+
+	raw := []byte("tree " + treeGitHash + "\n" +
+		"author Alice <alice@example.com> 1700000000\n" +
+		"\nmessage\n")
+
+	commit, err := parseGitCommit(raw, resolve)
+	if err != nil {
+		t.Fatalf("parseGitCommit: %v", err)
+	}
+	if commit.AuthorTimezone != "" {
+		t.Fatalf("unexpected synthesized author timezone: %q", commit.AuthorTimezone)
+	}
+	if commit.Committer != "" {
+		t.Fatalf("unexpected synthesized committer: %q", commit.Committer)
+	}
+	if commit.CommitterTimezone != "" {
+		t.Fatalf("unexpected synthesized committer timezone: %q", commit.CommitterTimezone)
+	}
+}
+
+func TestGotToGitCommitExplicitCommitterDoesNotInheritAuthorTimestampOrTimezone(t *testing.T) {
+	commit := &object.CommitObj{
+		TreeHash:           object.Hash(strings.Repeat("a", 64)),
+		Author:             "Alice <alice@example.com>",
+		Timestamp:          1700000000,
+		AuthorTimezone:     "+0200",
+		Committer:          "Bob <bob@example.com>",
+		CommitterTimestamp: 0,
+		CommitterTimezone:  "",
+		Message:            "test",
+	}
+
+	_, data := GotToGitCommit(commit, GitHash(strings.Repeat("1", 40)), nil)
+	if !bytes.Contains(data, []byte("committer Bob <bob@example.com> 0 +0000\n")) {
+		t.Fatalf("expected explicit committer defaults, got %q", string(data))
+	}
+	if bytes.Contains(data, []byte("committer Bob <bob@example.com> 1700000000 +0200\n")) {
+		t.Fatalf("committer metadata incorrectly inherited from author: %q", string(data))
+	}
+}
+
+func TestGitCommitMetadataRoundTripPreservesAuthorCommitterAndTimezones(t *testing.T) {
+	treeGitHash := strings.Repeat("1", 40)
+	gotTreeHash := strings.Repeat("a", 64)
+	resolve := func(gitHash string) (string, error) {
+		if gitHash == treeGitHash {
+			return gotTreeHash, nil
+		}
+		return "", fmt.Errorf("missing mapping for %s", gitHash)
+	}
+
+	raw := []byte("tree " + treeGitHash + "\n" +
+		"author Alice Builder 1700000000 +0230\n" +
+		"committer Bob Reviewer 1700000100 -0715\n" +
+		"\nmessage\n")
+
+	parsed, err := parseGitCommit(raw, resolve)
+	if err != nil {
+		t.Fatalf("parseGitCommit: %v", err)
+	}
+	if parsed.Author != "Alice Builder" {
+		t.Fatalf("unexpected author identity: %q", parsed.Author)
+	}
+	if parsed.Committer != "Bob Reviewer" {
+		t.Fatalf("unexpected committer identity: %q", parsed.Committer)
+	}
+	if parsed.AuthorTimezone != "+0230" {
+		t.Fatalf("unexpected author timezone: %q", parsed.AuthorTimezone)
+	}
+	if parsed.CommitterTimezone != "-0715" {
+		t.Fatalf("unexpected committer timezone: %q", parsed.CommitterTimezone)
+	}
+
+	stored := object.MarshalCommit(parsed)
+	reloaded, err := object.UnmarshalCommit(stored)
+	if err != nil {
+		t.Fatalf("UnmarshalCommit: %v", err)
+	}
+
+	_, roundTrip := GotToGitCommit(reloaded, GitHash(treeGitHash), nil)
+	if !bytes.Contains(roundTrip, []byte("author Alice Builder 1700000000 +0230\n")) {
+		t.Fatalf("expected author line to round-trip, got %q", string(roundTrip))
+	}
+	if !bytes.Contains(roundTrip, []byte("committer Bob Reviewer 1700000100 -0715\n")) {
+		t.Fatalf("expected committer line to round-trip, got %q", string(roundTrip))
+	}
+}
+
 func TestParseGitTagRewritesObjectHeaderToGotHash(t *testing.T) {
 	gitTargetHash := strings.Repeat("1", 40)
 	gotTargetHash := strings.Repeat("a", 64)

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+	"strings"
 
 	"github.com/odvcencio/got/pkg/object"
 )
@@ -47,21 +48,26 @@ func GotToGitBlob(data []byte) (GitHash, []byte) {
 // treeGitHash is the pre-resolved git hash of the tree.
 func GotToGitCommit(c *object.CommitObj, treeGitHash GitHash, parentGitHashes []GitHash) (GitHash, []byte) {
 	var buf bytes.Buffer
-	authorTZ := c.AuthorTimezone
+	authorTZ := strings.TrimSpace(c.AuthorTimezone)
 	if authorTZ == "" {
 		authorTZ = "+0000"
 	}
-	committer := c.Committer
-	if committer == "" {
+	committer := strings.TrimSpace(c.Committer)
+	hasExplicitCommitter := committer != ""
+	if !hasExplicitCommitter {
 		committer = c.Author
 	}
 	committerTS := c.CommitterTimestamp
-	if committerTS == 0 {
+	if !hasExplicitCommitter && committerTS == 0 {
 		committerTS = c.Timestamp
 	}
-	committerTZ := c.CommitterTimezone
+	committerTZ := strings.TrimSpace(c.CommitterTimezone)
 	if committerTZ == "" {
-		committerTZ = authorTZ
+		if hasExplicitCommitter {
+			committerTZ = "+0000"
+		} else {
+			committerTZ = authorTZ
+		}
 	}
 
 	fmt.Fprintf(&buf, "tree %s\n", treeGitHash)

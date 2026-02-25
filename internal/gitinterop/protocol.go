@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/odvcencio/got/pkg/object"
@@ -879,19 +880,6 @@ func parseGitCommit(data []byte, resolveGotHash func(gitHash string) (string, er
 	if c.TreeHash == "" {
 		return nil, fmt.Errorf("commit is missing tree hash")
 	}
-	if c.Committer == "" {
-		c.Committer = c.Author
-		c.CommitterTimestamp = c.Timestamp
-		if c.CommitterTimezone == "" {
-			c.CommitterTimezone = c.AuthorTimezone
-		}
-	}
-	if c.AuthorTimezone == "" {
-		c.AuthorTimezone = "+0000"
-	}
-	if c.CommitterTimezone == "" {
-		c.CommitterTimezone = "+0000"
-	}
 	c.Message = strings.Join(bodyLines, "\n")
 	return c, nil
 }
@@ -919,28 +907,42 @@ func parseGitTag(data []byte, resolveGotHash func(gitHash string) (string, error
 
 func parseGitIdentityLine(raw string) (identity string, timestamp int64, timezone string) {
 	raw = strings.TrimSpace(raw)
-	timezone = "+0000"
 	if raw == "" {
-		return "", 0, timezone
+		return "", 0, ""
 	}
 
-	if idx := strings.LastIndex(raw, ">"); idx >= 0 {
-		identity = strings.TrimSpace(raw[:idx+1])
-		rest := strings.Fields(strings.TrimSpace(raw[idx+1:]))
-		if len(rest) >= 1 {
-			fmt.Sscanf(rest[0], "%d", &timestamp)
+	rest := raw
+	if split := strings.LastIndex(rest, " "); split >= 0 {
+		tzCandidate := strings.TrimSpace(rest[split+1:])
+		if isGitTimezone(tzCandidate) {
+			timezone = tzCandidate
+			rest = strings.TrimSpace(rest[:split])
 		}
-		if len(rest) >= 2 && strings.TrimSpace(rest[1]) != "" {
-			timezone = strings.TrimSpace(rest[1])
+	}
+	if split := strings.LastIndex(rest, " "); split >= 0 {
+		tsCandidate := strings.TrimSpace(rest[split+1:])
+		if ts, err := strconv.ParseInt(tsCandidate, 10, 64); err == nil {
+			timestamp = ts
+			rest = strings.TrimSpace(rest[:split])
 		}
-		return identity, timestamp, timezone
 	}
-
-	parts := strings.Fields(raw)
-	if len(parts) >= 1 {
-		identity = parts[0]
-	}
+	identity = strings.TrimSpace(rest)
 	return identity, timestamp, timezone
+}
+
+func isGitTimezone(tz string) bool {
+	if len(tz) != 5 {
+		return false
+	}
+	if tz[0] != '+' && tz[0] != '-' {
+		return false
+	}
+	for i := 1; i < len(tz); i++ {
+		if tz[i] < '0' || tz[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // walkGotObjects walks the Got object graph collecting objects the client doesn't have.
