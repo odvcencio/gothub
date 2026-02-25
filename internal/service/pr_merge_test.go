@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -219,6 +220,39 @@ func TestRunPathWorkersExecutesConcurrently(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for path workers to complete")
+	}
+}
+
+func TestFindMergeBaseCachedPersistsAndRecoversFromStaleEntry(t *testing.T) {
+	ctx, prSvc, store, repo := setupPRMergeTestService(t)
+
+	root := writeMainCommit(t, store, "package main\n\nfunc V() int { return 0 }\n", nil, "root", 1700001000)
+	left := writeMainCommit(t, store, "package main\n\nfunc V() int { return 1 }\n", []object.Hash{root}, "left", 1700001010)
+	right := writeMainCommit(t, store, "package main\n\nfunc V() int { return 2 }\n", []object.Hash{root}, "right", 1700001020)
+
+	// Seed a stale cache entry whose base does not exist in the object store.
+	staleBase := strings.Repeat("f", 64)
+	if err := prSvc.db.SetMergeBaseCache(ctx, repo.ID, string(left), string(right), staleBase); err != nil {
+		t.Fatal(err)
+	}
+
+	base, err := prSvc.findMergeBaseCached(ctx, repo.ID, store.Objects, left, right)
+	if err != nil {
+		t.Fatalf("findMergeBaseCached: %v", err)
+	}
+	if base != root {
+		t.Fatalf("merge base = %s, want %s", base, root)
+	}
+
+	cachedBase, ok, err := prSvc.db.GetMergeBaseCache(ctx, repo.ID, string(left), string(right))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("expected merge-base cache hit")
+	}
+	if cachedBase != string(root) {
+		t.Fatalf("cached merge base = %s, want %s", cachedBase, root)
 	}
 }
 

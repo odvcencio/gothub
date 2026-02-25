@@ -301,6 +301,16 @@ CREATE TABLE IF NOT EXISTS hash_mapping (
 	UNIQUE (repo_id, got_hash)
 );
 
+CREATE TABLE IF NOT EXISTS merge_base_cache (
+	repo_id BIGINT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+	left_hash TEXT NOT NULL,
+	right_hash TEXT NOT NULL,
+	base_hash TEXT NOT NULL,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	PRIMARY KEY (repo_id, left_hash, right_hash)
+);
+
 CREATE TABLE IF NOT EXISTS indexing_jobs (
 	id BIGSERIAL PRIMARY KEY,
 	repo_id BIGINT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
@@ -424,6 +434,7 @@ CREATE TABLE IF NOT EXISTS xref_edges (
 
 CREATE INDEX IF NOT EXISTS idx_hash_mapping_git ON hash_mapping(repo_id, git_hash);
 CREATE INDEX IF NOT EXISTS idx_hash_mapping_got ON hash_mapping(repo_id, got_hash);
+CREATE INDEX IF NOT EXISTS idx_merge_base_cache_repo ON merge_base_cache(repo_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_magic_link_tokens_hash ON magic_link_tokens(token_hash);
 CREATE INDEX IF NOT EXISTS idx_magic_link_tokens_user ON magic_link_tokens(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_ssh_auth_challenges_user ON ssh_auth_challenges(user_id, created_at DESC);
@@ -717,6 +728,13 @@ func (p *PostgresDB) CloneRepoMetadata(ctx context.Context, sourceRepoID, target
 			query: `INSERT INTO hash_mapping (repo_id, git_hash, got_hash, object_type)
 					SELECT $1, git_hash, got_hash, object_type
 					FROM hash_mapping
+					WHERE repo_id = $2`,
+			args: []any{targetRepoID, sourceRepoID},
+		},
+		{
+			query: `INSERT INTO merge_base_cache (repo_id, left_hash, right_hash, base_hash, created_at, updated_at)
+					SELECT $1, left_hash, right_hash, base_hash, created_at, updated_at
+					FROM merge_base_cache
 					WHERE repo_id = $2`,
 			args: []any{targetRepoID, sourceRepoID},
 		},
@@ -1817,6 +1835,42 @@ func (p *PostgresDB) GetGitHash(ctx context.Context, repoID int64, gotHash strin
 	err := p.db.QueryRowContext(ctx,
 		`SELECT git_hash FROM hash_mapping WHERE repo_id = $1 AND got_hash = $2`, repoID, gotHash).Scan(&h)
 	return h, err
+}
+
+func (p *PostgresDB) SetMergeBaseCache(ctx context.Context, repoID int64, leftHash, rightHash, baseHash string) error {
+	leftHash, rightHash = normalizeMergeBasePair(leftHash, rightHash)
+	baseHash = strings.TrimSpace(baseHash)
+	if leftHash == "" || rightHash == "" || baseHash == "" {
+		return fmt.Errorf("merge-base cache requires non-empty hashes")
+	}
+	_, err := p.db.ExecContext(ctx,
+		`INSERT INTO merge_base_cache (repo_id, left_hash, right_hash, base_hash)
+		 VALUES ($1, $2, $3, $4)
+		 ON CONFLICT(repo_id, left_hash, right_hash) DO UPDATE SET
+			 base_hash = EXCLUDED.base_hash,
+			 updated_at = NOW()`,
+		repoID, leftHash, rightHash, baseHash,
+	)
+	return err
+}
+
+func (p *PostgresDB) GetMergeBaseCache(ctx context.Context, repoID int64, leftHash, rightHash string) (string, bool, error) {
+	leftHash, rightHash = normalizeMergeBasePair(leftHash, rightHash)
+	if leftHash == "" || rightHash == "" {
+		return "", false, nil
+	}
+	var baseHash string
+	err := p.db.QueryRowContext(ctx,
+		`SELECT base_hash FROM merge_base_cache WHERE repo_id = $1 AND left_hash = $2 AND right_hash = $3`,
+		repoID, leftHash, rightHash,
+	).Scan(&baseHash)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return baseHash, true, nil
 }
 
 func (p *PostgresDB) EnqueueIndexingJob(ctx context.Context, job *models.IndexingJob) error {

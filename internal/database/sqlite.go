@@ -331,6 +331,16 @@ CREATE TABLE IF NOT EXISTS hash_mapping (
 	UNIQUE (repo_id, got_hash)
 );
 
+CREATE TABLE IF NOT EXISTS merge_base_cache (
+	repo_id INTEGER NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+	left_hash TEXT NOT NULL,
+	right_hash TEXT NOT NULL,
+	base_hash TEXT NOT NULL,
+	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (repo_id, left_hash, right_hash)
+);
+
 CREATE TABLE IF NOT EXISTS indexing_jobs (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	repo_id INTEGER NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
@@ -480,6 +490,7 @@ CREATE TABLE IF NOT EXISTS xref_edges (
 
 CREATE INDEX IF NOT EXISTS idx_hash_mapping_git ON hash_mapping(repo_id, git_hash);
 CREATE INDEX IF NOT EXISTS idx_hash_mapping_got ON hash_mapping(repo_id, got_hash);
+CREATE INDEX IF NOT EXISTS idx_merge_base_cache_repo ON merge_base_cache(repo_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_magic_link_tokens_hash ON magic_link_tokens(token_hash);
 CREATE INDEX IF NOT EXISTS idx_magic_link_tokens_user ON magic_link_tokens(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_ssh_auth_challenges_user ON ssh_auth_challenges(user_id, created_at DESC);
@@ -792,6 +803,13 @@ func (s *SQLiteDB) CloneRepoMetadata(ctx context.Context, sourceRepoID, targetRe
 			query: `INSERT INTO hash_mapping (repo_id, git_hash, got_hash, object_type)
 					SELECT ?, git_hash, got_hash, object_type
 					FROM hash_mapping
+					WHERE repo_id = ?`,
+			args: []any{targetRepoID, sourceRepoID},
+		},
+		{
+			query: `INSERT INTO merge_base_cache (repo_id, left_hash, right_hash, base_hash, created_at, updated_at)
+					SELECT ?, left_hash, right_hash, base_hash, created_at, updated_at
+					FROM merge_base_cache
 					WHERE repo_id = ?`,
 			args: []any{targetRepoID, sourceRepoID},
 		},
@@ -1980,6 +1998,51 @@ func (s *SQLiteDB) GetGitHash(ctx context.Context, repoID int64, gotHash string)
 	err := s.db.QueryRowContext(ctx,
 		`SELECT git_hash FROM hash_mapping WHERE repo_id = ? AND got_hash = ?`, repoID, gotHash).Scan(&h)
 	return h, err
+}
+
+func normalizeMergeBasePair(leftHash, rightHash string) (string, string) {
+	leftHash = strings.TrimSpace(leftHash)
+	rightHash = strings.TrimSpace(rightHash)
+	if rightHash < leftHash {
+		leftHash, rightHash = rightHash, leftHash
+	}
+	return leftHash, rightHash
+}
+
+func (s *SQLiteDB) SetMergeBaseCache(ctx context.Context, repoID int64, leftHash, rightHash, baseHash string) error {
+	leftHash, rightHash = normalizeMergeBasePair(leftHash, rightHash)
+	baseHash = strings.TrimSpace(baseHash)
+	if leftHash == "" || rightHash == "" || baseHash == "" {
+		return fmt.Errorf("merge-base cache requires non-empty hashes")
+	}
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO merge_base_cache (repo_id, left_hash, right_hash, base_hash)
+		 VALUES (?, ?, ?, ?)
+		 ON CONFLICT(repo_id, left_hash, right_hash) DO UPDATE SET
+			 base_hash = excluded.base_hash,
+			 updated_at = CURRENT_TIMESTAMP`,
+		repoID, leftHash, rightHash, baseHash,
+	)
+	return err
+}
+
+func (s *SQLiteDB) GetMergeBaseCache(ctx context.Context, repoID int64, leftHash, rightHash string) (string, bool, error) {
+	leftHash, rightHash = normalizeMergeBasePair(leftHash, rightHash)
+	if leftHash == "" || rightHash == "" {
+		return "", false, nil
+	}
+	var baseHash string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT base_hash FROM merge_base_cache WHERE repo_id = ? AND left_hash = ? AND right_hash = ?`,
+		repoID, leftHash, rightHash,
+	).Scan(&baseHash)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return baseHash, true, nil
 }
 
 func (s *SQLiteDB) EnqueueIndexingJob(ctx context.Context, job *models.IndexingJob) error {

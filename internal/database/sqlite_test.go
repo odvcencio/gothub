@@ -303,6 +303,9 @@ func TestSQLiteCloneRepoMetadataCopiesRecords(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if err := db.SetMergeBaseCache(ctx, src.ID, gotHash, commitHash, gotHash); err != nil {
+		t.Fatal(err)
+	}
 	if err := db.SetCommitIndex(ctx, src.ID, commitHash, indexHash); err != nil {
 		t.Fatal(err)
 	}
@@ -395,6 +398,13 @@ func TestSQLiteCloneRepoMetadataCopiesRecords(t *testing.T) {
 	}
 	if gotDstHash != gotHash {
 		t.Fatalf("expected copied got hash %q, got %q", gotHash, gotDstHash)
+	}
+	gotDstBase, ok, err := db.GetMergeBaseCache(ctx, dst.ID, gotHash, commitHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || gotDstBase != gotHash {
+		t.Fatalf("expected copied merge base cache %q, got ok=%v base=%q", gotHash, ok, gotDstBase)
 	}
 
 	gotDstIndex, err := db.GetCommitIndex(ctx, dst.ID, commitHash)
@@ -714,6 +724,60 @@ func TestSQLiteCommitIndexUpsertAndGet(t *testing.T) {
 	}
 	if gotIndex != secondIndex {
 		t.Fatalf("expected upserted index hash %q, got %q", secondIndex, gotIndex)
+	}
+}
+
+func TestSQLiteMergeBaseCacheSetGetNormalizesPair(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	user := &models.User{Username: "alice", Email: "alice@example.com", PasswordHash: "x"}
+	if err := db.CreateUser(ctx, user); err != nil {
+		t.Fatal(err)
+	}
+	repo := &models.Repository{
+		OwnerUserID:   &user.ID,
+		Name:          "repo",
+		DefaultBranch: "main",
+		StoragePath:   "pending",
+	}
+	if err := db.CreateRepository(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+
+	left := strings.Repeat("b", 64)
+	right := strings.Repeat("a", 64)
+	base := strings.Repeat("c", 64)
+	if err := db.SetMergeBaseCache(ctx, repo.ID, left, right, base); err != nil {
+		t.Fatal(err)
+	}
+
+	gotBase, ok, err := db.GetMergeBaseCache(ctx, repo.ID, right, left)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("expected merge-base cache hit")
+	}
+	if gotBase != base {
+		t.Fatalf("expected merge base %q, got %q", base, gotBase)
+	}
+
+	_, ok, err = db.GetMergeBaseCache(ctx, repo.ID, strings.Repeat("d", 64), right)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatal("expected merge-base cache miss")
 	}
 }
 

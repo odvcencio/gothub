@@ -271,7 +271,7 @@ func (s *PRService) MergePreview(ctx context.Context, owner, repo string, pr *mo
 	}
 
 	// Find merge base
-	baseHash, err := FindMergeBase(store.Objects, tgtHash, srcHash)
+	baseHash, err := s.findMergeBaseCached(ctx, pr.RepoID, store.Objects, tgtHash, srcHash)
 	if err != nil {
 		return nil, fmt.Errorf("find merge base: %w", err)
 	}
@@ -364,7 +364,7 @@ func (s *PRService) Merge(ctx context.Context, owner, repo string, pr *models.Pu
 		return "", fmt.Errorf("target branch: %w", err)
 	}
 
-	baseHash, err := FindMergeBase(store.Objects, tgtHash, srcHash)
+	baseHash, err := s.findMergeBaseCached(ctx, pr.RepoID, store.Objects, tgtHash, srcHash)
 	if err != nil {
 		return "", fmt.Errorf("find merge base: %w", err)
 	}
@@ -513,6 +513,29 @@ func updateTargetBranchRef(store *gotstore.RepoStore, branch string, expectedOld
 		return fmt.Errorf("update ref: %w", err)
 	}
 	return nil
+}
+
+func (s *PRService) findMergeBaseCached(ctx context.Context, repoID int64, store *object.Store, left, right object.Hash) (object.Hash, error) {
+	if store == nil {
+		return "", fmt.Errorf("object store is nil")
+	}
+	if repoID > 0 && s.db != nil {
+		if cached, ok, err := s.db.GetMergeBaseCache(ctx, repoID, string(left), string(right)); err == nil && ok {
+			cachedHash := object.Hash(strings.TrimSpace(cached))
+			if cachedHash != "" && store.Has(cachedHash) {
+				return cachedHash, nil
+			}
+		}
+	}
+
+	baseHash, err := FindMergeBase(store, left, right)
+	if err != nil {
+		return "", err
+	}
+	if repoID > 0 && s.db != nil {
+		_ = s.db.SetMergeBaseCache(ctx, repoID, string(left), string(right), string(baseHash))
+	}
+	return baseHash, nil
 }
 
 type mergePreviewPathResult struct {
