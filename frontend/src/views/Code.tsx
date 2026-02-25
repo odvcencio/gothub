@@ -57,7 +57,7 @@ export function CodeView({ owner, repo, ref: gitRef, path }: Props) {
     setBlameLoading(false);
 
     // Determine if path is a blob or tree based on the URL
-    const isBlobUrl = location.pathname.includes('/blob/');
+    const isBlobUrl = isBlobRoute();
 
     if (isBlobUrl && path) {
       setIsDir(false);
@@ -74,7 +74,7 @@ export function CodeView({ owner, repo, ref: gitRef, path }: Props) {
         .catch(e => setError(e.message));
       listEntities(owner, repo, gitRef, path)
         .then((resp) => {
-          const list = resp.entities || [];
+          const list = Array.isArray(resp?.entities) ? resp.entities : [];
           setEntities(list);
           setSelectedEntity(list.length > 0 ? list[0] : null);
         })
@@ -86,7 +86,7 @@ export function CodeView({ owner, repo, ref: gitRef, path }: Props) {
     } else {
       setIsDir(true);
       listTree(owner, repo, gitRef, path)
-        .then(setEntries)
+        .then((items) => setEntries(items || []))
         .catch(e => setError(e.message));
     }
   }, [owner, repo, gitRef, path]);
@@ -131,6 +131,10 @@ export function CodeView({ owner, repo, ref: gitRef, path }: Props) {
 
   if (!owner || !repo || !gitRef) {
     return <div style={{ color: '#f85149', padding: '20px' }}>Missing repository context</div>;
+  }
+
+  if (isBlobRoute() && !path) {
+    return <div style={{ color: '#f85149', padding: '20px' }}>Missing file path for blob view</div>;
   }
 
   if (error) return <div style={{ color: '#f85149', padding: '20px' }}>{error}</div>;
@@ -252,6 +256,11 @@ function decodeBlobContent(data: unknown): { content: string; error?: string } {
 function isMarkdownPath(filePath: string): boolean {
   const lower = filePath.toLowerCase();
   return lower.endsWith('.md') || lower.endsWith('.markdown');
+}
+
+function isBlobRoute(): boolean {
+  if (typeof window === 'undefined') return false;
+  return window.location.pathname.includes('/blob/');
 }
 
 function EntityBlamePanel({

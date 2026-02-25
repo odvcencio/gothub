@@ -93,6 +93,10 @@ export function RepoView({ owner, repo }: Props) {
     getRepo(owner, repo)
       .then((info) => {
         if (cancelled) return;
+        if (!info) {
+          setRepoError('Repository data unavailable');
+          return;
+        }
         setRepoInfo(info);
       })
       .catch((e: any) => {
@@ -190,6 +194,10 @@ export function RepoView({ owner, repo }: Props) {
       cancelled = true;
     };
   }, [parentRepo?.owner, parentRepo?.name]);
+
+  if (!owner || !repo) {
+    return <div style={{ color: '#f85149', padding: '20px' }}>Missing repository context</div>;
+  }
 
   if (repoError) {
     return <div style={{ color: '#f85149', padding: '20px' }}>{repoError}</div>;
