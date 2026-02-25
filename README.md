@@ -4,6 +4,12 @@ AI-first code hosting with structural diffs, structural merge preview, entity li
 
 Contributor workflow: see [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Stack provenance
+
+- [got](https://github.com/odvcencio/got): structural VCS object model and merge engine.
+- [gotreesitter](https://github.com/odvcencio/gotreesitter): pure-Go parser/runtime powering entity extraction and syntax intelligence.
+- [gts-suite](https://github.com/odvcencio/gts-suite): structural indexing and analysis tooling consumed by gothub services.
+
 ## Quick start (Docker)
 
 ```bash
