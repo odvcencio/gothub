@@ -61,7 +61,7 @@ func BenchmarkCodeIntelCacheHitLookup(b *testing.B) {
 
 func BenchmarkMergePreviewCacheSetAndGet(b *testing.B) {
 	svc := &PRService{
-		mergePreviewCache: make(map[string]mergePreviewCacheEntry),
+		mergePreviewCache: make(map[string]*mergePreviewCacheEntry),
 	}
 	resp := &MergePreviewResponse{
 		Files: []FileMergeInfo{

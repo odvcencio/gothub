@@ -294,7 +294,7 @@ func TestPRMergeStateSyncErrorSurfacesDesyncWhenRollbackFails(t *testing.T) {
 }
 
 func TestMergePreviewCacheClonesResponses(t *testing.T) {
-	svc := &PRService{mergePreviewCache: make(map[string]mergePreviewCacheEntry)}
+	svc := &PRService{mergePreviewCache: make(map[string]*mergePreviewCacheEntry)}
 	original := &MergePreviewResponse{
 		HasConflicts: false,
 		Files:        []FileMergeInfo{{Path: "main.go", Status: "clean"}},
@@ -322,13 +322,17 @@ func TestMergePreviewCacheClonesResponses(t *testing.T) {
 }
 
 func TestMergePreviewCacheExpiresEntries(t *testing.T) {
+	entry := &mergePreviewCacheEntry{
+		key:       "k",
+		resp:      &MergePreviewResponse{Files: []FileMergeInfo{{Path: "main.go"}}},
+		expires:   time.Now().Add(-time.Second),
+		heapIndex: 0,
+	}
 	svc := &PRService{
-		mergePreviewCache: map[string]mergePreviewCacheEntry{
-			"k": {
-				resp:    &MergePreviewResponse{Files: []FileMergeInfo{{Path: "main.go"}}},
-				expires: time.Now().Add(-time.Second),
-			},
+		mergePreviewCache: map[string]*mergePreviewCacheEntry{
+			"k": entry,
 		},
+		mergePreviewExpiry: mergePreviewExpiryHeap{entry},
 	}
 
 	if _, ok := svc.getCachedMergePreview("k"); ok {
@@ -339,8 +343,27 @@ func TestMergePreviewCacheExpiresEntries(t *testing.T) {
 	}
 }
 
+func TestMergePreviewCacheEvictsOldestAtCapacity(t *testing.T) {
+	svc := &PRService{mergePreviewCache: make(map[string]*mergePreviewCacheEntry)}
+	resp := &MergePreviewResponse{Files: []FileMergeInfo{{Path: "main.go", Status: "clean"}}}
+
+	svc.setCachedMergePreview("a-oldest", resp)
+	for i := 0; i < mergePreviewCacheMaxEntries-1; i++ {
+		svc.setCachedMergePreview(fmt.Sprintf("b-%03d", i), resp)
+	}
+	svc.setCachedMergePreview("z-new", resp)
+
+	if _, ok := svc.getCachedMergePreview("a-oldest"); ok {
+		t.Fatal("expected oldest cache entry to be evicted at capacity")
+	}
+	if _, ok := svc.getCachedMergePreview("z-new"); !ok {
+		t.Fatal("expected newest cache entry to remain after eviction")
+	}
+	assertMergePreviewCacheInvariant(t, svc)
+}
+
 func TestMergePreviewCacheRemainsBounded(t *testing.T) {
-	svc := &PRService{mergePreviewCache: make(map[string]mergePreviewCacheEntry)}
+	svc := &PRService{mergePreviewCache: make(map[string]*mergePreviewCacheEntry)}
 
 	total := mergePreviewCacheMaxEntries + 64
 	for i := 0; i < total; i++ {
@@ -352,10 +375,11 @@ func TestMergePreviewCacheRemainsBounded(t *testing.T) {
 	if got := len(svc.mergePreviewCache); got != mergePreviewCacheMaxEntries {
 		t.Fatalf("expected bounded cache size %d, got %d", mergePreviewCacheMaxEntries, got)
 	}
+	assertMergePreviewCacheInvariant(t, svc)
 }
 
-func TestMergePreviewCacheCompactsStaleHeapEntries(t *testing.T) {
-	svc := &PRService{mergePreviewCache: make(map[string]mergePreviewCacheEntry)}
+func TestMergePreviewCacheRepeatedKeyUpdatesKeepSingleHeapEntry(t *testing.T) {
+	svc := &PRService{mergePreviewCache: make(map[string]*mergePreviewCacheEntry)}
 
 	updates := mergePreviewCacheMaxEntries * 5
 	for i := 0; i < updates; i++ {
@@ -372,8 +396,98 @@ func TestMergePreviewCacheCompactsStaleHeapEntries(t *testing.T) {
 	if cacheSize != 1 {
 		t.Fatalf("expected single cache entry after repeated key updates, got %d", cacheSize)
 	}
-	if heapSize > mergePreviewCacheMaxEntries {
-		t.Fatalf("expected heap compaction to cap stale metadata, got heap size %d", heapSize)
+	if heapSize != 1 {
+		t.Fatalf("expected single heap entry after repeated key updates, got %d", heapSize)
+	}
+	assertMergePreviewCacheInvariant(t, svc)
+}
+
+func TestMergePreviewCacheConcurrentAccessMaintainsInvariants(t *testing.T) {
+	svc := &PRService{mergePreviewCache: make(map[string]*mergePreviewCacheEntry)}
+
+	const (
+		workers    = 8
+		iterations = 500
+		keySpace   = 96
+	)
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+
+	for i := 0; i < workers; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for j := 0; j < iterations; j++ {
+				key := fmt.Sprintf("writer-%02d-%03d", i, j%keySpace)
+				svc.setCachedMergePreview(key, &MergePreviewResponse{
+					Files: []FileMergeInfo{{Path: fmt.Sprintf("file-%03d.go", j), Status: "clean"}},
+				})
+			}
+		}()
+	}
+
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			<-start
+			for j := 0; j < iterations; j++ {
+				key := fmt.Sprintf("writer-%02d-%03d", (id+j)%workers, j%keySpace)
+				_, _ = svc.getCachedMergePreview(key)
+			}
+		}(i)
+	}
+
+	close(start)
+	wg.Wait()
+	assertMergePreviewCacheInvariant(t, svc)
+}
+
+func assertMergePreviewCacheInvariant(t *testing.T, svc *PRService) {
+	t.Helper()
+
+	svc.mergePreviewMu.RLock()
+	defer svc.mergePreviewMu.RUnlock()
+
+	if len(svc.mergePreviewCache) > mergePreviewCacheMaxEntries {
+		t.Fatalf("cache size exceeded max entries: got %d want <= %d", len(svc.mergePreviewCache), mergePreviewCacheMaxEntries)
+	}
+	if len(svc.mergePreviewCache) != len(svc.mergePreviewExpiry) {
+		t.Fatalf("cache/heap size mismatch: cache=%d heap=%d", len(svc.mergePreviewCache), len(svc.mergePreviewExpiry))
+	}
+
+	for i, entry := range svc.mergePreviewExpiry {
+		if entry == nil {
+			t.Fatalf("heap entry %d is nil", i)
+		}
+		if entry.heapIndex != i {
+			t.Fatalf("heap entry %q has index %d, want %d", entry.key, entry.heapIndex, i)
+		}
+		cached, ok := svc.mergePreviewCache[entry.key]
+		if !ok {
+			t.Fatalf("heap entry %q missing from cache map", entry.key)
+		}
+		if cached != entry {
+			t.Fatalf("heap entry %q pointer mismatch between heap and cache map", entry.key)
+		}
+	}
+
+	for key, entry := range svc.mergePreviewCache {
+		if entry == nil {
+			t.Fatalf("cache entry %q is nil", key)
+		}
+		if entry.key != key {
+			t.Fatalf("cache entry key mismatch: map key %q entry key %q", key, entry.key)
+		}
+		if entry.heapIndex < 0 || entry.heapIndex >= len(svc.mergePreviewExpiry) {
+			t.Fatalf("cache entry %q has invalid heap index %d", key, entry.heapIndex)
+		}
+		if svc.mergePreviewExpiry[entry.heapIndex] != entry {
+			t.Fatalf("cache entry %q heap pointer mismatch at index %d", key, entry.heapIndex)
+		}
 	}
 }
 

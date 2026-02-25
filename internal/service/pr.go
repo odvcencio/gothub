@@ -119,23 +119,17 @@ func (e *PRMergeStateSyncError) Unwrap() error {
 const (
 	mergePreviewCacheTTL        = 30 * time.Second
 	mergePreviewCacheMaxEntries = 256
-	mergePreviewCleanupInterval = 2 * time.Second
 	mergePathWorkersMax         = 16
 )
 
 type mergePreviewCacheEntry struct {
-	resp    *MergePreviewResponse
-	expires time.Time
-	version uint64
+	key       string
+	resp      *MergePreviewResponse
+	expires   time.Time
+	heapIndex int
 }
 
-type mergePreviewExpiryItem struct {
-	key     string
-	expires time.Time
-	version uint64
-}
-
-type mergePreviewExpiryHeap []mergePreviewExpiryItem
+type mergePreviewExpiryHeap []*mergePreviewCacheEntry
 
 func (h mergePreviewExpiryHeap) Len() int { return len(h) }
 
@@ -146,18 +140,26 @@ func (h mergePreviewExpiryHeap) Less(i, j int) bool {
 	return h[i].expires.Before(h[j].expires)
 }
 
-func (h mergePreviewExpiryHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+func (h mergePreviewExpiryHeap) Swap(i, j int) {
+	h[i], h[j] = h[j], h[i]
+	h[i].heapIndex = i
+	h[j].heapIndex = j
+}
 
 func (h *mergePreviewExpiryHeap) Push(x any) {
-	*h = append(*h, x.(mergePreviewExpiryItem))
+	entry := x.(*mergePreviewCacheEntry)
+	entry.heapIndex = len(*h)
+	*h = append(*h, entry)
 }
 
 func (h *mergePreviewExpiryHeap) Pop() any {
 	old := *h
 	n := len(old)
-	item := old[n-1]
+	entry := old[n-1]
+	old[n-1] = nil
+	entry.heapIndex = -1
 	*h = old[:n-1]
-	return item
+	return entry
 }
 
 type PRService struct {
@@ -167,11 +169,9 @@ type PRService struct {
 	codeIntelSvc *CodeIntelService
 	lineageSvc   *EntityLineageService
 
-	mergePreviewMu      sync.RWMutex
-	mergePreviewCache   map[string]mergePreviewCacheEntry
-	mergePreviewExpiry  mergePreviewExpiryHeap
-	mergePreviewVersion uint64
-	mergePreviewPrune   time.Time
+	mergePreviewMu     sync.RWMutex
+	mergePreviewCache  map[string]*mergePreviewCacheEntry
+	mergePreviewExpiry mergePreviewExpiryHeap
 }
 
 func NewPRService(db database.DB, repoSvc *RepoService, browseSvc *BrowseService) *PRService {
@@ -179,7 +179,7 @@ func NewPRService(db database.DB, repoSvc *RepoService, browseSvc *BrowseService
 		db:                db,
 		repoSvc:           repoSvc,
 		browseSvc:         browseSvc,
-		mergePreviewCache: make(map[string]mergePreviewCacheEntry),
+		mergePreviewCache: make(map[string]*mergePreviewCacheEntry),
 	}
 }
 
@@ -792,61 +792,54 @@ func (s *PRService) getCachedMergePreview(key string) (*MergePreviewResponse, bo
 	now := time.Now()
 	s.mergePreviewMu.RLock()
 	entry, ok := s.mergePreviewCache[key]
-	cleanupDue := s.mergePreviewCleanupDueLocked(now)
+	if ok && now.Before(entry.expires) {
+		cloned := cloneMergePreviewResponse(entry.resp)
+		s.mergePreviewMu.RUnlock()
+		return cloned, true
+	}
 	s.mergePreviewMu.RUnlock()
 
-	if !ok {
-		if cleanupDue {
-			s.pruneExpiredMergePreviewCache(now)
-		}
-		return nil, false
-	}
-	if !now.Before(entry.expires) {
+	if ok {
 		s.deleteExpiredMergePreviewEntry(key, now)
-		if cleanupDue {
-			s.pruneExpiredMergePreviewCache(now)
-		}
-		return nil, false
 	}
-	if cleanupDue {
-		s.pruneExpiredMergePreviewCache(now)
-	}
-
-	return cloneMergePreviewResponse(entry.resp), true
+	return nil, false
 }
 
 func (s *PRService) setCachedMergePreview(key string, resp *MergePreviewResponse) {
 	now := time.Now()
 	cloned := cloneMergePreviewResponse(resp)
+	expires := now.Add(mergePreviewCacheTTL)
 
 	s.mergePreviewMu.Lock()
 	defer s.mergePreviewMu.Unlock()
 
 	if s.mergePreviewCache == nil {
-		s.mergePreviewCache = make(map[string]mergePreviewCacheEntry)
+		s.mergePreviewCache = make(map[string]*mergePreviewCacheEntry)
+	}
+	if len(s.mergePreviewCache) != len(s.mergePreviewExpiry) {
+		s.rebuildMergePreviewExpiryHeapLocked()
 	}
 	s.pruneExpiredMergePreviewCacheLocked(now)
 
-	if _, exists := s.mergePreviewCache[key]; !exists {
-		for len(s.mergePreviewCache) >= mergePreviewCacheMaxEntries {
-			s.evictOldestMergePreviewEntryLocked()
-		}
+	if entry, exists := s.mergePreviewCache[key]; exists {
+		entry.resp = cloned
+		entry.expires = expires
+		heap.Fix(&s.mergePreviewExpiry, entry.heapIndex)
+		return
 	}
 
-	s.mergePreviewVersion++
-	entry := mergePreviewCacheEntry{
-		resp:    cloned,
-		expires: now.Add(mergePreviewCacheTTL),
-		version: s.mergePreviewVersion,
+	for len(s.mergePreviewCache) >= mergePreviewCacheMaxEntries {
+		s.evictOldestMergePreviewEntryLocked()
+	}
+
+	entry := &mergePreviewCacheEntry{
+		key:       key,
+		resp:      cloned,
+		expires:   expires,
+		heapIndex: -1,
 	}
 	s.mergePreviewCache[key] = entry
-	heap.Push(&s.mergePreviewExpiry, mergePreviewExpiryItem{
-		key:     key,
-		expires: entry.expires,
-		version: entry.version,
-	})
-	s.compactMergePreviewExpiryHeapLocked()
-	s.mergePreviewPrune = now
+	heap.Push(&s.mergePreviewExpiry, entry)
 }
 
 func (s *PRService) deleteExpiredMergePreviewEntry(key string, now time.Time) {
@@ -857,37 +850,47 @@ func (s *PRService) deleteExpiredMergePreviewEntry(key string, now time.Time) {
 	if !ok || now.Before(entry.expires) {
 		return
 	}
-	delete(s.mergePreviewCache, key)
+	s.removeMergePreviewEntryLocked(entry)
 }
 
-func (s *PRService) mergePreviewCleanupDueLocked(now time.Time) bool {
-	return s.mergePreviewPrune.IsZero() || now.Sub(s.mergePreviewPrune) >= mergePreviewCleanupInterval
-}
-
-func (s *PRService) pruneExpiredMergePreviewCache(now time.Time) {
-	s.mergePreviewMu.Lock()
-	defer s.mergePreviewMu.Unlock()
-
-	if !s.mergePreviewCleanupDueLocked(now) {
+func (s *PRService) removeMergePreviewEntryLocked(entry *mergePreviewCacheEntry) {
+	if entry == nil {
 		return
 	}
-	s.pruneExpiredMergePreviewCacheLocked(now)
-	s.compactMergePreviewExpiryHeapLocked()
-	s.mergePreviewPrune = now
+
+	if current, ok := s.mergePreviewCache[entry.key]; ok && current == entry {
+		delete(s.mergePreviewCache, entry.key)
+	}
+
+	if idx := entry.heapIndex; idx >= 0 && idx < len(s.mergePreviewExpiry) && s.mergePreviewExpiry[idx] == entry {
+		heap.Remove(&s.mergePreviewExpiry, idx)
+		return
+	}
+	for i := range s.mergePreviewExpiry {
+		if s.mergePreviewExpiry[i] == entry {
+			heap.Remove(&s.mergePreviewExpiry, i)
+			return
+		}
+	}
+}
+
+func (s *PRService) rebuildMergePreviewExpiryHeapLocked() {
+	rebuilt := make(mergePreviewExpiryHeap, 0, len(s.mergePreviewCache))
+	for key, entry := range s.mergePreviewCache {
+		if entry == nil {
+			delete(s.mergePreviewCache, key)
+			continue
+		}
+		entry.key = key
+		entry.heapIndex = len(rebuilt)
+		rebuilt = append(rebuilt, entry)
+	}
+	heap.Init(&rebuilt)
+	s.mergePreviewExpiry = rebuilt
 }
 
 func (s *PRService) pruneExpiredMergePreviewCacheLocked(now time.Time) {
-	if len(s.mergePreviewCache) == 0 {
-		return
-	}
-
-	// Fallback for out-of-band states where map was populated without heap metadata.
 	if len(s.mergePreviewExpiry) == 0 {
-		for key, entry := range s.mergePreviewCache {
-			if !now.Before(entry.expires) {
-				delete(s.mergePreviewCache, key)
-			}
-		}
 		return
 	}
 
@@ -896,26 +899,18 @@ func (s *PRService) pruneExpiredMergePreviewCacheLocked(now time.Time) {
 		if now.Before(top.expires) {
 			return
 		}
-		item := heap.Pop(&s.mergePreviewExpiry).(mergePreviewExpiryItem)
-		entry, ok := s.mergePreviewCache[item.key]
-		if !ok || entry.version != item.version {
-			continue
-		}
-		if now.Before(entry.expires) {
-			continue
-		}
-		delete(s.mergePreviewCache, item.key)
+		s.removeMergePreviewEntryLocked(top)
 	}
 }
 
 func (s *PRService) evictOldestMergePreviewEntryLocked() {
 	for len(s.mergePreviewExpiry) > 0 {
-		item := heap.Pop(&s.mergePreviewExpiry).(mergePreviewExpiryItem)
-		entry, ok := s.mergePreviewCache[item.key]
-		if !ok || entry.version != item.version {
+		entry := heap.Pop(&s.mergePreviewExpiry).(*mergePreviewCacheEntry)
+		current, ok := s.mergePreviewCache[entry.key]
+		if !ok || current != entry {
 			continue
 		}
-		delete(s.mergePreviewCache, item.key)
+		delete(s.mergePreviewCache, entry.key)
 		return
 	}
 
@@ -923,26 +918,6 @@ func (s *PRService) evictOldestMergePreviewEntryLocked() {
 		delete(s.mergePreviewCache, key)
 		return
 	}
-}
-
-func (s *PRService) compactMergePreviewExpiryHeapLocked() {
-	maxHeapSize := len(s.mergePreviewCache) * 4
-	if maxHeapSize < mergePreviewCacheMaxEntries {
-		maxHeapSize = mergePreviewCacheMaxEntries
-	}
-	if len(s.mergePreviewExpiry) <= maxHeapSize {
-		return
-	}
-	rebuilt := make(mergePreviewExpiryHeap, 0, len(s.mergePreviewCache))
-	for key, entry := range s.mergePreviewCache {
-		rebuilt = append(rebuilt, mergePreviewExpiryItem{
-			key:     key,
-			expires: entry.expires,
-			version: entry.version,
-		})
-	}
-	heap.Init(&rebuilt)
-	s.mergePreviewExpiry = rebuilt
 }
 
 func cloneMergePreviewResponse(in *MergePreviewResponse) *MergePreviewResponse {
