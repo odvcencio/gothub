@@ -95,12 +95,22 @@ func (p *PostgresDB) migrateTenancySchema(ctx context.Context) error {
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT COALESCE(NULLIF(current_setting('app.tenant_id', true), ''), 'default')`,
 		`ALTER TABLE orgs ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT COALESCE(NULLIF(current_setting('app.tenant_id', true), ''), 'default')`,
 		`ALTER TABLE repositories ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT COALESCE(NULLIF(current_setting('app.tenant_id', true), ''), 'default')`,
+		`ALTER TABLE pull_requests ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT COALESCE(NULLIF(current_setting('app.tenant_id', true), ''), 'default')`,
+		`ALTER TABLE pr_comments ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT COALESCE(NULLIF(current_setting('app.tenant_id', true), ''), 'default')`,
+		`ALTER TABLE pr_reviews ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT COALESCE(NULLIF(current_setting('app.tenant_id', true), ''), 'default')`,
+		`ALTER TABLE issues ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT COALESCE(NULLIF(current_setting('app.tenant_id', true), ''), 'default')`,
+		`ALTER TABLE issue_comments ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT COALESCE(NULLIF(current_setting('app.tenant_id', true), ''), 'default')`,
 		`ALTER TABLE repo_webhooks ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT COALESCE(NULLIF(current_setting('app.tenant_id', true), ''), 'default')`,
 		`ALTER TABLE webhook_deliveries ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT COALESCE(NULLIF(current_setting('app.tenant_id', true), ''), 'default')`,
 		`CREATE INDEX IF NOT EXISTS idx_users_tenant_username ON users(tenant_id, username)`,
 		`CREATE INDEX IF NOT EXISTS idx_users_tenant_email ON users(tenant_id, email)`,
 		`CREATE INDEX IF NOT EXISTS idx_orgs_tenant_name ON orgs(tenant_id, name)`,
 		`CREATE INDEX IF NOT EXISTS idx_repositories_tenant_owner_name ON repositories(tenant_id, owner_user_id, owner_org_id, name)`,
+		`CREATE INDEX IF NOT EXISTS idx_pull_requests_tenant_repo_number ON pull_requests(tenant_id, repo_id, number DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_pr_comments_tenant_pr_created ON pr_comments(tenant_id, pr_id, created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_pr_reviews_tenant_pr_created ON pr_reviews(tenant_id, pr_id, created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_issues_tenant_repo_number ON issues(tenant_id, repo_id, number DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_issue_comments_tenant_issue_created ON issue_comments(tenant_id, issue_id, created_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_repo_webhooks_tenant_repo ON repo_webhooks(tenant_id, repo_id, id DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_tenant_repo_webhook_time ON webhook_deliveries(tenant_id, repo_id, webhook_id, created_at DESC)`,
 	}
@@ -236,6 +246,7 @@ CREATE TABLE IF NOT EXISTS pull_requests (
 	merge_method TEXT NOT NULL DEFAULT '',
 	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 	merged_at TIMESTAMPTZ,
+	tenant_id TEXT NOT NULL DEFAULT COALESCE(NULLIF(current_setting('app.tenant_id', true), ''), 'default'),
 	UNIQUE(repo_id, number)
 );
 
@@ -249,7 +260,8 @@ CREATE TABLE IF NOT EXISTS pr_comments (
 	entity_stable_id TEXT NOT NULL DEFAULT '',
 	line_number INTEGER,
 	commit_hash TEXT NOT NULL DEFAULT '',
-	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	tenant_id TEXT NOT NULL DEFAULT COALESCE(NULLIF(current_setting('app.tenant_id', true), ''), 'default')
 );
 
 CREATE TABLE IF NOT EXISTS pr_reviews (
@@ -259,7 +271,8 @@ CREATE TABLE IF NOT EXISTS pr_reviews (
 	state TEXT NOT NULL,
 	body TEXT NOT NULL DEFAULT '',
 	commit_hash TEXT NOT NULL DEFAULT '',
-	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	tenant_id TEXT NOT NULL DEFAULT COALESCE(NULLIF(current_setting('app.tenant_id', true), ''), 'default')
 );
 
 CREATE TABLE IF NOT EXISTS issues (
@@ -272,6 +285,7 @@ CREATE TABLE IF NOT EXISTS issues (
 	author_id BIGINT NOT NULL REFERENCES users(id),
 	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 	closed_at TIMESTAMPTZ,
+	tenant_id TEXT NOT NULL DEFAULT COALESCE(NULLIF(current_setting('app.tenant_id', true), ''), 'default'),
 	UNIQUE(repo_id, number)
 );
 
@@ -280,7 +294,8 @@ CREATE TABLE IF NOT EXISTS issue_comments (
 	issue_id BIGINT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
 	author_id BIGINT NOT NULL REFERENCES users(id),
 	body TEXT NOT NULL,
-	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	tenant_id TEXT NOT NULL DEFAULT COALESCE(NULLIF(current_setting('app.tenant_id', true), ''), 'default')
 );
 
 CREATE TABLE IF NOT EXISTS notifications (
@@ -535,8 +550,13 @@ CREATE INDEX IF NOT EXISTS idx_xref_edges_repo_commit_source ON xref_edges(repo_
 CREATE INDEX IF NOT EXISTS idx_xref_edges_repo_commit_target ON xref_edges(repo_id, commit_hash, target_entity_id, kind);
 CREATE INDEX IF NOT EXISTS idx_branch_protection_repo_branch ON branch_protection_rules(repo_id, branch);
 CREATE INDEX IF NOT EXISTS idx_pr_check_runs_pr ON pr_check_runs(pr_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_pull_requests_tenant_repo_number ON pull_requests(tenant_id, repo_id, number DESC);
+CREATE INDEX IF NOT EXISTS idx_pr_comments_tenant_pr_created ON pr_comments(tenant_id, pr_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_pr_reviews_tenant_pr_created ON pr_reviews(tenant_id, pr_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_issues_repo_number ON issues(repo_id, number DESC);
+CREATE INDEX IF NOT EXISTS idx_issues_tenant_repo_number ON issues(tenant_id, repo_id, number DESC);
 CREATE INDEX IF NOT EXISTS idx_issue_comments_issue ON issue_comments(issue_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_issue_comments_tenant_issue_created ON issue_comments(tenant_id, issue_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_notifications_user_created ON notifications(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_notifications_user_unread ON notifications(user_id, read_at, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_repo_webhooks_repo ON repo_webhooks(repo_id);
@@ -599,6 +619,86 @@ BEGIN
 			AND policyname = 'repositories_tenant_rls'
 	) THEN
 		CREATE POLICY repositories_tenant_rls ON repositories
+		USING (gothub_tenant_rls_match(tenant_id))
+		WITH CHECK (gothub_tenant_rls_match(tenant_id));
+	END IF;
+END $$;
+
+ALTER TABLE pull_requests ENABLE ROW LEVEL SECURITY;
+ALTER TABLE pull_requests FORCE ROW LEVEL SECURITY;
+DO $$
+BEGIN
+	IF NOT EXISTS (
+		SELECT 1 FROM pg_policies
+		WHERE schemaname = current_schema()
+			AND tablename = 'pull_requests'
+			AND policyname = 'pull_requests_tenant_rls'
+	) THEN
+		CREATE POLICY pull_requests_tenant_rls ON pull_requests
+		USING (gothub_tenant_rls_match(tenant_id))
+		WITH CHECK (gothub_tenant_rls_match(tenant_id));
+	END IF;
+END $$;
+
+ALTER TABLE pr_comments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE pr_comments FORCE ROW LEVEL SECURITY;
+DO $$
+BEGIN
+	IF NOT EXISTS (
+		SELECT 1 FROM pg_policies
+		WHERE schemaname = current_schema()
+			AND tablename = 'pr_comments'
+			AND policyname = 'pr_comments_tenant_rls'
+	) THEN
+		CREATE POLICY pr_comments_tenant_rls ON pr_comments
+		USING (gothub_tenant_rls_match(tenant_id))
+		WITH CHECK (gothub_tenant_rls_match(tenant_id));
+	END IF;
+END $$;
+
+ALTER TABLE pr_reviews ENABLE ROW LEVEL SECURITY;
+ALTER TABLE pr_reviews FORCE ROW LEVEL SECURITY;
+DO $$
+BEGIN
+	IF NOT EXISTS (
+		SELECT 1 FROM pg_policies
+		WHERE schemaname = current_schema()
+			AND tablename = 'pr_reviews'
+			AND policyname = 'pr_reviews_tenant_rls'
+	) THEN
+		CREATE POLICY pr_reviews_tenant_rls ON pr_reviews
+		USING (gothub_tenant_rls_match(tenant_id))
+		WITH CHECK (gothub_tenant_rls_match(tenant_id));
+	END IF;
+END $$;
+
+ALTER TABLE issues ENABLE ROW LEVEL SECURITY;
+ALTER TABLE issues FORCE ROW LEVEL SECURITY;
+DO $$
+BEGIN
+	IF NOT EXISTS (
+		SELECT 1 FROM pg_policies
+		WHERE schemaname = current_schema()
+			AND tablename = 'issues'
+			AND policyname = 'issues_tenant_rls'
+	) THEN
+		CREATE POLICY issues_tenant_rls ON issues
+		USING (gothub_tenant_rls_match(tenant_id))
+		WITH CHECK (gothub_tenant_rls_match(tenant_id));
+	END IF;
+END $$;
+
+ALTER TABLE issue_comments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE issue_comments FORCE ROW LEVEL SECURITY;
+DO $$
+BEGIN
+	IF NOT EXISTS (
+		SELECT 1 FROM pg_policies
+		WHERE schemaname = current_schema()
+			AND tablename = 'issue_comments'
+			AND policyname = 'issue_comments_tenant_rls'
+	) THEN
+		CREATE POLICY issue_comments_tenant_rls ON issue_comments
 		USING (gothub_tenant_rls_match(tenant_id))
 		WITH CHECK (gothub_tenant_rls_match(tenant_id));
 	END IF;
@@ -1322,6 +1422,7 @@ func (p *PostgresDB) RemoveCollaborator(ctx context.Context, repoID, userID int6
 // --- Pull Requests ---
 
 func (p *PostgresDB) CreatePullRequest(ctx context.Context, pr *models.PullRequest) error {
+	tenantID := tenantIDForContext(ctx)
 	tx, err := p.beginTx(ctx)
 	if err != nil {
 		return err
@@ -1330,21 +1431,28 @@ func (p *PostgresDB) CreatePullRequest(ctx context.Context, pr *models.PullReque
 
 	// Lock repository row to serialize PR number assignment per repository.
 	var repoID int64
-	if err := tx.QueryRowContext(ctx, `SELECT id FROM repositories WHERE id = $1 FOR UPDATE`, pr.RepoID).Scan(&repoID); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM repositories WHERE id = $1 AND tenant_id = $2 FOR UPDATE`, pr.RepoID, tenantID).Scan(&repoID); err != nil {
 		return err
 	}
 
 	var maxNum int
 	if err := tx.QueryRowContext(ctx,
-		`SELECT COALESCE(MAX(number), 0) FROM pull_requests WHERE repo_id = $1`, pr.RepoID).Scan(&maxNum); err != nil {
+		`SELECT COALESCE(MAX(number), 0) FROM pull_requests WHERE repo_id = $1 AND tenant_id = $2`, pr.RepoID, tenantID).Scan(&maxNum); err != nil {
 		return err
 	}
 	pr.Number = maxNum + 1
 
 	if err := tx.QueryRowContext(ctx,
-		`INSERT INTO pull_requests (repo_id, number, title, body, state, author_id, source_branch, target_branch, source_commit, target_commit)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id, created_at`,
-		pr.RepoID, pr.Number, pr.Title, pr.Body, pr.State, pr.AuthorID, pr.SourceBranch, pr.TargetBranch, pr.SourceCommit, pr.TargetCommit).
+		`INSERT INTO pull_requests (repo_id, number, title, body, state, author_id, source_branch, target_branch, source_commit, target_commit, tenant_id)
+		 SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+		 WHERE EXISTS (
+			 SELECT 1
+			 FROM users u
+			 WHERE u.id = $6
+			 	AND u.tenant_id = $11
+		 )
+		 RETURNING id, created_at`,
+		pr.RepoID, pr.Number, pr.Title, pr.Body, pr.State, pr.AuthorID, pr.SourceBranch, pr.TargetBranch, pr.SourceCommit, pr.TargetCommit, tenantID).
 		Scan(&pr.ID, &pr.CreatedAt); err != nil {
 		return err
 	}
@@ -1353,13 +1461,14 @@ func (p *PostgresDB) CreatePullRequest(ctx context.Context, pr *models.PullReque
 }
 
 func (p *PostgresDB) GetPullRequest(ctx context.Context, repoID int64, number int) (*models.PullRequest, error) {
+	tenantID := tenantIDForContext(ctx)
 	pr := &models.PullRequest{}
 	err := p.db.QueryRowContext(ctx,
 		`SELECT pr.id, pr.repo_id, pr.number, pr.title, pr.body, pr.state, pr.author_id, u.username,
 		        pr.source_branch, pr.target_branch, pr.source_commit, pr.target_commit, pr.merge_commit, pr.merge_method, pr.created_at, pr.merged_at
 		 FROM pull_requests pr
-		 JOIN users u ON u.id = pr.author_id
-		 WHERE pr.repo_id = $1 AND pr.number = $2`, repoID, number).
+		 JOIN users u ON u.id = pr.author_id AND u.tenant_id = pr.tenant_id
+		 WHERE pr.repo_id = $1 AND pr.number = $2 AND pr.tenant_id = $3`, repoID, number, tenantID).
 		Scan(&pr.ID, &pr.RepoID, &pr.Number, &pr.Title, &pr.Body, &pr.State, &pr.AuthorID, &pr.AuthorName,
 			&pr.SourceBranch, &pr.TargetBranch, &pr.SourceCommit, &pr.TargetCommit,
 			&pr.MergeCommit, &pr.MergeMethod, &pr.CreatedAt, &pr.MergedAt)
@@ -1374,13 +1483,14 @@ func (p *PostgresDB) ListPullRequests(ctx context.Context, repoID int64, state s
 }
 
 func (p *PostgresDB) ListPullRequestsPage(ctx context.Context, repoID int64, state string, limit, offset int) ([]models.PullRequest, error) {
+	tenantID := tenantIDForContext(ctx)
 	query := `SELECT pr.id, pr.repo_id, pr.number, pr.title, pr.body, pr.state, pr.author_id, u.username,
 	         pr.source_branch, pr.target_branch, pr.source_commit, pr.target_commit, pr.merge_commit, pr.merge_method, pr.created_at, pr.merged_at
 		 FROM pull_requests pr
-		 JOIN users u ON u.id = pr.author_id
-		 WHERE pr.repo_id = $1`
-	args := []any{repoID}
-	argPos := 2
+		 JOIN users u ON u.id = pr.author_id AND u.tenant_id = pr.tenant_id
+		 WHERE pr.repo_id = $1 AND pr.tenant_id = $2`
+	args := []any{repoID, tenantID}
+	argPos := 3
 	if state != "" {
 		query += fmt.Sprintf(" AND pr.state = $%d", argPos)
 		args = append(args, state)
@@ -1414,20 +1524,26 @@ func (p *PostgresDB) ListPullRequestsPage(ctx context.Context, repoID int64, sta
 }
 
 func (p *PostgresDB) UpdatePullRequest(ctx context.Context, pr *models.PullRequest) error {
+	tenantID := tenantIDForContext(ctx)
 	_, err := p.db.ExecContext(ctx,
 		`UPDATE pull_requests SET title=$1, body=$2, state=$3, source_commit=$4, target_commit=$5, merge_commit=$6, merge_method=$7, merged_at=$8
-		 WHERE id = $9`,
-		pr.Title, pr.Body, pr.State, pr.SourceCommit, pr.TargetCommit, pr.MergeCommit, pr.MergeMethod, pr.MergedAt, pr.ID)
+		 WHERE id = $9 AND tenant_id = $10`,
+		pr.Title, pr.Body, pr.State, pr.SourceCommit, pr.TargetCommit, pr.MergeCommit, pr.MergeMethod, pr.MergedAt, pr.ID, tenantID)
 	return err
 }
 
 // --- PR Comments ---
 
 func (p *PostgresDB) CreatePRComment(ctx context.Context, c *models.PRComment) error {
+	tenantID := tenantIDForContext(ctx)
 	return p.db.QueryRowContext(ctx,
-		`INSERT INTO pr_comments (pr_id, author_id, body, file_path, entity_key, entity_stable_id, line_number, commit_hash)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id, created_at`,
-		c.PRID, c.AuthorID, c.Body, c.FilePath, c.EntityKey, c.EntityStableID, c.LineNumber, c.CommitHash).Scan(&c.ID, &c.CreatedAt)
+		`INSERT INTO pr_comments (pr_id, author_id, body, file_path, entity_key, entity_stable_id, line_number, commit_hash, tenant_id)
+		 SELECT p.id, $2, $3, $4, $5, $6, $7, $8, $9
+		 FROM pull_requests p
+		 JOIN users u ON u.id = $2 AND u.tenant_id = $9
+		 WHERE p.id = $1 AND p.tenant_id = $9
+		 RETURNING id, created_at`,
+		c.PRID, c.AuthorID, c.Body, c.FilePath, c.EntityKey, c.EntityStableID, c.LineNumber, c.CommitHash, tenantID).Scan(&c.ID, &c.CreatedAt)
 }
 
 func (p *PostgresDB) ListPRComments(ctx context.Context, prID int64) ([]models.PRComment, error) {
@@ -1435,6 +1551,7 @@ func (p *PostgresDB) ListPRComments(ctx context.Context, prID int64) ([]models.P
 }
 
 func (p *PostgresDB) ListPRCommentsPage(ctx context.Context, prID int64, limit, offset int) ([]models.PRComment, error) {
+	tenantID := tenantIDForContext(ctx)
 	if limit <= 0 {
 		limit = 100
 	}
@@ -1444,10 +1561,10 @@ func (p *PostgresDB) ListPRCommentsPage(ctx context.Context, prID int64, limit, 
 	rows, err := p.db.QueryContext(ctx,
 		`SELECT c.id, c.pr_id, c.author_id, u.username, c.body, c.file_path, c.entity_key, c.entity_stable_id, c.line_number, c.commit_hash, c.created_at
 		 FROM pr_comments c
-		 JOIN users u ON u.id = c.author_id
-		 WHERE c.pr_id = $1
+		 JOIN users u ON u.id = c.author_id AND u.tenant_id = c.tenant_id
+		 WHERE c.pr_id = $1 AND c.tenant_id = $2
 		 ORDER BY c.created_at
-		 LIMIT $2 OFFSET $3`, prID, limit, offset)
+		 LIMIT $3 OFFSET $4`, prID, tenantID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -1464,7 +1581,8 @@ func (p *PostgresDB) ListPRCommentsPage(ctx context.Context, prID int64, limit, 
 }
 
 func (p *PostgresDB) DeletePRComment(ctx context.Context, commentID, authorID int64) error {
-	res, err := p.db.ExecContext(ctx, `DELETE FROM pr_comments WHERE id = $1 AND author_id = $2`, commentID, authorID)
+	tenantID := tenantIDForContext(ctx)
+	res, err := p.db.ExecContext(ctx, `DELETE FROM pr_comments WHERE id = $1 AND author_id = $2 AND tenant_id = $3`, commentID, authorID, tenantID)
 	if err != nil {
 		return err
 	}
@@ -1478,9 +1596,15 @@ func (p *PostgresDB) DeletePRComment(ctx context.Context, commentID, authorID in
 // --- PR Reviews ---
 
 func (p *PostgresDB) CreatePRReview(ctx context.Context, r *models.PRReview) error {
+	tenantID := tenantIDForContext(ctx)
 	return p.db.QueryRowContext(ctx,
-		`INSERT INTO pr_reviews (pr_id, author_id, state, body, commit_hash) VALUES ($1, $2, $3, $4, $5) RETURNING id, created_at`,
-		r.PRID, r.AuthorID, r.State, r.Body, r.CommitHash).Scan(&r.ID, &r.CreatedAt)
+		`INSERT INTO pr_reviews (pr_id, author_id, state, body, commit_hash, tenant_id)
+		 SELECT p.id, $2, $3, $4, $5, $6
+		 FROM pull_requests p
+		 JOIN users u ON u.id = $2 AND u.tenant_id = $6
+		 WHERE p.id = $1 AND p.tenant_id = $6
+		 RETURNING id, created_at`,
+		r.PRID, r.AuthorID, r.State, r.Body, r.CommitHash, tenantID).Scan(&r.ID, &r.CreatedAt)
 }
 
 func (p *PostgresDB) ListPRReviews(ctx context.Context, prID int64) ([]models.PRReview, error) {
@@ -1488,6 +1612,7 @@ func (p *PostgresDB) ListPRReviews(ctx context.Context, prID int64) ([]models.PR
 }
 
 func (p *PostgresDB) ListPRReviewsPage(ctx context.Context, prID int64, limit, offset int) ([]models.PRReview, error) {
+	tenantID := tenantIDForContext(ctx)
 	if limit <= 0 {
 		limit = 100
 	}
@@ -1497,10 +1622,10 @@ func (p *PostgresDB) ListPRReviewsPage(ctx context.Context, prID int64, limit, o
 	rows, err := p.db.QueryContext(ctx,
 		`SELECT r.id, r.pr_id, r.author_id, u.username, r.state, r.body, r.commit_hash, r.created_at
 		 FROM pr_reviews r
-		 JOIN users u ON u.id = r.author_id
-		 WHERE r.pr_id = $1
+		 JOIN users u ON u.id = r.author_id AND u.tenant_id = r.tenant_id
+		 WHERE r.pr_id = $1 AND r.tenant_id = $2
 		 ORDER BY r.created_at
-		 LIMIT $2 OFFSET $3`, prID, limit, offset)
+		 LIMIT $3 OFFSET $4`, prID, tenantID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -1519,6 +1644,7 @@ func (p *PostgresDB) ListPRReviewsPage(ctx context.Context, prID int64, limit, o
 // --- Issues ---
 
 func (p *PostgresDB) CreateIssue(ctx context.Context, issue *models.Issue) error {
+	tenantID := tenantIDForContext(ctx)
 	tx, err := p.beginTx(ctx)
 	if err != nil {
 		return err
@@ -1526,22 +1652,28 @@ func (p *PostgresDB) CreateIssue(ctx context.Context, issue *models.Issue) error
 	defer tx.Rollback()
 
 	var repoID int64
-	if err := tx.QueryRowContext(ctx, `SELECT id FROM repositories WHERE id = $1 FOR UPDATE`, issue.RepoID).Scan(&repoID); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM repositories WHERE id = $1 AND tenant_id = $2 FOR UPDATE`, issue.RepoID, tenantID).Scan(&repoID); err != nil {
 		return err
 	}
 
 	var maxNum int
 	if err := tx.QueryRowContext(ctx,
-		`SELECT COALESCE(MAX(number), 0) FROM issues WHERE repo_id = $1`, issue.RepoID).Scan(&maxNum); err != nil {
+		`SELECT COALESCE(MAX(number), 0) FROM issues WHERE repo_id = $1 AND tenant_id = $2`, issue.RepoID, tenantID).Scan(&maxNum); err != nil {
 		return err
 	}
 	issue.Number = maxNum + 1
 
 	if err := tx.QueryRowContext(ctx,
-		`INSERT INTO issues (repo_id, number, title, body, state, author_id)
-		 VALUES ($1, $2, $3, $4, $5, $6)
+		`INSERT INTO issues (repo_id, number, title, body, state, author_id, tenant_id)
+		 SELECT $1, $2, $3, $4, $5, $6, $7
+		 WHERE EXISTS (
+			 SELECT 1
+			 FROM users u
+			 WHERE u.id = $6
+			 	AND u.tenant_id = $7
+		 )
 		 RETURNING id, created_at`,
-		issue.RepoID, issue.Number, issue.Title, issue.Body, issue.State, issue.AuthorID).
+		issue.RepoID, issue.Number, issue.Title, issue.Body, issue.State, issue.AuthorID, tenantID).
 		Scan(&issue.ID, &issue.CreatedAt); err != nil {
 		return err
 	}
@@ -1550,12 +1682,13 @@ func (p *PostgresDB) CreateIssue(ctx context.Context, issue *models.Issue) error
 }
 
 func (p *PostgresDB) GetIssue(ctx context.Context, repoID int64, number int) (*models.Issue, error) {
+	tenantID := tenantIDForContext(ctx)
 	issue := &models.Issue{}
 	err := p.db.QueryRowContext(ctx,
 		`SELECT i.id, i.repo_id, i.number, i.title, i.body, i.state, i.author_id, u.username, i.created_at, i.closed_at
 		 FROM issues i
-		 JOIN users u ON u.id = i.author_id
-		 WHERE i.repo_id = $1 AND i.number = $2`, repoID, number).
+		 JOIN users u ON u.id = i.author_id AND u.tenant_id = i.tenant_id
+		 WHERE i.repo_id = $1 AND i.number = $2 AND i.tenant_id = $3`, repoID, number, tenantID).
 		Scan(&issue.ID, &issue.RepoID, &issue.Number, &issue.Title, &issue.Body, &issue.State, &issue.AuthorID, &issue.AuthorName, &issue.CreatedAt, &issue.ClosedAt)
 	if err != nil {
 		return nil, err
@@ -1568,12 +1701,13 @@ func (p *PostgresDB) ListIssues(ctx context.Context, repoID int64, state string)
 }
 
 func (p *PostgresDB) ListIssuesPage(ctx context.Context, repoID int64, state string, limit, offset int) ([]models.Issue, error) {
+	tenantID := tenantIDForContext(ctx)
 	query := `SELECT i.id, i.repo_id, i.number, i.title, i.body, i.state, i.author_id, u.username, i.created_at, i.closed_at
 		 FROM issues i
-		 JOIN users u ON u.id = i.author_id
-		 WHERE i.repo_id = $1`
-	args := []any{repoID}
-	argPos := 2
+		 JOIN users u ON u.id = i.author_id AND u.tenant_id = i.tenant_id
+		 WHERE i.repo_id = $1 AND i.tenant_id = $2`
+	args := []any{repoID, tenantID}
+	argPos := 3
 	if state != "" {
 		query += fmt.Sprintf(" AND i.state = $%d", argPos)
 		args = append(args, state)
@@ -1605,16 +1739,23 @@ func (p *PostgresDB) ListIssuesPage(ctx context.Context, repoID int64, state str
 }
 
 func (p *PostgresDB) UpdateIssue(ctx context.Context, issue *models.Issue) error {
+	tenantID := tenantIDForContext(ctx)
 	_, err := p.db.ExecContext(ctx,
-		`UPDATE issues SET title = $1, body = $2, state = $3, closed_at = $4 WHERE id = $5`,
-		issue.Title, issue.Body, issue.State, issue.ClosedAt, issue.ID)
+		`UPDATE issues SET title = $1, body = $2, state = $3, closed_at = $4 WHERE id = $5 AND tenant_id = $6`,
+		issue.Title, issue.Body, issue.State, issue.ClosedAt, issue.ID, tenantID)
 	return err
 }
 
 func (p *PostgresDB) CreateIssueComment(ctx context.Context, c *models.IssueComment) error {
+	tenantID := tenantIDForContext(ctx)
 	return p.db.QueryRowContext(ctx,
-		`INSERT INTO issue_comments (issue_id, author_id, body) VALUES ($1, $2, $3) RETURNING id, created_at`,
-		c.IssueID, c.AuthorID, c.Body).Scan(&c.ID, &c.CreatedAt)
+		`INSERT INTO issue_comments (issue_id, author_id, body, tenant_id)
+		 SELECT i.id, $2, $3, $4
+		 FROM issues i
+		 JOIN users u ON u.id = $2 AND u.tenant_id = $4
+		 WHERE i.id = $1 AND i.tenant_id = $4
+		 RETURNING id, created_at`,
+		c.IssueID, c.AuthorID, c.Body, tenantID).Scan(&c.ID, &c.CreatedAt)
 }
 
 func (p *PostgresDB) ListIssueComments(ctx context.Context, issueID int64) ([]models.IssueComment, error) {
@@ -1622,6 +1763,7 @@ func (p *PostgresDB) ListIssueComments(ctx context.Context, issueID int64) ([]mo
 }
 
 func (p *PostgresDB) ListIssueCommentsPage(ctx context.Context, issueID int64, limit, offset int) ([]models.IssueComment, error) {
+	tenantID := tenantIDForContext(ctx)
 	if limit <= 0 {
 		limit = 100
 	}
@@ -1631,10 +1773,10 @@ func (p *PostgresDB) ListIssueCommentsPage(ctx context.Context, issueID int64, l
 	rows, err := p.db.QueryContext(ctx,
 		`SELECT c.id, c.issue_id, c.author_id, u.username, c.body, c.created_at
 		 FROM issue_comments c
-		 JOIN users u ON u.id = c.author_id
-		 WHERE c.issue_id = $1
+		 JOIN users u ON u.id = c.author_id AND u.tenant_id = c.tenant_id
+		 WHERE c.issue_id = $1 AND c.tenant_id = $2
 		 ORDER BY c.created_at
-		 LIMIT $2 OFFSET $3`, issueID, limit, offset)
+		 LIMIT $3 OFFSET $4`, issueID, tenantID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -1651,7 +1793,8 @@ func (p *PostgresDB) ListIssueCommentsPage(ctx context.Context, issueID int64, l
 }
 
 func (p *PostgresDB) DeleteIssueComment(ctx context.Context, commentID, authorID int64) error {
-	res, err := p.db.ExecContext(ctx, `DELETE FROM issue_comments WHERE id = $1 AND author_id = $2`, commentID, authorID)
+	tenantID := tenantIDForContext(ctx)
+	res, err := p.db.ExecContext(ctx, `DELETE FROM issue_comments WHERE id = $1 AND author_id = $2 AND tenant_id = $3`, commentID, authorID, tenantID)
 	if err != nil {
 		return err
 	}
