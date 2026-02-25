@@ -69,6 +69,7 @@ func TestLoadParsesTrustedProxiesAndCORSOriginsFromEnv(t *testing.T) {
 func TestLoadInvalidEnvValuesDoNotOverrideDefaults(t *testing.T) {
 	t.Setenv("GOTHUB_PORT", "not-an-int")
 	t.Setenv("GOTHUB_ENABLE_PASSWORD_AUTH", "not-a-bool")
+	t.Setenv("GOTHUB_ENABLE_TENANCY", "not-a-bool")
 	t.Setenv("GOTHUB_TRUSTED_PROXIES", ",, ,")
 	t.Setenv("GOTHUB_CORS_ALLOW_ORIGINS", ",  ,")
 
@@ -83,11 +84,34 @@ func TestLoadInvalidEnvValuesDoNotOverrideDefaults(t *testing.T) {
 	if cfg.Auth.EnablePasswordAuth {
 		t.Fatal("Auth.EnablePasswordAuth = true, want default false")
 	}
+	if cfg.Tenancy.Enabled {
+		t.Fatal("Tenancy.Enabled = true, want default false")
+	}
 	if cfg.Server.TrustedProxies != nil {
 		t.Fatalf("Server.TrustedProxies = %#v, want nil", cfg.Server.TrustedProxies)
 	}
 	if cfg.Server.CORSAllowedOrigins != nil {
 		t.Fatalf("Server.CORSAllowedOrigins = %#v, want nil", cfg.Server.CORSAllowedOrigins)
+	}
+}
+
+func TestLoadParsesTenancyEnv(t *testing.T) {
+	t.Setenv("GOTHUB_ENABLE_TENANCY", "true")
+	t.Setenv("GOTHUB_TENANCY_HEADER", "X-Tenant-ID")
+	t.Setenv("GOTHUB_DEFAULT_TENANT_ID", " tenant-prod ")
+
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Tenancy.Enabled {
+		t.Fatal("Tenancy.Enabled = false, want true")
+	}
+	if cfg.Tenancy.Header != "X-Tenant-ID" {
+		t.Fatalf("Tenancy.Header = %q, want %q", cfg.Tenancy.Header, "X-Tenant-ID")
+	}
+	if cfg.Tenancy.DefaultTenantID != "tenant-prod" {
+		t.Fatalf("Tenancy.DefaultTenantID = %q, want %q", cfg.Tenancy.DefaultTenantID, "tenant-prod")
 	}
 }
 

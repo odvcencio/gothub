@@ -43,6 +43,7 @@ type Server struct {
 	enablePprof        bool
 	corsAllowedOrigins []string
 	clientIPResolver   clientIPResolver
+	tenantContext      tenantContextOptions
 	adminRouteAccess   adminRouteAccess
 	realtime           *repoEventBroker
 	mux                *http.ServeMux
@@ -59,6 +60,9 @@ type ServerOptions struct {
 	AdminAllowedCIDRs   []string
 	CORSAllowedOrigins  []string
 	TrustedProxyCIDRs   []string
+	EnableTenantContext bool
+	TenantHeader        string
+	DefaultTenantID     string
 }
 
 type middlewareFunc func(http.Handler) http.Handler
@@ -107,6 +111,7 @@ func NewServerWithOptions(db database.DB, authSvc *auth.Service, repoSvc *servic
 		enablePprof:        opts.EnablePprof,
 		corsAllowedOrigins: append([]string(nil), opts.CORSAllowedOrigins...),
 		clientIPResolver:   clientIPResolver,
+		tenantContext:      newTenantContextOptions(opts.EnableTenantContext, opts.TenantHeader, opts.DefaultTenantID),
 		adminRouteAccess:   newAdminRouteAccess(adminCIDRs, clientIPResolver.clientIPFromRequest),
 		realtime:           newRepoEventBroker(),
 		mux:                http.NewServeMux(),
@@ -141,6 +146,9 @@ func (s *Server) buildHandler() http.Handler {
 			return requestRateLimitMiddleware(s.clientIPResolver, s.rateLimiter, next)
 		},
 		requestBodyLimitMiddleware,
+		func(next http.Handler) http.Handler {
+			return tenantContextMiddleware(s.tenantContext, s.clientIPResolver, next)
+		},
 		auth.Middleware(s.authSvc),
 	)
 }

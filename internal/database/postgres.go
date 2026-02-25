@@ -16,6 +16,10 @@ type PostgresDB struct {
 	db *sql.DB
 }
 
+type sqlExecContexter interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
 func OpenPostgres(dsn string) (*PostgresDB, error) {
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
@@ -31,6 +35,29 @@ func OpenPostgres(dsn string) (*PostgresDB, error) {
 }
 
 func (p *PostgresDB) Close() error { return p.db.Close() }
+
+func (p *PostgresDB) beginTx(ctx context.Context) (*sql.Tx, error) {
+	tx, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := setPostgresTenantContext(ctx, tx); err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	return tx, nil
+}
+
+func setPostgresTenantContext(ctx context.Context, execer sqlExecContexter) error {
+	tenantID, ok := TenantIDFromContext(ctx)
+	if !ok {
+		return nil
+	}
+	if _, err := execer.ExecContext(ctx, `SELECT set_config('app.tenant_id', $1, true)`, tenantID); err != nil {
+		return fmt.Errorf("set postgres tenant context: %w", err)
+	}
+	return nil
+}
 
 func (p *PostgresDB) Migrate(ctx context.Context) error {
 	if _, err := p.db.ExecContext(ctx, pgSchema); err != nil {
@@ -511,7 +538,7 @@ func (p *PostgresDB) CreateMagicLinkToken(ctx context.Context, token *models.Mag
 }
 
 func (p *PostgresDB) ConsumeMagicLinkToken(ctx context.Context, tokenHash string, now time.Time) (*models.User, error) {
-	tx, err := p.db.BeginTx(ctx, nil)
+	tx, err := p.beginTx(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -551,7 +578,7 @@ func (p *PostgresDB) CreateSSHAuthChallenge(ctx context.Context, challenge *mode
 }
 
 func (p *PostgresDB) ConsumeSSHAuthChallenge(ctx context.Context, id string, now time.Time) (*models.SSHAuthChallenge, error) {
-	tx, err := p.db.BeginTx(ctx, nil)
+	tx, err := p.beginTx(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -626,7 +653,7 @@ func (p *PostgresDB) CreateWebAuthnSession(ctx context.Context, session *models.
 }
 
 func (p *PostgresDB) ConsumeWebAuthnSession(ctx context.Context, id, flow string, now time.Time) (*models.WebAuthnSession, error) {
-	tx, err := p.db.BeginTx(ctx, nil)
+	tx, err := p.beginTx(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -714,7 +741,7 @@ func (p *PostgresDB) UpdateRepositoryStoragePath(ctx context.Context, id int64, 
 }
 
 func (p *PostgresDB) CloneRepoMetadata(ctx context.Context, sourceRepoID, targetRepoID int64) error {
-	tx, err := p.db.BeginTx(ctx, nil)
+	tx, err := p.beginTx(ctx)
 	if err != nil {
 		return err
 	}
@@ -1134,7 +1161,7 @@ func (p *PostgresDB) RemoveCollaborator(ctx context.Context, repoID, userID int6
 // --- Pull Requests ---
 
 func (p *PostgresDB) CreatePullRequest(ctx context.Context, pr *models.PullRequest) error {
-	tx, err := p.db.BeginTx(ctx, nil)
+	tx, err := p.beginTx(ctx)
 	if err != nil {
 		return err
 	}
@@ -1331,7 +1358,7 @@ func (p *PostgresDB) ListPRReviewsPage(ctx context.Context, prID int64, limit, o
 // --- Issues ---
 
 func (p *PostgresDB) CreateIssue(ctx context.Context, issue *models.Issue) error {
-	tx, err := p.db.BeginTx(ctx, nil)
+	tx, err := p.beginTx(ctx)
 	if err != nil {
 		return err
 	}
@@ -1798,7 +1825,7 @@ func (p *PostgresDB) SetHashMappings(ctx context.Context, mappings []models.Hash
 	if len(mappings) == 0 {
 		return nil
 	}
-	tx, err := p.db.BeginTx(ctx, nil)
+	tx, err := p.beginTx(ctx)
 	if err != nil {
 		return err
 	}
@@ -2106,7 +2133,7 @@ func (p *PostgresDB) GetCommitIndex(ctx context.Context, repoID int64, commitHas
 }
 
 func (p *PostgresDB) SetGitTreeEntryModes(ctx context.Context, repoID int64, gotTreeHash string, modes map[string]string) error {
-	tx, err := p.db.BeginTx(ctx, nil)
+	tx, err := p.beginTx(ctx)
 	if err != nil {
 		return err
 	}
@@ -2299,7 +2326,7 @@ func (p *PostgresDB) SetEntityIndexEntries(ctx context.Context, repoID int64, co
 		return nil
 	}
 
-	tx, err := p.db.BeginTx(ctx, nil)
+	tx, err := p.beginTx(ctx)
 	if err != nil {
 		return err
 	}
@@ -2481,7 +2508,7 @@ func (p *PostgresDB) SetCommitXRefGraph(ctx context.Context, repoID int64, commi
 		return nil
 	}
 
-	tx, err := p.db.BeginTx(ctx, nil)
+	tx, err := p.beginTx(ctx)
 	if err != nil {
 		return err
 	}

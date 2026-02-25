@@ -21,6 +21,12 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Auth.JWTSecret != "change-me-in-production" {
 		t.Fatalf("Auth.JWTSecret = %q, want default", cfg.Auth.JWTSecret)
 	}
+	if cfg.Tenancy.Enabled {
+		t.Fatal("Tenancy.Enabled = true, want default false")
+	}
+	if cfg.Tenancy.Header != "X-Gothub-Tenant-ID" {
+		t.Fatalf("Tenancy.Header = %q, want %q", cfg.Tenancy.Header, "X-Gothub-Tenant-ID")
+	}
 }
 
 func TestLoadAppliesEnvOverrides(t *testing.T) {
@@ -32,6 +38,9 @@ func TestLoadAppliesEnvOverrides(t *testing.T) {
 	t.Setenv("GOTHUB_STORAGE_PATH", "/tmp/repos")
 	t.Setenv("GOTHUB_JWT_SECRET", "unit-test-secret-123")
 	t.Setenv("GOTHUB_ENABLE_PASSWORD_AUTH", "true")
+	t.Setenv("GOTHUB_ENABLE_TENANCY", "true")
+	t.Setenv("GOTHUB_TENANCY_HEADER", "X-Tenant-ID")
+	t.Setenv("GOTHUB_DEFAULT_TENANT_ID", "tenant-default")
 
 	cfg, err := Load("")
 	if err != nil {
@@ -68,6 +77,15 @@ func TestLoadAppliesEnvOverrides(t *testing.T) {
 	if !cfg.Auth.EnablePasswordAuth {
 		t.Fatal("Auth.EnablePasswordAuth = false, want true")
 	}
+	if !cfg.Tenancy.Enabled {
+		t.Fatal("Tenancy.Enabled = false, want true")
+	}
+	if cfg.Tenancy.Header != "X-Tenant-ID" {
+		t.Fatalf("Tenancy.Header = %q, want %q", cfg.Tenancy.Header, "X-Tenant-ID")
+	}
+	if cfg.Tenancy.DefaultTenantID != "tenant-default" {
+		t.Fatalf("Tenancy.DefaultTenantID = %q, want %q", cfg.Tenancy.DefaultTenantID, "tenant-default")
+	}
 }
 
 func TestLoadFromYAML(t *testing.T) {
@@ -89,6 +107,10 @@ auth:
   jwt_secret: yaml-secret-123456
   token_duration: 12h
   enable_password_auth: true
+tenancy:
+  enabled: true
+  header: X-Tenant-ID
+  default_tenant_id: tenant-yaml
 `)
 	if err := os.WriteFile(path, body, 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
@@ -116,5 +138,14 @@ auth:
 	}
 	if !cfg.Auth.EnablePasswordAuth {
 		t.Fatal("Auth.EnablePasswordAuth = false, want true")
+	}
+	if !cfg.Tenancy.Enabled {
+		t.Fatal("Tenancy.Enabled = false, want true")
+	}
+	if cfg.Tenancy.Header != "X-Tenant-ID" {
+		t.Fatalf("Tenancy.Header = %q, want %q", cfg.Tenancy.Header, "X-Tenant-ID")
+	}
+	if cfg.Tenancy.DefaultTenantID != "tenant-yaml" {
+		t.Fatalf("Tenancy.DefaultTenantID = %q, want %q", cfg.Tenancy.DefaultTenantID, "tenant-yaml")
 	}
 }

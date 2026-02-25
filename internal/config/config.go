@@ -14,6 +14,7 @@ type Config struct {
 	Database DatabaseConfig `yaml:"database"`
 	Storage  StorageConfig  `yaml:"storage"`
 	Auth     AuthConfig     `yaml:"auth"`
+	Tenancy  TenancyConfig  `yaml:"tenancy"`
 }
 
 type ServerConfig struct {
@@ -36,6 +37,12 @@ type AuthConfig struct {
 	JWTSecret          string `yaml:"jwt_secret"`
 	TokenDuration      string `yaml:"token_duration"` // e.g. "24h"
 	EnablePasswordAuth bool   `yaml:"enable_password_auth"`
+}
+
+type TenancyConfig struct {
+	Enabled         bool   `yaml:"enabled"`
+	Header          string `yaml:"header"`
+	DefaultTenantID string `yaml:"default_tenant_id"`
 }
 
 func (c *Config) Addr() string {
@@ -75,6 +82,10 @@ func Default() *Config {
 			JWTSecret:          "change-me-in-production",
 			TokenDuration:      "24h",
 			EnablePasswordAuth: false,
+		},
+		Tenancy: TenancyConfig{
+			Enabled: false,
+			Header:  "X-Gothub-Tenant-ID",
 		},
 	}
 }
@@ -127,6 +138,17 @@ func applyEnv(cfg *Config) {
 		if enabled, err := strconv.ParseBool(v); err == nil {
 			cfg.Auth.EnablePasswordAuth = enabled
 		}
+	}
+	if v := os.Getenv("GOTHUB_ENABLE_TENANCY"); v != "" {
+		if enabled, err := strconv.ParseBool(v); err == nil {
+			cfg.Tenancy.Enabled = enabled
+		}
+	}
+	if v := os.Getenv("GOTHUB_TENANCY_HEADER"); v != "" {
+		cfg.Tenancy.Header = v
+	}
+	if v := os.Getenv("GOTHUB_DEFAULT_TENANT_ID"); v != "" {
+		cfg.Tenancy.DefaultTenantID = strings.TrimSpace(v)
 	}
 }
 

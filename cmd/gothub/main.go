@@ -100,6 +100,9 @@ func cmdServe(args []string) {
 		AdminAllowedCIDRs:   parseAdminCIDRs("GOTHUB_ADMIN_ALLOWED_CIDRS"),
 		CORSAllowedOrigins:  parseCSVEnv("GOTHUB_CORS_ALLOW_ORIGINS"),
 		TrustedProxyCIDRs:   trustedProxyCIDRs(cfg),
+		EnableTenantContext: cfg.Tenancy.Enabled,
+		TenantHeader:        cfg.Tenancy.Header,
+		DefaultTenantID:     cfg.Tenancy.DefaultTenantID,
 	}
 	server := api.NewServerWithOptions(db, authSvc, repoSvc, serverOpts)
 	workerCtx, workerCancel := context.WithCancel(context.Background())
