@@ -66,7 +66,7 @@ Task 47 (GotHub UI: structural blame panel)
 
 ## Execution Tracker (Live)
 
-Updated: 2026-02-25 17:52 PST
+Updated: 2026-02-25 18:00 PST
 
 ### Completed
 
@@ -79,6 +79,7 @@ Updated: 2026-02-25 17:52 PST
 | 5 | complete | got | `eed3d13` | `go test ./pkg/object -run 'TestReadPackIndex|TestReadPackIndexFromReader' -v`, `go test ./...` |
 | 6 | complete | got | `5c4f60f` | `go test ./pkg/object -run 'TestOfsDelta|TestBuildInsertOnlyDelta|TestPackWriterWriteOfsDelta' -v`, `go test ./...` |
 | 11 | complete | got | `c3b2d67` | `go test ./pkg/object -run TestStoreHasChecksPackedObjects -v`, `go test ./...` |
+| 33 | complete | got | `34f76db` | `go test ./pkg/object ./pkg/entity ./pkg/merge ./pkg/diff3 -run '^$' -bench Benchmark -benchmem -count=1` |
 | 13 | complete | gothub | `d678897` | `go test ./internal/jobs -run TestWorkerPool -v`, `go test ./...` |
 | 40 | complete | gothub | `2930c83` | `frontend/src/views/PRDetail.tsx` (`PRImpactSummary`, `summarizeDiff`) |
 | 41 | complete | gothub | `2930c83` | `frontend/src/views/PRDetail.tsx` (`SemverPanel`), `frontend/src/api/client.ts` (`getSemver`) |
@@ -102,7 +103,7 @@ Updated: 2026-02-25 17:52 PST
 
 ### Remaining (Not Yet Implemented)
 
-- Open core gaps: 7, 8, 9, 10 (pack/gc hardening), 14 (full incremental extraction still pending), 24, 25, 26, 27 (merge-base perf/cache), 33, 34 (bench suites).
+- Open core gaps: 7, 8, 9, 10 (pack/gc hardening), 14 (full incremental extraction still pending), 24, 25, 26, 27 (merge-base perf/cache), 34 (GotHub benchmark breadth).
 - Tasks 35-39 are queued post-Phase-1 cloud multi-tenancy work.
 
 ---
