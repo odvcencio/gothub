@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/odvcencio/gothub/internal/database"
 	"github.com/odvcencio/gothub/internal/gotstore"
@@ -19,12 +21,17 @@ import (
 var validRepoName = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 
 type RepoService struct {
-	db          database.DB
-	storagePath string // root path for all repo storage
+	db              database.DB
+	storagePath     string // root path for all repo storage
+	copyDirectoryFn func(src, dst string) error
 }
 
 func NewRepoService(db database.DB, storagePath string) *RepoService {
-	return &RepoService{db: db, storagePath: storagePath}
+	return &RepoService{
+		db:              db,
+		storagePath:     storagePath,
+		copyDirectoryFn: copyDirectory,
+	}
 }
 
 func (s *RepoService) Create(ctx context.Context, ownerID int64, name, description string, isPrivate bool) (*models.Repository, error) {
@@ -98,35 +105,41 @@ func (s *RepoService) Fork(ctx context.Context, sourceRepoID, ownerID int64, req
 	if err := s.db.CreateRepository(ctx, fork); err != nil {
 		return nil, fmt.Errorf("create fork repo: %w", err)
 	}
+	failFork := func(op string, err error) (*models.Repository, error) {
+		forkErr := fmt.Errorf("%s: %w", op, err)
+		if rollbackErr := s.rollbackForkCreate(fork.ID, fork.StoragePath); rollbackErr != nil {
+			return nil, fmt.Errorf("%w (rollback fork create: %v)", forkErr, rollbackErr)
+		}
+		return nil, forkErr
+	}
 
 	fork.StoragePath = filepath.Join(s.storagePath, fmt.Sprintf("%d", fork.ID))
 	if _, err := gotstore.Open(fork.StoragePath); err != nil {
-		s.rollbackForkCreate(ctx, fork.ID, fork.StoragePath)
-		return nil, fmt.Errorf("init fork store: %w", err)
+		return failFork("init fork store", err)
 	}
 
 	sourceStore, err := s.OpenStoreByID(ctx, sourceRepo.ID)
 	if err != nil {
-		s.rollbackForkCreate(ctx, fork.ID, fork.StoragePath)
-		return nil, fmt.Errorf("open source store: %w", err)
+		return failFork("open source store", err)
 	}
 
-	if err := copyDirectory(filepath.Join(sourceStore.Root(), "objects"), filepath.Join(fork.StoragePath, "objects")); err != nil {
-		s.rollbackForkCreate(ctx, fork.ID, fork.StoragePath)
-		return nil, fmt.Errorf("copy objects: %w", err)
+	copyDirectoryFn := s.copyDirectoryFn
+	if copyDirectoryFn == nil {
+		copyDirectoryFn = copyDirectory
 	}
-	if err := copyDirectory(filepath.Join(sourceStore.Root(), "refs"), filepath.Join(fork.StoragePath, "refs")); err != nil {
-		s.rollbackForkCreate(ctx, fork.ID, fork.StoragePath)
-		return nil, fmt.Errorf("copy refs: %w", err)
+
+	if err := copyDirectoryFn(filepath.Join(sourceStore.Root(), "objects"), filepath.Join(fork.StoragePath, "objects")); err != nil {
+		return failFork("copy objects", err)
+	}
+	if err := copyDirectoryFn(filepath.Join(sourceStore.Root(), "refs"), filepath.Join(fork.StoragePath, "refs")); err != nil {
+		return failFork("copy refs", err)
 	}
 	if err := s.db.CloneRepoMetadata(ctx, sourceRepo.ID, fork.ID); err != nil {
-		s.rollbackForkCreate(ctx, fork.ID, fork.StoragePath)
-		return nil, fmt.Errorf("clone repo metadata: %w", err)
+		return failFork("clone repo metadata", err)
 	}
 
 	if err := s.db.UpdateRepositoryStoragePath(ctx, fork.ID, fork.StoragePath); err != nil {
-		s.rollbackForkCreate(ctx, fork.ID, fork.StoragePath)
-		return nil, fmt.Errorf("persist fork storage path: %w", err)
+		return failFork("persist fork storage path", err)
 	}
 
 	return fork, nil
@@ -220,11 +233,20 @@ func (s *RepoService) pickAvailableForkName(ctx context.Context, ownerName, desi
 	return "", fmt.Errorf("no available fork name for base %q", desired)
 }
 
-func (s *RepoService) rollbackForkCreate(ctx context.Context, repoID int64, storagePath string) {
-	_ = s.db.DeleteRepository(ctx, repoID)
-	if strings.TrimSpace(storagePath) != "" {
-		_ = os.RemoveAll(storagePath)
+func (s *RepoService) rollbackForkCreate(repoID int64, storagePath string) error {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var rollbackErr error
+	if err := s.db.DeleteRepository(cleanupCtx, repoID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		rollbackErr = errors.Join(rollbackErr, fmt.Errorf("delete fork repository %d: %w", repoID, err))
 	}
+	if strings.TrimSpace(storagePath) != "" {
+		if err := os.RemoveAll(storagePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("remove fork storage %q: %w", storagePath, err))
+		}
+	}
+	return rollbackErr
 }
 
 func copyDirectory(src, dst string) error {
