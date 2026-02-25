@@ -42,6 +42,8 @@ type Server struct {
 	enableAdminHealth  bool
 	enablePprof        bool
 	corsAllowedOrigins []string
+	restrictPublicOnly bool
+	maxPublicRepos     int
 	clientIPResolver   clientIPResolver
 	tenantContext      tenantContextOptions
 	adminRouteAccess   adminRouteAccess
@@ -63,6 +65,8 @@ type ServerOptions struct {
 	EnableTenantContext bool
 	TenantHeader        string
 	DefaultTenantID     string
+	RestrictToPublic    bool
+	MaxPublicRepos      int
 }
 
 type middlewareFunc func(http.Handler) http.Handler
@@ -110,6 +114,8 @@ func NewServerWithOptions(db database.DB, authSvc *auth.Service, repoSvc *servic
 		enableAdminHealth:  opts.EnableAdminHealth,
 		enablePprof:        opts.EnablePprof,
 		corsAllowedOrigins: append([]string(nil), opts.CORSAllowedOrigins...),
+		restrictPublicOnly: opts.RestrictToPublic,
+		maxPublicRepos:     opts.MaxPublicRepos,
 		clientIPResolver:   clientIPResolver,
 		tenantContext:      newTenantContextOptions(opts.EnableTenantContext, opts.TenantHeader, opts.DefaultTenantID),
 		adminRouteAccess:   newAdminRouteAccess(adminCIDRs, clientIPResolver.clientIPFromRequest),
@@ -197,6 +203,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/auth/capabilities", s.handleAuthCapabilities)
 	s.mux.HandleFunc("POST /api/v1/auth/refresh", s.requireAuth(s.handleRefreshToken))
 	s.mux.HandleFunc("POST /api/v1/auth/change-password", s.requireAuth(s.handleChangePassword))
+	s.mux.HandleFunc("POST /api/v1/interest-signups", s.handleCreateInterestSignup)
+	s.mux.HandleFunc("GET /api/v1/admin/interest-signups", s.requireAuth(s.handleListInterestSignups))
 
 	// User
 	s.mux.HandleFunc("GET /api/v1/user", s.requireAuth(s.handleGetCurrentUser))
@@ -215,6 +223,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/events", s.handleRepoEvents)
 	s.mux.HandleFunc("POST /api/v1/repos/{owner}/{repo}/forks", s.requireAuth(s.handleForkRepo))
 	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/forks", s.handleListRepoForks)
+	s.mux.HandleFunc("POST /api/v1/repos/{owner}/{repo}/runners/tokens", s.requireAuth(s.handleCreateRepoRunnerToken))
+	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/runners/tokens", s.requireAuth(s.handleListRepoRunnerTokens))
+	s.mux.HandleFunc("DELETE /api/v1/repos/{owner}/{repo}/runners/tokens/{id}", s.requireAuth(s.handleDeleteRepoRunnerToken))
 	s.mux.HandleFunc("GET /api/v1/user/repos", s.requireAuth(s.handleListUserRepos))
 	s.mux.HandleFunc("DELETE /api/v1/repos/{owner}/{repo}", s.requireAuth(s.handleDeleteRepo))
 	s.mux.HandleFunc("POST /api/v1/repos/{owner}/{repo}/collaborators", s.requireAuth(s.handleAddCollaborator))
@@ -263,6 +274,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/repos/{owner}/{repo}/pulls/{number}/reviews", s.requireAuth(s.handleCreatePRReview))
 	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/pulls/{number}/reviews", s.handleListPRReviews)
 	s.mux.HandleFunc("POST /api/v1/repos/{owner}/{repo}/pulls/{number}/checks", s.requireAuth(s.handleUpsertPRCheckRun))
+	s.mux.HandleFunc("POST /api/v1/repos/{owner}/{repo}/pulls/{number}/checks/runner", s.handleUpsertPRCheckRunByRunnerToken)
 	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/pulls/{number}/checks", s.handleListPRCheckRuns)
 
 	// Issues

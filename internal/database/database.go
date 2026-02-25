@@ -42,6 +42,7 @@ type DB interface {
 	GetRepositoryByID(ctx context.Context, id int64) (*models.Repository, error)
 	ListUserRepositories(ctx context.Context, userID int64) ([]models.Repository, error)
 	ListUserRepositoriesPage(ctx context.Context, userID int64, limit, offset int) ([]models.Repository, error)
+	CountUserOwnedRepositoriesByVisibility(ctx context.Context, userID int64, isPrivate bool) (int, error)
 	ListRepositoryForks(ctx context.Context, parentRepoID int64) ([]models.Repository, error)
 	ListRepositoryForksPage(ctx context.Context, parentRepoID int64, limit, offset int) ([]models.Repository, error)
 	DeleteRepository(ctx context.Context, id int64) error
@@ -90,6 +91,11 @@ type DB interface {
 	UpsertPRCheckRun(ctx context.Context, run *models.PRCheckRun) error
 	ListPRCheckRuns(ctx context.Context, prID int64) ([]models.PRCheckRun, error)
 	ListPRCheckRunsPage(ctx context.Context, prID int64, limit, offset int) ([]models.PRCheckRun, error)
+	CreateRepoRunnerToken(ctx context.Context, token *models.RepoRunnerToken) error
+	ListRepoRunnerTokens(ctx context.Context, repoID int64) ([]models.RepoRunnerToken, error)
+	DeleteRepoRunnerToken(ctx context.Context, repoID, tokenID int64) error
+	GetRepoRunnerTokenByHash(ctx context.Context, tokenHash string) (*models.RepoRunnerToken, error)
+	TouchRepoRunnerTokenUsed(ctx context.Context, tokenID int64, usedAt time.Time) error
 
 	// Issues
 	CreateIssue(ctx context.Context, issue *models.Issue) error
@@ -120,6 +126,8 @@ type DB interface {
 	GetWebhookDelivery(ctx context.Context, repoID, webhookID, deliveryID int64) (*models.WebhookDelivery, error)
 	ListWebhookDeliveries(ctx context.Context, repoID, webhookID int64) ([]models.WebhookDelivery, error)
 	ListWebhookDeliveriesPage(ctx context.Context, repoID, webhookID int64, limit, offset int) ([]models.WebhookDelivery, error)
+	CreateInterestSignup(ctx context.Context, signup *models.InterestSignup) error
+	ListInterestSignupsPage(ctx context.Context, limit, offset int) ([]models.InterestSignup, error)
 
 	// Hash Mapping
 	SetHashMapping(ctx context.Context, m *models.HashMapping) error

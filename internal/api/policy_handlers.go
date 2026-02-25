@@ -137,39 +137,10 @@ func (s *Server) handleUpsertPRCheckRun(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	var req upsertPRCheckRunRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonError(w, "invalid request body", http.StatusBadRequest)
+	run, statusCode, message := decodePRCheckRunUpsertRequest(r, pr.ID)
+	if statusCode != 0 {
+		jsonError(w, message, statusCode)
 		return
-	}
-	req.Name = strings.TrimSpace(req.Name)
-	if req.Name == "" {
-		jsonError(w, "name is required", http.StatusBadRequest)
-		return
-	}
-
-	status := strings.TrimSpace(strings.ToLower(req.Status))
-	switch status {
-	case "":
-		if strings.TrimSpace(req.Conclusion) != "" {
-			status = "completed"
-		} else {
-			status = "queued"
-		}
-	case "queued", "in_progress", "completed":
-	default:
-		jsonError(w, "status must be one of queued, in_progress, completed", http.StatusBadRequest)
-		return
-	}
-
-	run := &models.PRCheckRun{
-		PRID:       pr.ID,
-		Name:       req.Name,
-		Status:     status,
-		Conclusion: req.Conclusion,
-		DetailsURL: req.DetailsURL,
-		ExternalID: req.ExternalID,
-		HeadCommit: req.HeadCommit,
 	}
 	if err := s.prSvc.UpsertPRCheckRun(r.Context(), run); err != nil {
 		jsonError(w, "internal error", http.StatusInternalServerError)

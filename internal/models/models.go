@@ -220,6 +220,19 @@ type PRCheckRun struct {
 	UpdatedAt  time.Time `json:"updated_at"`
 }
 
+type RepoRunnerToken struct {
+	ID              int64      `json:"id"`
+	RepoID          int64      `json:"repo_id"`
+	Name            string     `json:"name"`
+	TokenHash       string     `json:"-"`
+	TokenPrefix     string     `json:"token_prefix"`
+	CreatedByUserID int64      `json:"created_by_user_id"`
+	CreatedAt       time.Time  `json:"created_at"`
+	LastUsedAt      *time.Time `json:"last_used_at,omitempty"`
+	ExpiresAt       *time.Time `json:"expires_at,omitempty"`
+	RevokedAt       *time.Time `json:"revoked_at,omitempty"`
+}
+
 type Webhook struct {
 	ID        int64     `json:"id"`
 	RepoID    int64     `json:"repo_id"`
@@ -285,6 +298,16 @@ type Notification struct {
 	IssueID      *int64     `json:"issue_id,omitempty"`
 	ReadAt       *time.Time `json:"read_at,omitempty"`
 	CreatedAt    time.Time  `json:"created_at"`
+}
+
+type InterestSignup struct {
+	ID        int64     `json:"id"`
+	Email     string    `json:"email"`
+	Name      string    `json:"name,omitempty"`
+	Company   string    `json:"company,omitempty"`
+	Message   string    `json:"message,omitempty"`
+	Source    string    `json:"source,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 type HashMapping struct {

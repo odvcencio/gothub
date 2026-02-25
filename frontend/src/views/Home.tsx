@@ -7,6 +7,7 @@ import {
   beginWebAuthnLogin,
   finishWebAuthnLogin,
   getAuthCapabilities,
+  createInterestSignup,
   setToken,
   getToken,
   listUserRepos,
@@ -44,6 +45,11 @@ function AuthForm() {
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [interestEmail, setInterestEmail] = useState('');
+  const [interestName, setInterestName] = useState('');
+  const [interestSubmitting, setInterestSubmitting] = useState(false);
+  const [interestInfo, setInterestInfo] = useState('');
+  const [interestError, setInterestError] = useState('');
   const sessionExpired = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('session') === 'expired';
   const passkeysAvailable = browserSupportsPasskeys() && authCapabilities.passkeyEnabled;
   const passwordAuthEnabled = authCapabilities.passwordAuthEnabled;
@@ -151,6 +157,27 @@ function AuthForm() {
     }
   };
 
+  const submitInterest = async (e: Event) => {
+    e.preventDefault();
+    setInterestInfo('');
+    setInterestError('');
+    setInterestSubmitting(true);
+    try {
+      await createInterestSignup({
+        email: interestEmail.trim(),
+        name: interestName.trim(),
+        source: 'homepage_auth',
+      });
+      setInterestInfo('You are on the launch list. We will email early access updates.');
+      setInterestEmail('');
+      setInterestName('');
+    } catch (err: any) {
+      setInterestError(err?.message || 'Failed to submit interest signup');
+    } finally {
+      setInterestSubmitting(false);
+    }
+  };
+
   return (
     <div style={{ maxWidth: '400px', margin: '60px auto' }}>
       <h1 style={{ fontSize: '24px', marginBottom: '24px', color: '#f0f6fc' }}>
@@ -233,6 +260,25 @@ function AuthForm() {
           <span>Already have an account? <a href="#" onClick={(e) => { e.preventDefault(); setMode('login'); }} style={{ color: '#58a6ff' }}>Sign in</a></span>
         )}
       </p>
+      <div style={{ marginTop: '24px', paddingTop: '16px', borderTop: '1px solid #30363d' }}>
+        <div style={{ color: '#f0f6fc', fontSize: '14px', fontWeight: 'bold', marginBottom: '6px' }}>Launch Updates</div>
+        <div style={{ color: '#8b949e', fontSize: '12px', marginBottom: '10px' }}>
+          Public repos and BYO-runner support are rolling out. Join the list for access updates.
+        </div>
+        {interestInfo && <div style={{ color: '#3fb950', marginBottom: '10px', fontSize: '12px' }}>{interestInfo}</div>}
+        {interestError && <div style={{ color: '#f85149', marginBottom: '10px', fontSize: '12px' }}>{interestError}</div>}
+        <form onSubmit={submitInterest} style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          <input value={interestName} onInput={(e: any) => setInterestName(e.target.value)} placeholder="Name (optional)" style={inputStyle} />
+          <input value={interestEmail} onInput={(e: any) => setInterestEmail(e.target.value)} placeholder="Email" type="email" style={inputStyle} />
+          <button
+            type="submit"
+            disabled={interestSubmitting || !interestEmail.trim()}
+            style={{ ...secondaryButtonStyle, opacity: interestSubmitting || !interestEmail.trim() ? 0.6 : 1 }}
+          >
+            {interestSubmitting ? 'Submitting...' : 'Join mailing list'}
+          </button>
+        </form>
+      </div>
     </div>
   );
 }

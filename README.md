@@ -36,6 +36,17 @@ GOTHUB_JWT_SECRET=dev-jwt-secret-change-this GOTHUB_ENABLE_PASSWORD_AUTH=true go
 
 Set `GOTHUB_ENABLE_PASSWORD_AUTH=false` to test passwordless first-run auth paths (magic link, passkey, SSH).
 
+## BYO runners (first-class)
+
+`gothub` now supports repository-scoped runner tokens so external/self-hosted runners can post PR check-runs without user credentials.
+
+1. Create token in repo settings UI (`Settings -> Runners`) or API:
+   `POST /api/v1/repos/{owner}/{repo}/runners/tokens`
+2. Runner posts status:
+   `POST /api/v1/repos/{owner}/{repo}/pulls/{number}/checks/runner`
+   with `Authorization: Runner <token>`.
+3. Branch protection required checks evaluate these runs through the existing merge gate.
+
 ## WASM build size modes
 
 - `make wasm` stays backward compatible and uses `WASM_GO_TAGS=grammar_set_core`, `WASM_LDFLAGS="-s -w"`, and `-trimpath`.
@@ -55,6 +66,8 @@ Set `GOTHUB_ENABLE_PASSWORD_AUTH=false` to test passwordless first-run auth path
 - `GOTHUB_STORAGE_PATH`: repository storage root
 - `GOTHUB_JWT_SECRET`: JWT signing secret (required; at least 16 chars)
 - `GOTHUB_ENABLE_PASSWORD_AUTH`: enable password registration/login/change-password endpoints (`true`/`false`)
+- `GOTHUB_RESTRICT_TO_PUBLIC_REPOS`: force newly created repositories to be public-only (`true`/`false`)
+- `GOTHUB_MAX_PUBLIC_REPOS_PER_USER`: cap public repos per user account (`0` disables limit)
 
 ### Auth/WebAuthn
 

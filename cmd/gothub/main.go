@@ -103,6 +103,8 @@ func cmdServe(args []string) {
 		EnableTenantContext: cfg.Tenancy.Enabled,
 		TenantHeader:        cfg.Tenancy.Header,
 		DefaultTenantID:     cfg.Tenancy.DefaultTenantID,
+		RestrictToPublic:    cfg.Launch.RestrictToPublicRepos,
+		MaxPublicRepos:      cfg.Launch.MaxPublicReposPerUser,
 	}
 	server := api.NewServerWithOptions(db, authSvc, repoSvc, serverOpts)
 	workerCtx, workerCancel := context.WithCancel(context.Background())

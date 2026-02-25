@@ -283,11 +283,32 @@ export interface Webhook {
 }
 
 export interface WebhookDelivery {
-  id: number;
+	id: number;
   status?: string;
   response_code?: number;
   created_at?: string;
-  [key: string]: unknown;
+	[key: string]: unknown;
+}
+
+export interface RunnerToken {
+	id: number;
+	repo_id: number;
+	name: string;
+	token_prefix: string;
+	created_by_user_id: number;
+	created_at?: string;
+	last_used_at?: string;
+	expires_at?: string;
+	revoked_at?: string;
+}
+
+export interface RunnerTokenCreateResponse {
+	id: number;
+	name: string;
+	token: string;
+	token_prefix: string;
+	created_at?: string;
+	expires_at?: string;
 }
 
 export interface SSHKey {
@@ -400,7 +421,7 @@ export interface RepoStreamEvent {
 }
 
 export interface RepoEventStreamSubscription {
-  close: () => void;
+	close: () => void;
 }
 
 interface RepoEventStreamHandlers {
@@ -432,6 +453,8 @@ export const finishWebAuthnLogin = (sessionId: string, credential: Record<string
   request<AuthResponse>('POST', '/auth/webauthn/login/finish', { session_id: sessionId, credential });
 export const getAuthCapabilities = () =>
   request<AuthCapabilities>('GET', '/auth/capabilities');
+export const createInterestSignup = (data: { email: string; name?: string; company?: string; message?: string; source?: string }) =>
+  request<{ id: number; email: string; created_at?: string }>('POST', '/interest-signups', data);
 export const refreshToken = () =>
   request<AuthResponse>('POST', '/auth/refresh');
 export const changePassword = (currentPassword: string, newPassword: string) =>
@@ -461,6 +484,12 @@ export const listRepoForks = (owner: string, repo: string, page?: number, perPag
   const suffix = query.toString();
   return request<Repository[]>('GET', `/repos/${owner}/${repo}/forks${suffix ? '?' + suffix : ''}`);
 };
+export const listRepoRunnerTokens = (owner: string, repo: string) =>
+  request<RunnerToken[]>('GET', `/repos/${owner}/${repo}/runners/tokens`);
+export const createRepoRunnerToken = (owner: string, repo: string, data: { name: string; expires_in_hours?: number }) =>
+  request<RunnerTokenCreateResponse>('POST', `/repos/${owner}/${repo}/runners/tokens`, data);
+export const deleteRepoRunnerToken = (owner: string, repo: string, id: number) =>
+  request<void>('DELETE', `/repos/${owner}/${repo}/runners/tokens/${id}`);
 export const getRepo = (owner: string, repo: string) =>
   request<Repository>('GET', `/repos/${owner}/${repo}`);
 export const listUserRepos = () => request<Repository[]>('GET', '/user/repos');

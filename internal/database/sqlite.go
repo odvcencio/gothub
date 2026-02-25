@@ -294,6 +294,19 @@ CREATE TABLE IF NOT EXISTS pr_check_runs (
 	UNIQUE(pr_id, name)
 );
 
+CREATE TABLE IF NOT EXISTS repo_runner_tokens (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	repo_id INTEGER NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+	name TEXT NOT NULL,
+	token_hash TEXT NOT NULL UNIQUE,
+	token_prefix TEXT NOT NULL,
+	created_by_user_id INTEGER NOT NULL REFERENCES users(id),
+	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	last_used_at DATETIME,
+	expires_at DATETIME,
+	revoked_at DATETIME
+);
+
 CREATE TABLE IF NOT EXISTS repo_webhooks (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	repo_id INTEGER NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
@@ -319,6 +332,16 @@ CREATE TABLE IF NOT EXISTS webhook_deliveries (
 	response_body TEXT NOT NULL DEFAULT '',
 	duration_ms INTEGER NOT NULL DEFAULT 0,
 	redelivery_of_id INTEGER,
+	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS interest_signups (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	email TEXT NOT NULL,
+	name TEXT NOT NULL DEFAULT '',
+	company TEXT NOT NULL DEFAULT '',
+	message TEXT NOT NULL DEFAULT '',
+	source TEXT NOT NULL DEFAULT '',
 	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -523,12 +546,15 @@ CREATE INDEX IF NOT EXISTS idx_xref_edges_repo_commit_source ON xref_edges(repo_
 CREATE INDEX IF NOT EXISTS idx_xref_edges_repo_commit_target ON xref_edges(repo_id, commit_hash, target_entity_id, kind);
 CREATE INDEX IF NOT EXISTS idx_branch_protection_repo_branch ON branch_protection_rules(repo_id, branch);
 CREATE INDEX IF NOT EXISTS idx_pr_check_runs_pr ON pr_check_runs(pr_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_repo_runner_tokens_repo_active ON repo_runner_tokens(repo_id, revoked_at, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_repo_runner_tokens_hash ON repo_runner_tokens(token_hash);
 CREATE INDEX IF NOT EXISTS idx_issues_repo_number ON issues(repo_id, number DESC);
 CREATE INDEX IF NOT EXISTS idx_issue_comments_issue ON issue_comments(issue_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_notifications_user_created ON notifications(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_notifications_user_unread ON notifications(user_id, read_at, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_repo_webhooks_repo ON repo_webhooks(repo_id);
 CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_webhook_time ON webhook_deliveries(webhook_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_interest_signups_created ON interest_signups(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_repo_stars_repo ON repo_stars(repo_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_repo_stars_user ON repo_stars(user_id, created_at DESC);
 `
@@ -1000,6 +1026,15 @@ func (s *SQLiteDB) ListUserRepositoriesPage(ctx context.Context, userID int64, l
 		repos = append(repos, r)
 	}
 	return repos, rows.Err()
+}
+
+func (s *SQLiteDB) CountUserOwnedRepositoriesByVisibility(ctx context.Context, userID int64, isPrivate bool) (int, error) {
+	var count int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM repositories WHERE owner_user_id = ? AND is_private = ?`, userID, isPrivate).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 func (s *SQLiteDB) ListRepositoryForks(ctx context.Context, parentRepoID int64) ([]models.Repository, error) {
@@ -1838,6 +1873,84 @@ func (s *SQLiteDB) ListPRCheckRunsPage(ctx context.Context, prID int64, limit, o
 	return runs, rows.Err()
 }
 
+func (s *SQLiteDB) CreateRepoRunnerToken(ctx context.Context, token *models.RepoRunnerToken) error {
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO repo_runner_tokens (
+			repo_id, name, token_hash, token_prefix, created_by_user_id, expires_at, revoked_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		token.RepoID, token.Name, token.TokenHash, token.TokenPrefix, token.CreatedByUserID, token.ExpiresAt, token.RevokedAt)
+	if err != nil {
+		return err
+	}
+	token.ID, _ = res.LastInsertId()
+	return s.db.QueryRowContext(ctx,
+		`SELECT created_at, last_used_at FROM repo_runner_tokens WHERE id = ?`,
+		token.ID,
+	).Scan(&token.CreatedAt, &token.LastUsedAt)
+}
+
+func (s *SQLiteDB) ListRepoRunnerTokens(ctx context.Context, repoID int64) ([]models.RepoRunnerToken, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, repo_id, name, token_prefix, created_by_user_id, created_at, last_used_at, expires_at, revoked_at
+		 FROM repo_runner_tokens
+		 WHERE repo_id = ?
+		 ORDER BY created_at DESC, id DESC`,
+		repoID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	tokens := make([]models.RepoRunnerToken, 0)
+	for rows.Next() {
+		var token models.RepoRunnerToken
+		if err := rows.Scan(
+			&token.ID, &token.RepoID, &token.Name, &token.TokenPrefix, &token.CreatedByUserID,
+			&token.CreatedAt, &token.LastUsedAt, &token.ExpiresAt, &token.RevokedAt,
+		); err != nil {
+			return nil, err
+		}
+		tokens = append(tokens, token)
+	}
+	return tokens, rows.Err()
+}
+
+func (s *SQLiteDB) DeleteRepoRunnerToken(ctx context.Context, repoID, tokenID int64) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE repo_runner_tokens
+		 SET revoked_at = COALESCE(revoked_at, CURRENT_TIMESTAMP)
+		 WHERE repo_id = ? AND id = ?`,
+		repoID, tokenID,
+	)
+	return err
+}
+
+func (s *SQLiteDB) GetRepoRunnerTokenByHash(ctx context.Context, tokenHash string) (*models.RepoRunnerToken, error) {
+	token := &models.RepoRunnerToken{}
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, repo_id, name, token_hash, token_prefix, created_by_user_id, created_at, last_used_at, expires_at, revoked_at
+		 FROM repo_runner_tokens
+		 WHERE token_hash = ?`,
+		tokenHash,
+	).Scan(
+		&token.ID, &token.RepoID, &token.Name, &token.TokenHash, &token.TokenPrefix, &token.CreatedByUserID,
+		&token.CreatedAt, &token.LastUsedAt, &token.ExpiresAt, &token.RevokedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return token, nil
+}
+
+func (s *SQLiteDB) TouchRepoRunnerTokenUsed(ctx context.Context, tokenID int64, usedAt time.Time) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE repo_runner_tokens SET last_used_at = ? WHERE id = ?`,
+		usedAt, tokenID,
+	)
+	return err
+}
+
 // --- Webhooks ---
 
 func (s *SQLiteDB) CreateWebhook(ctx context.Context, hook *models.Webhook) error {
@@ -1967,6 +2080,48 @@ func (s *SQLiteDB) ListWebhookDeliveriesPage(ctx context.Context, repoID, webhoo
 		deliveries = append(deliveries, d)
 	}
 	return deliveries, rows.Err()
+}
+
+func (s *SQLiteDB) CreateInterestSignup(ctx context.Context, signup *models.InterestSignup) error {
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO interest_signups (email, name, company, message, source) VALUES (?, ?, ?, ?, ?)`,
+		signup.Email, signup.Name, signup.Company, signup.Message, signup.Source)
+	if err != nil {
+		return err
+	}
+	signup.ID, _ = res.LastInsertId()
+	return s.db.QueryRowContext(ctx, `SELECT created_at FROM interest_signups WHERE id = ?`, signup.ID).Scan(&signup.CreatedAt)
+}
+
+func (s *SQLiteDB) ListInterestSignupsPage(ctx context.Context, limit, offset int) ([]models.InterestSignup, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, email, name, company, message, source, created_at
+		 FROM interest_signups
+		 ORDER BY created_at DESC, id DESC
+		 LIMIT ? OFFSET ?`,
+		limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	signups := make([]models.InterestSignup, 0)
+	for rows.Next() {
+		var signup models.InterestSignup
+		if err := rows.Scan(
+			&signup.ID, &signup.Email, &signup.Name, &signup.Company, &signup.Message, &signup.Source, &signup.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		signups = append(signups, signup)
+	}
+	return signups, rows.Err()
 }
 
 // --- Hash Mapping ---

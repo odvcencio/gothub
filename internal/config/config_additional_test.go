@@ -70,6 +70,8 @@ func TestLoadInvalidEnvValuesDoNotOverrideDefaults(t *testing.T) {
 	t.Setenv("GOTHUB_PORT", "not-an-int")
 	t.Setenv("GOTHUB_ENABLE_PASSWORD_AUTH", "not-a-bool")
 	t.Setenv("GOTHUB_ENABLE_TENANCY", "not-a-bool")
+	t.Setenv("GOTHUB_RESTRICT_TO_PUBLIC_REPOS", "not-a-bool")
+	t.Setenv("GOTHUB_MAX_PUBLIC_REPOS_PER_USER", "-5")
 	t.Setenv("GOTHUB_TRUSTED_PROXIES", ",, ,")
 	t.Setenv("GOTHUB_CORS_ALLOW_ORIGINS", ",  ,")
 
@@ -86,6 +88,12 @@ func TestLoadInvalidEnvValuesDoNotOverrideDefaults(t *testing.T) {
 	}
 	if cfg.Tenancy.Enabled {
 		t.Fatal("Tenancy.Enabled = true, want default false")
+	}
+	if cfg.Launch.RestrictToPublicRepos {
+		t.Fatal("Launch.RestrictToPublicRepos = true, want default false")
+	}
+	if cfg.Launch.MaxPublicReposPerUser != 0 {
+		t.Fatalf("Launch.MaxPublicReposPerUser = %d, want default 0", cfg.Launch.MaxPublicReposPerUser)
 	}
 	if cfg.Server.TrustedProxies != nil {
 		t.Fatalf("Server.TrustedProxies = %#v, want nil", cfg.Server.TrustedProxies)

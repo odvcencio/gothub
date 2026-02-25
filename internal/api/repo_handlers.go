@@ -1,6 +1,8 @@
 package api
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
@@ -28,6 +30,10 @@ func (s *Server) handleCreateRepo(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Name == "" {
 		jsonError(w, "name is required", http.StatusBadRequest)
+		return
+	}
+	if status, message := s.validateRepoVisibilityPolicy(r.Context(), claims.UserID, req.Private); status != 0 {
+		jsonError(w, message, status)
 		return
 	}
 
@@ -98,6 +104,10 @@ func (s *Server) handleForkRepo(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if status, message := s.validateRepoVisibilityPolicy(r.Context(), claims.UserID, sourceRepo.IsPrivate); status != 0 {
+		jsonError(w, message, status)
+		return
+	}
 
 	fork, err := s.repoSvc.Fork(r.Context(), sourceRepo.ID, claims.UserID, req.Name)
 	if err != nil {
@@ -122,4 +132,24 @@ func (s *Server) handleListRepoForks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonResponse(w, http.StatusOK, forks)
+}
+
+func (s *Server) validateRepoVisibilityPolicy(ctx context.Context, userID int64, isPrivate bool) (int, string) {
+	if isPrivate && s.restrictPublicOnly {
+		return http.StatusForbidden, "private repositories are disabled on this instance"
+	}
+	if isPrivate || s.maxPublicRepos <= 0 {
+		return 0, ""
+	}
+	count, err := s.db.CountUserOwnedRepositoriesByVisibility(ctx, userID, false)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, ""
+		}
+		return http.StatusInternalServerError, "internal error"
+	}
+	if count >= s.maxPublicRepos {
+		return http.StatusForbidden, "public repository limit reached for this account"
+	}
+	return 0, ""
 }

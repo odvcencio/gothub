@@ -15,6 +15,7 @@ type Config struct {
 	Storage  StorageConfig  `yaml:"storage"`
 	Auth     AuthConfig     `yaml:"auth"`
 	Tenancy  TenancyConfig  `yaml:"tenancy"`
+	Launch   LaunchConfig   `yaml:"launch"`
 }
 
 type ServerConfig struct {
@@ -43,6 +44,11 @@ type TenancyConfig struct {
 	Enabled         bool   `yaml:"enabled"`
 	Header          string `yaml:"header"`
 	DefaultTenantID string `yaml:"default_tenant_id"`
+}
+
+type LaunchConfig struct {
+	RestrictToPublicRepos bool `yaml:"restrict_to_public_repos"`
+	MaxPublicReposPerUser int  `yaml:"max_public_repos_per_user"`
 }
 
 func (c *Config) Addr() string {
@@ -86,6 +92,10 @@ func Default() *Config {
 		Tenancy: TenancyConfig{
 			Enabled: false,
 			Header:  "X-Gothub-Tenant-ID",
+		},
+		Launch: LaunchConfig{
+			RestrictToPublicRepos: false,
+			MaxPublicReposPerUser: 0,
 		},
 	}
 }
@@ -149,6 +159,16 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("GOTHUB_DEFAULT_TENANT_ID"); v != "" {
 		cfg.Tenancy.DefaultTenantID = strings.TrimSpace(v)
+	}
+	if v := os.Getenv("GOTHUB_RESTRICT_TO_PUBLIC_REPOS"); v != "" {
+		if enabled, err := strconv.ParseBool(v); err == nil {
+			cfg.Launch.RestrictToPublicRepos = enabled
+		}
+	}
+	if v := os.Getenv("GOTHUB_MAX_PUBLIC_REPOS_PER_USER"); v != "" {
+		if value, err := strconv.Atoi(v); err == nil && value >= 0 {
+			cfg.Launch.MaxPublicReposPerUser = value
+		}
 	}
 }
 

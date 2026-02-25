@@ -27,6 +27,12 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Tenancy.Header != "X-Gothub-Tenant-ID" {
 		t.Fatalf("Tenancy.Header = %q, want %q", cfg.Tenancy.Header, "X-Gothub-Tenant-ID")
 	}
+	if cfg.Launch.RestrictToPublicRepos {
+		t.Fatal("Launch.RestrictToPublicRepos = true, want default false")
+	}
+	if cfg.Launch.MaxPublicReposPerUser != 0 {
+		t.Fatalf("Launch.MaxPublicReposPerUser = %d, want default 0", cfg.Launch.MaxPublicReposPerUser)
+	}
 }
 
 func TestLoadAppliesEnvOverrides(t *testing.T) {
@@ -41,6 +47,8 @@ func TestLoadAppliesEnvOverrides(t *testing.T) {
 	t.Setenv("GOTHUB_ENABLE_TENANCY", "true")
 	t.Setenv("GOTHUB_TENANCY_HEADER", "X-Tenant-ID")
 	t.Setenv("GOTHUB_DEFAULT_TENANT_ID", "tenant-default")
+	t.Setenv("GOTHUB_RESTRICT_TO_PUBLIC_REPOS", "true")
+	t.Setenv("GOTHUB_MAX_PUBLIC_REPOS_PER_USER", "7")
 
 	cfg, err := Load("")
 	if err != nil {
@@ -86,6 +94,12 @@ func TestLoadAppliesEnvOverrides(t *testing.T) {
 	if cfg.Tenancy.DefaultTenantID != "tenant-default" {
 		t.Fatalf("Tenancy.DefaultTenantID = %q, want %q", cfg.Tenancy.DefaultTenantID, "tenant-default")
 	}
+	if !cfg.Launch.RestrictToPublicRepos {
+		t.Fatal("Launch.RestrictToPublicRepos = false, want true")
+	}
+	if cfg.Launch.MaxPublicReposPerUser != 7 {
+		t.Fatalf("Launch.MaxPublicReposPerUser = %d, want 7", cfg.Launch.MaxPublicReposPerUser)
+	}
 }
 
 func TestLoadFromYAML(t *testing.T) {
@@ -111,6 +125,9 @@ tenancy:
   enabled: true
   header: X-Tenant-ID
   default_tenant_id: tenant-yaml
+launch:
+  restrict_to_public_repos: true
+  max_public_repos_per_user: 9
 `)
 	if err := os.WriteFile(path, body, 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
@@ -147,5 +164,11 @@ tenancy:
 	}
 	if cfg.Tenancy.DefaultTenantID != "tenant-yaml" {
 		t.Fatalf("Tenancy.DefaultTenantID = %q, want %q", cfg.Tenancy.DefaultTenantID, "tenant-yaml")
+	}
+	if !cfg.Launch.RestrictToPublicRepos {
+		t.Fatal("Launch.RestrictToPublicRepos = false, want true")
+	}
+	if cfg.Launch.MaxPublicReposPerUser != 9 {
+		t.Fatalf("Launch.MaxPublicReposPerUser = %d, want 9", cfg.Launch.MaxPublicReposPerUser)
 	}
 }

@@ -102,6 +102,8 @@ func (p *PostgresDB) migrateTenancySchema(ctx context.Context) error {
 		`ALTER TABLE issue_comments ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT COALESCE(NULLIF(current_setting('app.tenant_id', true), ''), 'default')`,
 		`ALTER TABLE repo_webhooks ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT COALESCE(NULLIF(current_setting('app.tenant_id', true), ''), 'default')`,
 		`ALTER TABLE webhook_deliveries ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT COALESCE(NULLIF(current_setting('app.tenant_id', true), ''), 'default')`,
+		`ALTER TABLE repo_runner_tokens ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT COALESCE(NULLIF(current_setting('app.tenant_id', true), ''), 'default')`,
+		`ALTER TABLE interest_signups ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT COALESCE(NULLIF(current_setting('app.tenant_id', true), ''), 'default')`,
 		`CREATE INDEX IF NOT EXISTS idx_users_tenant_username ON users(tenant_id, username)`,
 		`CREATE INDEX IF NOT EXISTS idx_users_tenant_email ON users(tenant_id, email)`,
 		`CREATE INDEX IF NOT EXISTS idx_orgs_tenant_name ON orgs(tenant_id, name)`,
@@ -113,6 +115,9 @@ func (p *PostgresDB) migrateTenancySchema(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_issue_comments_tenant_issue_created ON issue_comments(tenant_id, issue_id, created_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_repo_webhooks_tenant_repo ON repo_webhooks(tenant_id, repo_id, id DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_tenant_repo_webhook_time ON webhook_deliveries(tenant_id, repo_id, webhook_id, created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_repo_runner_tokens_tenant_repo_active ON repo_runner_tokens(tenant_id, repo_id, revoked_at, created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_repo_runner_tokens_tenant_hash ON repo_runner_tokens(tenant_id, token_hash)`,
+		`CREATE INDEX IF NOT EXISTS idx_interest_signups_tenant_created ON interest_signups(tenant_id, created_at DESC)`,
 	}
 	for _, stmt := range statements {
 		if _, err := p.db.ExecContext(ctx, stmt); err != nil {
@@ -345,6 +350,20 @@ CREATE TABLE IF NOT EXISTS pr_check_runs (
 	UNIQUE(pr_id, name)
 );
 
+CREATE TABLE IF NOT EXISTS repo_runner_tokens (
+	id BIGSERIAL PRIMARY KEY,
+	repo_id BIGINT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+	name TEXT NOT NULL,
+	token_hash TEXT NOT NULL UNIQUE,
+	token_prefix TEXT NOT NULL,
+	created_by_user_id BIGINT NOT NULL REFERENCES users(id),
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	last_used_at TIMESTAMPTZ,
+	expires_at TIMESTAMPTZ,
+	revoked_at TIMESTAMPTZ,
+	tenant_id TEXT NOT NULL DEFAULT COALESCE(NULLIF(current_setting('app.tenant_id', true), ''), 'default')
+);
+
 CREATE TABLE IF NOT EXISTS repo_webhooks (
 	id BIGSERIAL PRIMARY KEY,
 	repo_id BIGINT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
@@ -371,6 +390,17 @@ CREATE TABLE IF NOT EXISTS webhook_deliveries (
 	duration_ms BIGINT NOT NULL DEFAULT 0,
 	redelivery_of_id BIGINT,
 	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS interest_signups (
+	id BIGSERIAL PRIMARY KEY,
+	email TEXT NOT NULL,
+	name TEXT NOT NULL DEFAULT '',
+	company TEXT NOT NULL DEFAULT '',
+	message TEXT NOT NULL DEFAULT '',
+	source TEXT NOT NULL DEFAULT '',
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	tenant_id TEXT NOT NULL DEFAULT COALESCE(NULLIF(current_setting('app.tenant_id', true), ''), 'default')
 );
 
 CREATE TABLE IF NOT EXISTS hash_mapping (
@@ -550,6 +580,8 @@ CREATE INDEX IF NOT EXISTS idx_xref_edges_repo_commit_source ON xref_edges(repo_
 CREATE INDEX IF NOT EXISTS idx_xref_edges_repo_commit_target ON xref_edges(repo_id, commit_hash, target_entity_id, kind);
 CREATE INDEX IF NOT EXISTS idx_branch_protection_repo_branch ON branch_protection_rules(repo_id, branch);
 CREATE INDEX IF NOT EXISTS idx_pr_check_runs_pr ON pr_check_runs(pr_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_repo_runner_tokens_repo_active ON repo_runner_tokens(repo_id, revoked_at, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_repo_runner_tokens_hash ON repo_runner_tokens(token_hash);
 CREATE INDEX IF NOT EXISTS idx_pull_requests_tenant_repo_number ON pull_requests(tenant_id, repo_id, number DESC);
 CREATE INDEX IF NOT EXISTS idx_pr_comments_tenant_pr_created ON pr_comments(tenant_id, pr_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_pr_reviews_tenant_pr_created ON pr_reviews(tenant_id, pr_id, created_at);
@@ -561,6 +593,7 @@ CREATE INDEX IF NOT EXISTS idx_notifications_user_created ON notifications(user_
 CREATE INDEX IF NOT EXISTS idx_notifications_user_unread ON notifications(user_id, read_at, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_repo_webhooks_repo ON repo_webhooks(repo_id);
 CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_webhook_time ON webhook_deliveries(webhook_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_interest_signups_created ON interest_signups(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_repo_stars_repo ON repo_stars(repo_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_repo_stars_user ON repo_stars(user_id, created_at DESC);
 `
@@ -731,6 +764,38 @@ BEGIN
 			AND policyname = 'webhook_deliveries_tenant_rls'
 	) THEN
 		CREATE POLICY webhook_deliveries_tenant_rls ON webhook_deliveries
+		USING (gothub_tenant_rls_match(tenant_id))
+		WITH CHECK (gothub_tenant_rls_match(tenant_id));
+	END IF;
+END $$;
+
+ALTER TABLE repo_runner_tokens ENABLE ROW LEVEL SECURITY;
+ALTER TABLE repo_runner_tokens FORCE ROW LEVEL SECURITY;
+DO $$
+BEGIN
+	IF NOT EXISTS (
+		SELECT 1 FROM pg_policies
+		WHERE schemaname = current_schema()
+			AND tablename = 'repo_runner_tokens'
+			AND policyname = 'repo_runner_tokens_tenant_rls'
+	) THEN
+		CREATE POLICY repo_runner_tokens_tenant_rls ON repo_runner_tokens
+		USING (gothub_tenant_rls_match(tenant_id))
+		WITH CHECK (gothub_tenant_rls_match(tenant_id));
+	END IF;
+END $$;
+
+ALTER TABLE interest_signups ENABLE ROW LEVEL SECURITY;
+ALTER TABLE interest_signups FORCE ROW LEVEL SECURITY;
+DO $$
+BEGIN
+	IF NOT EXISTS (
+		SELECT 1 FROM pg_policies
+		WHERE schemaname = current_schema()
+			AND tablename = 'interest_signups'
+			AND policyname = 'interest_signups_tenant_rls'
+	) THEN
+		CREATE POLICY interest_signups_tenant_rls ON interest_signups
 		USING (gothub_tenant_rls_match(tenant_id))
 		WITH CHECK (gothub_tenant_rls_match(tenant_id));
 	END IF;
@@ -1204,6 +1269,18 @@ func (p *PostgresDB) ListUserRepositoriesPage(ctx context.Context, userID int64,
 		repos = append(repos, r)
 	}
 	return repos, rows.Err()
+}
+
+func (p *PostgresDB) CountUserOwnedRepositoriesByVisibility(ctx context.Context, userID int64, isPrivate bool) (int, error) {
+	tenantID := tenantIDForContext(ctx)
+	var count int
+	if err := p.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM repositories WHERE owner_user_id = $1 AND tenant_id = $2 AND is_private = $3`,
+		userID, tenantID, isPrivate,
+	).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 func (p *PostgresDB) ListRepositoryForks(ctx context.Context, parentRepoID int64) ([]models.Repository, error) {
@@ -1998,6 +2075,88 @@ func (p *PostgresDB) ListPRCheckRunsPage(ctx context.Context, prID int64, limit,
 	return runs, rows.Err()
 }
 
+func (p *PostgresDB) CreateRepoRunnerToken(ctx context.Context, token *models.RepoRunnerToken) error {
+	tenantID := tenantIDForContext(ctx)
+	return p.db.QueryRowContext(ctx,
+		`INSERT INTO repo_runner_tokens (
+			repo_id, name, token_hash, token_prefix, created_by_user_id, expires_at, revoked_at, tenant_id
+		)
+		 SELECT r.id, $2, $3, $4, $5, $6, $7, $8
+		 FROM repositories r
+		 WHERE r.id = $1 AND r.tenant_id = $8
+		 RETURNING id, created_at, last_used_at`,
+		token.RepoID, token.Name, token.TokenHash, token.TokenPrefix, token.CreatedByUserID, token.ExpiresAt, token.RevokedAt, tenantID).
+		Scan(&token.ID, &token.CreatedAt, &token.LastUsedAt)
+}
+
+func (p *PostgresDB) ListRepoRunnerTokens(ctx context.Context, repoID int64) ([]models.RepoRunnerToken, error) {
+	tenantID := tenantIDForContext(ctx)
+	rows, err := p.db.QueryContext(ctx,
+		`SELECT id, repo_id, name, token_prefix, created_by_user_id, created_at, last_used_at, expires_at, revoked_at
+		 FROM repo_runner_tokens
+		 WHERE repo_id = $1 AND tenant_id = $2
+		 ORDER BY created_at DESC, id DESC`,
+		repoID, tenantID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	tokens := make([]models.RepoRunnerToken, 0)
+	for rows.Next() {
+		var token models.RepoRunnerToken
+		if err := rows.Scan(
+			&token.ID, &token.RepoID, &token.Name, &token.TokenPrefix, &token.CreatedByUserID,
+			&token.CreatedAt, &token.LastUsedAt, &token.ExpiresAt, &token.RevokedAt,
+		); err != nil {
+			return nil, err
+		}
+		tokens = append(tokens, token)
+	}
+	return tokens, rows.Err()
+}
+
+func (p *PostgresDB) DeleteRepoRunnerToken(ctx context.Context, repoID, tokenID int64) error {
+	tenantID := tenantIDForContext(ctx)
+	_, err := p.db.ExecContext(ctx,
+		`UPDATE repo_runner_tokens
+		 SET revoked_at = COALESCE(revoked_at, NOW())
+		 WHERE repo_id = $1 AND id = $2 AND tenant_id = $3`,
+		repoID, tokenID, tenantID,
+	)
+	return err
+}
+
+func (p *PostgresDB) GetRepoRunnerTokenByHash(ctx context.Context, tokenHash string) (*models.RepoRunnerToken, error) {
+	tenantID := tenantIDForContext(ctx)
+	token := &models.RepoRunnerToken{}
+	err := p.db.QueryRowContext(ctx,
+		`SELECT id, repo_id, name, token_hash, token_prefix, created_by_user_id, created_at, last_used_at, expires_at, revoked_at
+		 FROM repo_runner_tokens
+		 WHERE token_hash = $1 AND tenant_id = $2`,
+		tokenHash, tenantID,
+	).Scan(
+		&token.ID, &token.RepoID, &token.Name, &token.TokenHash, &token.TokenPrefix, &token.CreatedByUserID,
+		&token.CreatedAt, &token.LastUsedAt, &token.ExpiresAt, &token.RevokedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return token, nil
+}
+
+func (p *PostgresDB) TouchRepoRunnerTokenUsed(ctx context.Context, tokenID int64, usedAt time.Time) error {
+	tenantID := tenantIDForContext(ctx)
+	_, err := p.db.ExecContext(ctx,
+		`UPDATE repo_runner_tokens
+		 SET last_used_at = $1
+		 WHERE id = $2 AND tenant_id = $3`,
+		usedAt, tokenID, tenantID,
+	)
+	return err
+}
+
 // --- Webhooks ---
 
 func (p *PostgresDB) CreateWebhook(ctx context.Context, hook *models.Webhook) error {
@@ -2134,6 +2293,47 @@ func (p *PostgresDB) ListWebhookDeliveriesPage(ctx context.Context, repoID, webh
 		deliveries = append(deliveries, d)
 	}
 	return deliveries, rows.Err()
+}
+
+func (p *PostgresDB) CreateInterestSignup(ctx context.Context, signup *models.InterestSignup) error {
+	tenantID := tenantIDForContext(ctx)
+	return p.db.QueryRowContext(ctx,
+		`INSERT INTO interest_signups (email, name, company, message, source, tenant_id)
+		 VALUES ($1, $2, $3, $4, $5, $6)
+		 RETURNING id, created_at`,
+		signup.Email, signup.Name, signup.Company, signup.Message, signup.Source, tenantID,
+	).Scan(&signup.ID, &signup.CreatedAt)
+}
+
+func (p *PostgresDB) ListInterestSignupsPage(ctx context.Context, limit, offset int) ([]models.InterestSignup, error) {
+	tenantID := tenantIDForContext(ctx)
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	rows, err := p.db.QueryContext(ctx,
+		`SELECT id, email, name, company, message, source, created_at
+		 FROM interest_signups
+		 WHERE tenant_id = $1
+		 ORDER BY created_at DESC, id DESC
+		 LIMIT $2 OFFSET $3`,
+		tenantID, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	signups := make([]models.InterestSignup, 0)
+	for rows.Next() {
+		var signup models.InterestSignup
+		if err := rows.Scan(&signup.ID, &signup.Email, &signup.Name, &signup.Company, &signup.Message, &signup.Source, &signup.CreatedAt); err != nil {
+			return nil, err
+		}
+		signups = append(signups, signup)
+	}
+	return signups, rows.Err()
 }
 
 // --- Hash Mapping ---

@@ -4,6 +4,7 @@ import {
   listCollaborators, addCollaborator, removeCollaborator,
   listWebhooks, createWebhook, deleteWebhook, listWebhookDeliveries, pingWebhook, redeliverWebhookDelivery,
   getBranchProtection, setBranchProtection, deleteBranchProtection,
+  listRepoRunnerTokens, createRepoRunnerToken, deleteRepoRunnerToken,
 } from '../api/client';
 
 interface Props {
@@ -12,12 +13,13 @@ interface Props {
   path?: string;
 }
 
-type Tab = 'general' | 'collaborators' | 'webhooks' | 'branch-protection';
+type Tab = 'general' | 'collaborators' | 'webhooks' | 'runners' | 'branch-protection';
 
 const TABS: { key: Tab; label: string }[] = [
   { key: 'general', label: 'General' },
   { key: 'collaborators', label: 'Collaborators' },
   { key: 'webhooks', label: 'Webhooks' },
+  { key: 'runners', label: 'Runners' },
   { key: 'branch-protection', label: 'Branch Protection' },
 ];
 
@@ -159,6 +161,7 @@ export function RepoSettingsView({ owner, repo }: Props) {
       {activeTab === 'general' && <GeneralTab owner={owner} repo={repo} repoInfo={repoInfo} />}
       {activeTab === 'collaborators' && <CollaboratorsTab owner={owner} repo={repo} />}
       {activeTab === 'webhooks' && <WebhooksTab owner={owner} repo={repo} />}
+      {activeTab === 'runners' && <RunnersTab owner={owner} repo={repo} />}
       {activeTab === 'branch-protection' && <BranchProtectionTab owner={owner} repo={repo} />}
     </div>
   );
@@ -644,7 +647,145 @@ function WebhooksTab({ owner, repo }: { owner: string; repo: string }) {
 }
 
 // ---------------------------------------------------------------------------
-// Tab 4: Branch Protection
+// Tab 4: Runners
+// ---------------------------------------------------------------------------
+
+function RunnersTab({ owner, repo }: { owner: string; repo: string }) {
+  const [tokens, setTokens] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [newName, setNewName] = useState('');
+  const [expiresHours, setExpiresHours] = useState(24);
+  const [creating, setCreating] = useState(false);
+  const [lastIssuedToken, setLastIssuedToken] = useState('');
+
+  const loadTokens = async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const list = await listRepoRunnerTokens(owner, repo);
+      setTokens(Array.isArray(list) ? list : []);
+    } catch (e: any) {
+      setError(e?.message || 'Failed to load runner tokens');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { loadTokens(); }, [owner, repo]);
+
+  const handleCreate = async (e: Event) => {
+    e.preventDefault();
+    if (!newName.trim()) return;
+    setCreating(true);
+    setError('');
+    setLastIssuedToken('');
+    try {
+      const payload: any = { name: newName.trim() };
+      if (expiresHours > 0) payload.expires_in_hours = expiresHours;
+      const created = await createRepoRunnerToken(owner, repo, payload);
+      setLastIssuedToken(created.token || '');
+      setNewName('');
+      await loadTokens();
+    } catch (e: any) {
+      setError(e?.message || 'Failed to create runner token');
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const handleRevoke = async (id: number) => {
+    const confirmed = window.confirm('Revoke this runner token?');
+    if (!confirmed) return;
+    setError('');
+    try {
+      await deleteRepoRunnerToken(owner, repo, id);
+      await loadTokens();
+    } catch (e: any) {
+      setError(e?.message || 'Failed to revoke runner token');
+    }
+  };
+
+  return (
+    <div>
+      {error && <div style={{ color: colors.red, marginBottom: '12px', fontSize: '13px' }}>{error}</div>}
+      <div style={sectionBox}>
+        <h3 style={{ color: colors.heading, fontSize: '16px', marginTop: '0', marginBottom: '10px' }}>Runner Tokens</h3>
+        <div style={{ color: colors.muted, fontSize: '13px', marginBottom: '14px' }}>
+          Use runner tokens for BYO CI runners to update PR check runs without user credentials.
+        </div>
+        {lastIssuedToken && (
+          <div style={{ marginBottom: '12px', padding: '10px', background: colors.bg, border: `1px solid ${colors.border}`, borderRadius: '6px' }}>
+            <div style={{ color: colors.heading, fontSize: '12px', marginBottom: '6px' }}>New token (shown once)</div>
+            <code style={{ color: '#3fb950', fontSize: '12px', wordBreak: 'break-all' }}>{lastIssuedToken}</code>
+          </div>
+        )}
+        <form onSubmit={handleCreate} style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '16px' }}>
+          <input
+            type="text"
+            value={newName}
+            onInput={(e: any) => setNewName(e.target.value)}
+            placeholder="runner name"
+            style={{ ...inputStyle, minWidth: '200px', flex: '1' }}
+          />
+          <input
+            type="number"
+            min="0"
+            max="8760"
+            value={expiresHours}
+            onInput={(e: any) => setExpiresHours(parseInt(e.target.value, 10) || 0)}
+            style={{ ...inputStyle, width: '120px' }}
+            title="Expires in hours (0 = never)"
+          />
+          <button type="submit" disabled={creating || !newName.trim()} style={{ ...btnPrimary, opacity: creating || !newName.trim() ? '0.6' : '1' }}>
+            {creating ? 'Creating...' : 'Create token'}
+          </button>
+        </form>
+
+        {loading ? (
+          <div style={{ color: colors.muted, fontSize: '14px' }}>Loading tokens...</div>
+        ) : tokens.length === 0 ? (
+          <div style={{ color: colors.muted, fontSize: '14px' }}>No runner tokens yet.</div>
+        ) : (
+          tokens.map((tok, idx) => (
+            <div
+              key={tok.id || idx}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: '12px',
+                borderTop: idx === 0 ? 'none' : `1px solid ${colors.border}`,
+                padding: '10px 0',
+                flexWrap: 'wrap',
+              }}
+            >
+              <div>
+                <div style={{ color: colors.heading, fontSize: '14px', fontWeight: 'bold' }}>{tok.name}</div>
+                <div style={{ color: colors.muted, fontSize: '12px' }}>
+                  {tok.token_prefix} • created {tok.created_at ? new Date(tok.created_at).toLocaleString() : 'n/a'}
+                  {tok.last_used_at ? ` • last used ${new Date(tok.last_used_at).toLocaleString()}` : ''}
+                  {tok.expires_at ? ` • expires ${new Date(tok.expires_at).toLocaleString()}` : ' • no expiry'}
+                  {tok.revoked_at ? ' • revoked' : ''}
+                </div>
+              </div>
+              <button
+                onClick={() => handleRevoke(tok.id)}
+                disabled={!!tok.revoked_at}
+                style={{ ...btnDanger, opacity: tok.revoked_at ? '0.5' : '1', padding: '6px 10px', fontSize: '12px' }}
+              >
+                {tok.revoked_at ? 'Revoked' : 'Revoke'}
+              </button>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Tab 5: Branch Protection
 // ---------------------------------------------------------------------------
 
 function BranchProtectionTab({ owner, repo }: { owner: string; repo: string }) {
