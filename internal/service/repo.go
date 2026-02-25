@@ -54,7 +54,7 @@ func (s *RepoService) Create(ctx context.Context, ownerID int64, name, descripti
 	}
 
 	// Set the real storage path using the repo ID
-	repo.StoragePath = filepath.Join(s.storagePath, fmt.Sprintf("%d", repo.ID))
+	repo.StoragePath = s.storagePathForNewRepo(ctx, repo.ID)
 
 	// Initialize the bare repository store
 	if _, err := gotstore.Open(repo.StoragePath); err != nil {
@@ -113,7 +113,7 @@ func (s *RepoService) Fork(ctx context.Context, sourceRepoID, ownerID int64, req
 		return nil, forkErr
 	}
 
-	fork.StoragePath = filepath.Join(s.storagePath, fmt.Sprintf("%d", fork.ID))
+	fork.StoragePath = s.storagePathForNewRepo(ctx, fork.ID)
 	if _, err := gotstore.Open(fork.StoragePath); err != nil {
 		return failFork("init fork store", err)
 	}
@@ -183,7 +183,7 @@ func (s *RepoService) OpenStore(ctx context.Context, owner, name string) (*gotst
 	}
 	// Backward compatibility: older rows may still have "pending".
 	if repo.StoragePath == "" || repo.StoragePath == "pending" {
-		repo.StoragePath = filepath.Join(s.storagePath, fmt.Sprintf("%d", repo.ID))
+		repo.StoragePath = s.resolveStoragePath(ctx, repo)
 	}
 	return gotstore.Open(repo.StoragePath)
 }
@@ -195,9 +195,35 @@ func (s *RepoService) OpenStoreByID(ctx context.Context, repoID int64) (*gotstor
 		return nil, fmt.Errorf("repo %d: %w", repoID, err)
 	}
 	if repo.StoragePath == "" || repo.StoragePath == "pending" {
-		repo.StoragePath = filepath.Join(s.storagePath, fmt.Sprintf("%d", repo.ID))
+		repo.StoragePath = s.resolveStoragePath(ctx, repo)
 	}
 	return gotstore.Open(repo.StoragePath)
+}
+
+func (s *RepoService) storagePathForNewRepo(ctx context.Context, repoID int64) string {
+	repoPath := filepath.Join(s.storagePath, fmt.Sprintf("%d", repoID))
+	tenantID, ok := database.TenantIDFromContext(ctx)
+	if !ok {
+		return repoPath
+	}
+	return filepath.Join(s.storagePath, tenantID, fmt.Sprintf("%d", repoID))
+}
+
+func (s *RepoService) resolveStoragePath(ctx context.Context, repo *models.Repository) string {
+	tenantPath := s.storagePathForNewRepo(ctx, repo.ID)
+	legacyPath := filepath.Join(s.storagePath, fmt.Sprintf("%d", repo.ID))
+	if tenantPath == legacyPath {
+		return tenantPath
+	}
+
+	// Preserve compatibility for repositories created before tenant-scoped layout.
+	if stat, err := os.Stat(legacyPath); err == nil && stat.IsDir() {
+		return legacyPath
+	}
+	if stat, err := os.Stat(tenantPath); err == nil && stat.IsDir() {
+		return tenantPath
+	}
+	return tenantPath
 }
 
 func (s *RepoService) pickAvailableForkName(ctx context.Context, ownerName, desired string) (string, error) {
