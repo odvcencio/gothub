@@ -20,6 +20,8 @@ type sqlExecContexter interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
 
+const defaultTenantID = "default"
+
 func OpenPostgres(dsn string) (*PostgresDB, error) {
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
@@ -56,11 +58,17 @@ func setPostgresTenantContext(ctx context.Context, execer sqlExecContexter) erro
 	if _, err := execer.ExecContext(ctx, `SELECT set_config('app.tenant_id', $1, true)`, tenantID); err != nil {
 		return fmt.Errorf("set postgres tenant context: %w", err)
 	}
+	if _, err := execer.ExecContext(ctx, `SELECT set_config('app.tenant_rls_enabled', 'on', true)`); err != nil {
+		return fmt.Errorf("set postgres tenant context: %w", err)
+	}
 	return nil
 }
 
 func (p *PostgresDB) Migrate(ctx context.Context) error {
 	if _, err := p.db.ExecContext(ctx, pgSchema); err != nil {
+		return err
+	}
+	if err := p.migrateTenancySchema(ctx); err != nil {
 		return err
 	}
 	if _, err := p.db.ExecContext(ctx, `ALTER TABLE repositories ADD COLUMN IF NOT EXISTS parent_repo_id BIGINT REFERENCES repositories(id) ON DELETE SET NULL`); err != nil {
@@ -80,6 +88,33 @@ func (p *PostgresDB) Migrate(ctx context.Context) error {
 	}
 	_, err := p.db.ExecContext(ctx, `ALTER TABLE branch_protection_rules ADD COLUMN IF NOT EXISTS require_signed_commits BOOLEAN NOT NULL DEFAULT FALSE`)
 	return err
+}
+
+func (p *PostgresDB) migrateTenancySchema(ctx context.Context) error {
+	statements := []string{
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT COALESCE(NULLIF(current_setting('app.tenant_id', true), ''), 'default')`,
+		`ALTER TABLE orgs ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT COALESCE(NULLIF(current_setting('app.tenant_id', true), ''), 'default')`,
+		`ALTER TABLE repositories ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT COALESCE(NULLIF(current_setting('app.tenant_id', true), ''), 'default')`,
+		`CREATE INDEX IF NOT EXISTS idx_users_tenant_username ON users(tenant_id, username)`,
+		`CREATE INDEX IF NOT EXISTS idx_users_tenant_email ON users(tenant_id, email)`,
+		`CREATE INDEX IF NOT EXISTS idx_orgs_tenant_name ON orgs(tenant_id, name)`,
+		`CREATE INDEX IF NOT EXISTS idx_repositories_tenant_owner_name ON repositories(tenant_id, owner_user_id, owner_org_id, name)`,
+	}
+	for _, stmt := range statements {
+		if _, err := p.db.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
+	}
+	_, err := p.db.ExecContext(ctx, pgTenancyRLS)
+	return err
+}
+
+func tenantIDForContext(ctx context.Context) string {
+	tenantID, ok := TenantIDFromContext(ctx)
+	if !ok {
+		return defaultTenantID
+	}
+	return tenantID
 }
 
 const pgSchema = `
@@ -506,27 +541,91 @@ CREATE INDEX IF NOT EXISTS idx_repo_stars_repo ON repo_stars(repo_id, created_at
 CREATE INDEX IF NOT EXISTS idx_repo_stars_user ON repo_stars(user_id, created_at DESC);
 `
 
+const pgTenancyRLS = `
+CREATE OR REPLACE FUNCTION gothub_tenant_rls_match(row_tenant_id TEXT)
+RETURNS BOOLEAN
+LANGUAGE SQL
+STABLE
+AS $$
+	SELECT
+		current_setting('app.tenant_rls_enabled', true) <> 'on'
+		OR row_tenant_id = COALESCE(NULLIF(current_setting('app.tenant_id', true), ''), 'default')
+$$;
+
+ALTER TABLE users ENABLE ROW LEVEL SECURITY;
+ALTER TABLE users FORCE ROW LEVEL SECURITY;
+DO $$
+BEGIN
+	IF NOT EXISTS (
+		SELECT 1 FROM pg_policies
+		WHERE schemaname = current_schema()
+			AND tablename = 'users'
+			AND policyname = 'users_tenant_rls'
+	) THEN
+		CREATE POLICY users_tenant_rls ON users
+		USING (gothub_tenant_rls_match(tenant_id))
+		WITH CHECK (gothub_tenant_rls_match(tenant_id));
+	END IF;
+END $$;
+
+ALTER TABLE orgs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE orgs FORCE ROW LEVEL SECURITY;
+DO $$
+BEGIN
+	IF NOT EXISTS (
+		SELECT 1 FROM pg_policies
+		WHERE schemaname = current_schema()
+			AND tablename = 'orgs'
+			AND policyname = 'orgs_tenant_rls'
+	) THEN
+		CREATE POLICY orgs_tenant_rls ON orgs
+		USING (gothub_tenant_rls_match(tenant_id))
+		WITH CHECK (gothub_tenant_rls_match(tenant_id));
+	END IF;
+END $$;
+
+ALTER TABLE repositories ENABLE ROW LEVEL SECURITY;
+ALTER TABLE repositories FORCE ROW LEVEL SECURITY;
+DO $$
+BEGIN
+	IF NOT EXISTS (
+		SELECT 1 FROM pg_policies
+		WHERE schemaname = current_schema()
+			AND tablename = 'repositories'
+			AND policyname = 'repositories_tenant_rls'
+	) THEN
+		CREATE POLICY repositories_tenant_rls ON repositories
+		USING (gothub_tenant_rls_match(tenant_id))
+		WITH CHECK (gothub_tenant_rls_match(tenant_id));
+	END IF;
+END $$;
+`
+
 // --- Users ---
 
 func (p *PostgresDB) CreateUser(ctx context.Context, u *models.User) error {
+	tenantID := tenantIDForContext(ctx)
 	return p.db.QueryRowContext(ctx,
-		`INSERT INTO users (username, email, password_hash, is_admin) VALUES ($1, $2, $3, $4) RETURNING id, created_at`,
-		u.Username, u.Email, u.PasswordHash, u.IsAdmin).Scan(&u.ID, &u.CreatedAt)
+		`INSERT INTO users (username, email, password_hash, is_admin, tenant_id) VALUES ($1, $2, $3, $4, $5) RETURNING id, created_at`,
+		u.Username, u.Email, u.PasswordHash, u.IsAdmin, tenantID).Scan(&u.ID, &u.CreatedAt)
 }
 
 func (p *PostgresDB) GetUserByID(ctx context.Context, id int64) (*models.User, error) {
+	tenantID := tenantIDForContext(ctx)
 	return p.scanUser(p.db.QueryRowContext(ctx,
-		`SELECT id, username, email, password_hash, is_admin, created_at FROM users WHERE id = $1`, id))
+		`SELECT id, username, email, password_hash, is_admin, created_at FROM users WHERE id = $1 AND tenant_id = $2`, id, tenantID))
 }
 
 func (p *PostgresDB) GetUserByUsername(ctx context.Context, username string) (*models.User, error) {
+	tenantID := tenantIDForContext(ctx)
 	return p.scanUser(p.db.QueryRowContext(ctx,
-		`SELECT id, username, email, password_hash, is_admin, created_at FROM users WHERE username = $1`, username))
+		`SELECT id, username, email, password_hash, is_admin, created_at FROM users WHERE username = $1 AND tenant_id = $2`, username, tenantID))
 }
 
 func (p *PostgresDB) GetUserByEmail(ctx context.Context, email string) (*models.User, error) {
+	tenantID := tenantIDForContext(ctx)
 	return p.scanUser(p.db.QueryRowContext(ctx,
-		`SELECT id, username, email, password_hash, is_admin, created_at FROM users WHERE email = $1`, email))
+		`SELECT id, username, email, password_hash, is_admin, created_at FROM users WHERE email = $1 AND tenant_id = $2`, email, tenantID))
 }
 
 func (p *PostgresDB) scanUser(row *sql.Row) (*models.User, error) {
@@ -538,7 +637,8 @@ func (p *PostgresDB) scanUser(row *sql.Row) (*models.User, error) {
 }
 
 func (p *PostgresDB) UpdateUserPassword(ctx context.Context, userID int64, passwordHash string) error {
-	_, err := p.db.ExecContext(ctx, `UPDATE users SET password_hash = $1 WHERE id = $2`, passwordHash, userID)
+	tenantID := tenantIDForContext(ctx)
+	_, err := p.db.ExecContext(ctx, `UPDATE users SET password_hash = $1 WHERE id = $2 AND tenant_id = $3`, passwordHash, userID, tenantID)
 	return err
 }
 
@@ -740,10 +840,11 @@ func (p *PostgresDB) DeleteSSHKey(ctx context.Context, id, userID int64) error {
 // --- Repositories ---
 
 func (p *PostgresDB) CreateRepository(ctx context.Context, r *models.Repository) error {
+	tenantID := tenantIDForContext(ctx)
 	return p.db.QueryRowContext(ctx,
-		`INSERT INTO repositories (owner_user_id, owner_org_id, parent_repo_id, name, description, default_branch, is_private, storage_path)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id, created_at`,
-		r.OwnerUserID, r.OwnerOrgID, r.ParentRepoID, r.Name, r.Description, r.DefaultBranch, r.IsPrivate, r.StoragePath).Scan(&r.ID, &r.CreatedAt)
+		`INSERT INTO repositories (owner_user_id, owner_org_id, parent_repo_id, name, description, default_branch, is_private, storage_path, tenant_id)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id, created_at`,
+		r.OwnerUserID, r.OwnerOrgID, r.ParentRepoID, r.Name, r.Description, r.DefaultBranch, r.IsPrivate, r.StoragePath, tenantID).Scan(&r.ID, &r.CreatedAt)
 }
 
 func (p *PostgresDB) UpdateRepositoryStoragePath(ctx context.Context, id int64, storagePath string) error {
@@ -852,17 +953,18 @@ func (p *PostgresDB) CloneRepoMetadata(ctx context.Context, sourceRepoID, target
 }
 
 func (p *PostgresDB) GetRepository(ctx context.Context, ownerName, repoName string) (*models.Repository, error) {
+	tenantID := tenantIDForContext(ctx)
 	r := &models.Repository{}
 	// Try user-owned first, then org-owned
 	err := p.db.QueryRowContext(ctx,
 		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.parent_repo_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at,
 		 u.username, COALESCE(pu.username, po.name, ''), COALESCE(pr.name, '')
 		 FROM repositories r
-		 JOIN users u ON u.id = r.owner_user_id
+		 JOIN users u ON u.id = r.owner_user_id AND u.tenant_id = r.tenant_id
 		 LEFT JOIN repositories pr ON pr.id = r.parent_repo_id
 		 LEFT JOIN users pu ON pu.id = pr.owner_user_id
 		 LEFT JOIN orgs po ON po.id = pr.owner_org_id
-		 WHERE u.username = $1 AND r.name = $2`, ownerName, repoName).
+		 WHERE u.username = $1 AND r.name = $2 AND r.tenant_id = $3`, ownerName, repoName, tenantID).
 		Scan(
 			&r.ID, &r.OwnerUserID, &r.OwnerOrgID, &r.ParentRepoID, &r.Name, &r.Description, &r.DefaultBranch, &r.IsPrivate, &r.StoragePath, &r.CreatedAt,
 			&r.OwnerName, &r.ParentOwner, &r.ParentName,
@@ -878,11 +980,11 @@ func (p *PostgresDB) GetRepository(ctx context.Context, ownerName, repoName stri
 		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.parent_repo_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at,
 		 o.name, COALESCE(pu.username, po.name, ''), COALESCE(pr.name, '')
 		 FROM repositories r
-		 JOIN orgs o ON o.id = r.owner_org_id
+		 JOIN orgs o ON o.id = r.owner_org_id AND o.tenant_id = r.tenant_id
 		 LEFT JOIN repositories pr ON pr.id = r.parent_repo_id
 		 LEFT JOIN users pu ON pu.id = pr.owner_user_id
 		 LEFT JOIN orgs po ON po.id = pr.owner_org_id
-		 WHERE o.name = $1 AND r.name = $2`, ownerName, repoName).
+		 WHERE o.name = $1 AND r.name = $2 AND r.tenant_id = $3`, ownerName, repoName, tenantID).
 		Scan(
 			&r.ID, &r.OwnerUserID, &r.OwnerOrgID, &r.ParentRepoID, &r.Name, &r.Description, &r.DefaultBranch, &r.IsPrivate, &r.StoragePath, &r.CreatedAt,
 			&r.OwnerName, &r.ParentOwner, &r.ParentName,
@@ -894,17 +996,18 @@ func (p *PostgresDB) GetRepository(ctx context.Context, ownerName, repoName stri
 }
 
 func (p *PostgresDB) GetRepositoryByID(ctx context.Context, id int64) (*models.Repository, error) {
+	tenantID := tenantIDForContext(ctx)
 	r := &models.Repository{}
 	err := p.db.QueryRowContext(ctx,
 		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.parent_repo_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at,
 		 COALESCE(u.username, o.name, ''), COALESCE(pu.username, po.name, ''), COALESCE(pr.name, '')
 		 FROM repositories r
-		 LEFT JOIN users u ON u.id = r.owner_user_id
-		 LEFT JOIN orgs o ON o.id = r.owner_org_id
+		 LEFT JOIN users u ON u.id = r.owner_user_id AND u.tenant_id = r.tenant_id
+		 LEFT JOIN orgs o ON o.id = r.owner_org_id AND o.tenant_id = r.tenant_id
 		 LEFT JOIN repositories pr ON pr.id = r.parent_repo_id
 		 LEFT JOIN users pu ON pu.id = pr.owner_user_id
 		 LEFT JOIN orgs po ON po.id = pr.owner_org_id
-		 WHERE r.id = $1`, id).
+		 WHERE r.id = $1 AND r.tenant_id = $2`, id, tenantID).
 		Scan(
 			&r.ID, &r.OwnerUserID, &r.OwnerOrgID, &r.ParentRepoID, &r.Name, &r.Description, &r.DefaultBranch, &r.IsPrivate, &r.StoragePath, &r.CreatedAt,
 			&r.OwnerName, &r.ParentOwner, &r.ParentName,
@@ -920,6 +1023,7 @@ func (p *PostgresDB) ListUserRepositories(ctx context.Context, userID int64) ([]
 }
 
 func (p *PostgresDB) ListUserRepositoriesPage(ctx context.Context, userID int64, limit, offset int) ([]models.Repository, error) {
+	tenantID := tenantIDForContext(ctx)
 	if limit <= 0 {
 		limit = 100
 	}
@@ -930,23 +1034,24 @@ func (p *PostgresDB) ListUserRepositoriesPage(ctx context.Context, userID int64,
 		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.parent_repo_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at,
 		 COALESCE(u.username, o.name, ''), COALESCE(pu.username, po.name, ''), COALESCE(pr.name, '')
 		 FROM repositories r
-		 LEFT JOIN users u ON u.id = r.owner_user_id
-		 LEFT JOIN orgs o ON o.id = r.owner_org_id
+		 LEFT JOIN users u ON u.id = r.owner_user_id AND u.tenant_id = r.tenant_id
+		 LEFT JOIN orgs o ON o.id = r.owner_org_id AND o.tenant_id = r.tenant_id
 		 LEFT JOIN repositories pr ON pr.id = r.parent_repo_id
 		 LEFT JOIN users pu ON pu.id = pr.owner_user_id
 		 LEFT JOIN orgs po ON po.id = pr.owner_org_id
-		 WHERE r.owner_user_id = $1
+		 WHERE r.owner_user_id = $1 AND r.tenant_id = $2
 		 UNION
 		 SELECT r.id, r.owner_user_id, r.owner_org_id, r.parent_repo_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at,
 		 o.name, COALESCE(pu.username, po.name, ''), COALESCE(pr.name, '')
 		 FROM repositories r
-		 JOIN orgs o ON o.id = r.owner_org_id
+		 JOIN orgs o ON o.id = r.owner_org_id AND o.tenant_id = r.tenant_id
 		 JOIN org_members om ON om.org_id = o.id AND om.user_id = $1
 		 LEFT JOIN repositories pr ON pr.id = r.parent_repo_id
 		 LEFT JOIN users pu ON pu.id = pr.owner_user_id
 		 LEFT JOIN orgs po ON po.id = pr.owner_org_id
+		 WHERE r.tenant_id = $2
 		 ORDER BY created_at DESC
-		 LIMIT $2 OFFSET $3`, userID, limit, offset)
+		 LIMIT $3 OFFSET $4`, userID, tenantID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -970,6 +1075,7 @@ func (p *PostgresDB) ListRepositoryForks(ctx context.Context, parentRepoID int64
 }
 
 func (p *PostgresDB) ListRepositoryForksPage(ctx context.Context, parentRepoID int64, limit, offset int) ([]models.Repository, error) {
+	tenantID := tenantIDForContext(ctx)
 	if limit <= 0 {
 		limit = 100
 	}
@@ -980,14 +1086,14 @@ func (p *PostgresDB) ListRepositoryForksPage(ctx context.Context, parentRepoID i
 		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.parent_repo_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at,
 		 COALESCE(u.username, o.name, ''), COALESCE(pu.username, po.name, ''), COALESCE(pr.name, '')
 		 FROM repositories r
-		 LEFT JOIN users u ON u.id = r.owner_user_id
-		 LEFT JOIN orgs o ON o.id = r.owner_org_id
+		 LEFT JOIN users u ON u.id = r.owner_user_id AND u.tenant_id = r.tenant_id
+		 LEFT JOIN orgs o ON o.id = r.owner_org_id AND o.tenant_id = r.tenant_id
 		 LEFT JOIN repositories pr ON pr.id = r.parent_repo_id
 		 LEFT JOIN users pu ON pu.id = pr.owner_user_id
 		 LEFT JOIN orgs po ON po.id = pr.owner_org_id
-		 WHERE r.parent_repo_id = $1
+		 WHERE r.parent_repo_id = $1 AND r.tenant_id = $2
 		 ORDER BY r.created_at DESC, r.id DESC
-		 LIMIT $2 OFFSET $3`, parentRepoID, limit, offset)
+		 LIMIT $3 OFFSET $4`, parentRepoID, tenantID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -1008,7 +1114,8 @@ func (p *PostgresDB) ListRepositoryForksPage(ctx context.Context, parentRepoID i
 }
 
 func (p *PostgresDB) DeleteRepository(ctx context.Context, id int64) error {
-	_, err := p.db.ExecContext(ctx, `DELETE FROM repositories WHERE id = $1`, id)
+	tenantID := tenantIDForContext(ctx)
+	_, err := p.db.ExecContext(ctx, `DELETE FROM repositories WHERE id = $1 AND tenant_id = $2`, id, tenantID)
 	return err
 }
 
@@ -2856,15 +2963,17 @@ func (p *PostgresDB) ListXRefEdgesTo(ctx context.Context, repoID int64, commitHa
 // --- Organizations ---
 
 func (p *PostgresDB) CreateOrg(ctx context.Context, o *models.Org) error {
+	tenantID := tenantIDForContext(ctx)
 	return p.db.QueryRowContext(ctx,
-		`INSERT INTO orgs (name, display_name) VALUES ($1, $2) RETURNING id`,
-		o.Name, o.DisplayName).Scan(&o.ID)
+		`INSERT INTO orgs (name, display_name, tenant_id) VALUES ($1, $2, $3) RETURNING id`,
+		o.Name, o.DisplayName, tenantID).Scan(&o.ID)
 }
 
 func (p *PostgresDB) GetOrg(ctx context.Context, name string) (*models.Org, error) {
+	tenantID := tenantIDForContext(ctx)
 	o := &models.Org{}
 	err := p.db.QueryRowContext(ctx,
-		`SELECT id, name, display_name FROM orgs WHERE name = $1`, name).
+		`SELECT id, name, display_name FROM orgs WHERE name = $1 AND tenant_id = $2`, name, tenantID).
 		Scan(&o.ID, &o.Name, &o.DisplayName)
 	if err != nil {
 		return nil, err
@@ -2873,9 +2982,10 @@ func (p *PostgresDB) GetOrg(ctx context.Context, name string) (*models.Org, erro
 }
 
 func (p *PostgresDB) GetOrgByID(ctx context.Context, id int64) (*models.Org, error) {
+	tenantID := tenantIDForContext(ctx)
 	o := &models.Org{}
 	err := p.db.QueryRowContext(ctx,
-		`SELECT id, name, display_name FROM orgs WHERE id = $1`, id).
+		`SELECT id, name, display_name FROM orgs WHERE id = $1 AND tenant_id = $2`, id, tenantID).
 		Scan(&o.ID, &o.Name, &o.DisplayName)
 	if err != nil {
 		return nil, err
@@ -2888,6 +2998,7 @@ func (p *PostgresDB) ListUserOrgs(ctx context.Context, userID int64) ([]models.O
 }
 
 func (p *PostgresDB) ListUserOrgsPage(ctx context.Context, userID int64, limit, offset int) ([]models.Org, error) {
+	tenantID := tenantIDForContext(ctx)
 	if limit <= 0 {
 		limit = 100
 	}
@@ -2897,9 +3008,9 @@ func (p *PostgresDB) ListUserOrgsPage(ctx context.Context, userID int64, limit, 
 	rows, err := p.db.QueryContext(ctx,
 		`SELECT o.id, o.name, o.display_name FROM orgs o
 		 JOIN org_members om ON om.org_id = o.id
-		 WHERE om.user_id = $1
+		 WHERE om.user_id = $1 AND o.tenant_id = $2
 		 ORDER BY o.name ASC
-		 LIMIT $2 OFFSET $3`, userID, limit, offset)
+		 LIMIT $3 OFFSET $4`, userID, tenantID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -2916,7 +3027,8 @@ func (p *PostgresDB) ListUserOrgsPage(ctx context.Context, userID int64, limit, 
 }
 
 func (p *PostgresDB) DeleteOrg(ctx context.Context, id int64) error {
-	_, err := p.db.ExecContext(ctx, `DELETE FROM orgs WHERE id = $1`, id)
+	tenantID := tenantIDForContext(ctx)
+	_, err := p.db.ExecContext(ctx, `DELETE FROM orgs WHERE id = $1 AND tenant_id = $2`, id, tenantID)
 	return err
 }
 
@@ -2977,6 +3089,7 @@ func (p *PostgresDB) ListOrgRepositories(ctx context.Context, orgID int64) ([]mo
 }
 
 func (p *PostgresDB) ListOrgRepositoriesPage(ctx context.Context, orgID int64, limit, offset int) ([]models.Repository, error) {
+	tenantID := tenantIDForContext(ctx)
 	if limit <= 0 {
 		limit = 100
 	}
@@ -2986,10 +3099,10 @@ func (p *PostgresDB) ListOrgRepositoriesPage(ctx context.Context, orgID int64, l
 	rows, err := p.db.QueryContext(ctx,
 		`SELECT r.id, r.owner_user_id, r.owner_org_id, r.parent_repo_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at, o.name
 		 FROM repositories r
-		 JOIN orgs o ON o.id = r.owner_org_id
-		 WHERE r.owner_org_id = $1
+		 JOIN orgs o ON o.id = r.owner_org_id AND o.tenant_id = r.tenant_id
+		 WHERE r.owner_org_id = $1 AND r.tenant_id = $2
 		 ORDER BY r.created_at DESC, r.id DESC
-		 LIMIT $2 OFFSET $3`, orgID, limit, offset)
+		 LIMIT $3 OFFSET $4`, orgID, tenantID, limit, offset)
 	if err != nil {
 		return nil, err
 	}

@@ -49,18 +49,26 @@ func TestSetPostgresTenantContextSetsAppTenantID(t *testing.T) {
 	if err := setPostgresTenantContext(ctx, execer); err != nil {
 		t.Fatalf("setPostgresTenantContext() error = %v, want nil", err)
 	}
-	if len(execer.calls) != 1 {
-		t.Fatalf("ExecContext calls = %d, want 1", len(execer.calls))
+	if len(execer.calls) != 2 {
+		t.Fatalf("ExecContext calls = %d, want 2", len(execer.calls))
 	}
-	call := execer.calls[0]
-	if call.query != `SELECT set_config('app.tenant_id', $1, true)` {
-		t.Fatalf("query = %q, want set_config query", call.query)
+	tenantCall := execer.calls[0]
+	if tenantCall.query != `SELECT set_config('app.tenant_id', $1, true)` {
+		t.Fatalf("tenant query = %q, want set_config query", tenantCall.query)
 	}
-	if len(call.args) != 1 {
-		t.Fatalf("args len = %d, want 1", len(call.args))
+	if len(tenantCall.args) != 1 {
+		t.Fatalf("tenant args len = %d, want 1", len(tenantCall.args))
 	}
-	if got, ok := call.args[0].(string); !ok || got != "tenant-42" {
-		t.Fatalf("arg[0] = %#v, want %q", call.args[0], "tenant-42")
+	if got, ok := tenantCall.args[0].(string); !ok || got != "tenant-42" {
+		t.Fatalf("tenant arg[0] = %#v, want %q", tenantCall.args[0], "tenant-42")
+	}
+
+	rlsCall := execer.calls[1]
+	if rlsCall.query != `SELECT set_config('app.tenant_rls_enabled', 'on', true)` {
+		t.Fatalf("rls query = %q, want RLS flag query", rlsCall.query)
+	}
+	if len(rlsCall.args) != 0 {
+		t.Fatalf("rls args len = %d, want 0", len(rlsCall.args))
 	}
 }
 
