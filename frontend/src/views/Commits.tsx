@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'preact/hooks';
-import { listCommits } from '../api/client';
+import { listCommits, type CommitSummary } from '../api/client';
 
 interface Props {
   owner?: string;
@@ -8,18 +8,41 @@ interface Props {
 }
 
 export function CommitsView({ owner, repo, ref: gitRef }: Props) {
-  const [commits, setCommits] = useState<any[]>([]);
+  const [commits, setCommits] = useState<CommitSummary[]>([]);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    if (!owner || !repo || !gitRef) return;
+    if (!owner || !repo || !gitRef) {
+      setCommits([]);
+      setError('');
+      setLoading(false);
+      return;
+    }
+    let cancelled = false;
     setLoading(true);
     setError('');
     listCommits(owner, repo, gitRef)
-      .then(setCommits)
-      .catch(e => setError(e.message))
-      .finally(() => setLoading(false));
+      .then((data) => {
+        if (!cancelled) {
+          setCommits(data);
+        }
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setError(e.message);
+          setCommits([]);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, [owner, repo, gitRef]);
 
   if (error) return <div style={{ color: '#f85149', padding: '20px' }}>{error}</div>;
