@@ -604,6 +604,71 @@ func TestAuthorizeRequestKeepsNotFoundWhenRepoMissing(t *testing.T) {
 	}
 }
 
+func TestHandlerSetsProtocolHeaders(t *testing.T) {
+	store, err := gotstore.Open(filepath.Join(t.TempDir(), "repo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	h := NewHandler(func(owner, repo string) (*gotstore.RepoStore, error) { return store, nil }, nil, nil)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/got/alice/repo/refs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if got := resp.Header.Get("Got-Protocol"); got != "1" {
+		t.Fatalf("Got-Protocol = %q, want %q", got, "1")
+	}
+	if got := resp.Header.Get("Got-Capabilities"); got != "pack,zstd,sideband" {
+		t.Fatalf("Got-Capabilities = %q, want %q", got, "pack,zstd,sideband")
+	}
+	if got := resp.Header.Get("Got-Limits"); got == "" {
+		t.Fatal("Got-Limits header missing")
+	}
+}
+
+func TestStructuredErrorResponse(t *testing.T) {
+	store, err := gotstore.Open(filepath.Join(t.TempDir(), "repo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	h := NewHandler(func(owner, repo string) (*gotstore.RepoStore, error) { return store, nil }, nil, nil)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	// Send empty batch request (no wants)
+	reqBody, _ := json.Marshal(map[string]any{"wants": []string{}})
+	resp, err := http.Post(ts.URL+"/got/alice/repo/objects/batch", "application/json", bytes.NewReader(reqBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+
+	var errResp struct {
+		Error string `json:"error"`
+		Code  string `json:"code"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&errResp); err != nil {
+		t.Fatalf("expected JSON error response: %v", err)
+	}
+	if errResp.Code != "invalid_request" {
+		t.Fatalf("code = %q, want %q", errResp.Code, "invalid_request")
+	}
+}
+
 func containsHash(hashes []object.Hash, want object.Hash) bool {
 	for _, h := range hashes {
 		if h == want {

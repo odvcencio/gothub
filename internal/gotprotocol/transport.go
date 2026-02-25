@@ -22,6 +22,19 @@ const (
 	maxBatchRequestB   int64 = 2 << 20
 	defaultBatchMaxObj int   = 10000
 	maxBatchMaxObj     int   = 50000
+
+	gotProtocolHeader     = "Got-Protocol"
+	gotCapabilitiesHeader = "Got-Capabilities"
+	gotLimitsHeader       = "Got-Limits"
+
+	serverProtocolVersion = "1"
+	serverCapabilities    = "pack,zstd,sideband"
+)
+
+// serverLimitsValue is the Got-Limits header value advertised by this server.
+var serverLimitsValue = fmt.Sprintf(
+	"max_batch=%d,max_payload=%d,max_object=%d",
+	maxBatchMaxObj, maxPushBodyBytes, maxPushObjectBytes,
 )
 
 // Handler provides HTTP endpoints for the Got protocol (push/pull).
@@ -68,6 +81,7 @@ func (h *Handler) handleListRefs(w http.ResponseWriter, r *http.Request) {
 	if ok := h.authorizeRequest(w, r, false); !ok {
 		return
 	}
+	h.setProtocolHeaders(w)
 	store, err := h.repoStore(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
@@ -87,6 +101,7 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 	if ok := h.authorizeRequest(w, r, false); !ok {
 		return
 	}
+	h.setProtocolHeaders(w)
 	store, err := h.repoStore(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
@@ -94,7 +109,7 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 	}
 	hash := object.Hash(r.PathValue("hash"))
 	if !store.Objects.Has(hash) {
-		http.Error(w, "object not found", http.StatusNotFound)
+		writeJSONError(w, "object_not_found", "object not found", string(hash), http.StatusNotFound)
 		return
 	}
 	objType, data, err := store.Objects.Read(hash)
@@ -112,6 +127,7 @@ func (h *Handler) handleBatchObjects(w http.ResponseWriter, r *http.Request) {
 	if ok := h.authorizeRequest(w, r, false); !ok {
 		return
 	}
+	h.setProtocolHeaders(w)
 	store, err := h.repoStore(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
@@ -128,7 +144,7 @@ func (h *Handler) handleBatchObjects(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(req.Wants) == 0 {
-		http.Error(w, "at least one want hash is required", http.StatusBadRequest)
+		writeJSONError(w, "invalid_request", "at least one want hash is required", "", http.StatusBadRequest)
 		return
 	}
 
@@ -215,6 +231,7 @@ func (h *Handler) handlePushObjects(w http.ResponseWriter, r *http.Request) {
 	if ok := h.authorizeRequest(w, r, true); !ok {
 		return
 	}
+	h.setProtocolHeaders(w)
 	store, err := h.repoStore(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
@@ -245,7 +262,7 @@ func (h *Handler) handlePushObjects(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if len(decoded) >= maxPushObjectCount {
-			http.Error(w, "too many objects in push", http.StatusRequestEntityTooLarge)
+			writeJSONError(w, "payload_too_large", "too many objects in push", "", http.StatusRequestEntityTooLarge)
 			return
 		}
 		objType, err := parsePushedObjectType(obj.Type)
@@ -260,7 +277,7 @@ func (h *Handler) handlePushObjects(w http.ResponseWriter, r *http.Request) {
 		hash := object.HashObject(objType, obj.Data)
 		if provided := strings.TrimSpace(obj.Hash); provided != "" {
 			if object.Hash(provided) != hash {
-				http.Error(w, fmt.Sprintf("object %d hash mismatch: computed %s, got %s", len(decoded), hash, provided), http.StatusBadRequest)
+				writeJSONError(w, "hash_mismatch", "object hash mismatch", fmt.Sprintf("computed %s, got %s", hash, provided), http.StatusBadRequest)
 				return
 			}
 		}
@@ -294,6 +311,7 @@ func (h *Handler) handleUpdateRefs(w http.ResponseWriter, r *http.Request) {
 	if ok := h.authorizeRequest(w, r, true); !ok {
 		return
 	}
+	h.setProtocolHeaders(w)
 	owner := r.PathValue("owner")
 	repo := r.PathValue("repo")
 	store, err := h.repoStore(r)
@@ -377,7 +395,7 @@ func (h *Handler) handleUpdateRefs(w http.ResponseWriter, r *http.Request) {
 					if u.Old != nil {
 						expected = *u.Old
 					}
-					http.Error(w, fmt.Sprintf("set ref %s: stale old hash (expected %s, got %s)", u.Name, expected, mismatch.Actual), http.StatusConflict)
+					writeJSONError(w, "ref_conflict", "stale old hash", fmt.Sprintf("expected %s, got %s", expected, mismatch.Actual), http.StatusConflict)
 					return
 				}
 				http.Error(w, fmt.Sprintf("delete ref %s: %v", u.Name, err), http.StatusInternalServerError)
@@ -394,7 +412,7 @@ func (h *Handler) handleUpdateRefs(w http.ResponseWriter, r *http.Request) {
 				if u.Old != nil {
 					expected = *u.Old
 				}
-				http.Error(w, fmt.Sprintf("set ref %s: stale old hash (expected %s, got %s)", u.Name, expected, mismatch.Actual), http.StatusConflict)
+				writeJSONError(w, "ref_conflict", "stale old hash", fmt.Sprintf("expected %s, got %s", expected, mismatch.Actual), http.StatusConflict)
 				return
 			}
 			http.Error(w, fmt.Sprintf("set ref %s: %v", u.Name, err), http.StatusInternalServerError)
@@ -404,6 +422,23 @@ func (h *Handler) handleUpdateRefs(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"status": "ok", "updated": applied})
+}
+
+func (h *Handler) setProtocolHeaders(w http.ResponseWriter) {
+	w.Header().Set(gotProtocolHeader, serverProtocolVersion)
+	w.Header().Set(gotCapabilitiesHeader, serverCapabilities)
+	w.Header().Set(gotLimitsHeader, serverLimitsValue)
+}
+
+// writeJSONError writes a structured JSON error response.
+func writeJSONError(w http.ResponseWriter, code string, message string, detail string, status int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	resp := map[string]string{"error": message, "code": code}
+	if detail != "" {
+		resp["detail"] = detail
+	}
+	json.NewEncoder(w).Encode(resp)
 }
 
 func (h *Handler) repoStore(r *http.Request) (*gotstore.RepoStore, error) {
