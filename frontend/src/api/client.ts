@@ -71,7 +71,6 @@ export interface AuthResponse {
 }
 
 export interface AuthCapabilities {
-  password_auth_enabled: boolean;
   magic_link_enabled: boolean;
   ssh_auth_enabled: boolean;
   passkey_enabled: boolean;
@@ -100,6 +99,21 @@ export interface Repository {
 export interface RepoStars {
   count: number;
   starred: boolean;
+}
+
+export interface RepoCreationPolicy {
+  can_create_public: boolean;
+  can_create_private: boolean;
+  public_repo_count: number;
+  private_repo_count: number;
+  max_public_repos: number;
+  max_private_repos: number;
+  restrict_to_public: boolean;
+  require_private_plan: boolean;
+  private_plan_eligible: boolean;
+  public_reason?: string;
+  private_reason?: string;
+  reasons?: string[];
 }
 
 export interface TreeEntry {
@@ -431,10 +445,8 @@ interface RepoEventStreamHandlers {
 }
 
 // Auth
-export const register = (username: string, email: string, password: string) =>
-  request<AuthResponse>('POST', '/auth/register', { username, email, password });
-export const login = (username: string, password: string) =>
-  request<AuthResponse>('POST', '/auth/login', { username, password });
+export const register = (username: string, email: string) =>
+  request<AuthResponse>('POST', '/auth/register', { username, email });
 export const requestMagicLink = (email: string) =>
   request<{ sent: boolean; token?: string; expires_at?: string }>('POST', '/auth/magic/request', { email });
 export const verifyMagicLink = (token: string) =>
@@ -457,8 +469,6 @@ export const createInterestSignup = (data: { email: string; name?: string; compa
   request<{ id: number; email: string; created_at?: string }>('POST', '/interest-signups', data);
 export const refreshToken = () =>
   request<AuthResponse>('POST', '/auth/refresh');
-export const changePassword = (currentPassword: string, newPassword: string) =>
-  request<AuthResponse>('POST', '/auth/change-password', { current_password: currentPassword, new_password: newPassword });
 export const getUser = () => request<APIUser>('GET', '/user');
 export const listNotifications = (unread?: boolean, page?: number, perPage?: number) => {
   const query = new URLSearchParams();
@@ -471,6 +481,10 @@ export const listNotifications = (unread?: boolean, page?: number, perPage?: num
 export const getUnreadNotificationsCount = () => request<{ count: number }>('GET', '/notifications/unread-count');
 export const markNotificationRead = (id: number) => request<void>('POST', `/notifications/${id}/read`);
 export const markAllNotificationsRead = () => request<void>('POST', '/notifications/read-all');
+
+// Explore
+export const listExploreRepos = (page = 1, perPage = 10, sort = 'updated') =>
+  request<Repository[]>('GET', `/explore/repos?page=${page}&per_page=${perPage}&sort=${sort}`);
 
 // Repos
 export const createRepo = (name: string, description: string, isPrivate: boolean) =>
@@ -493,6 +507,7 @@ export const deleteRepoRunnerToken = (owner: string, repo: string, id: number) =
 export const getRepo = (owner: string, repo: string) =>
   request<Repository>('GET', `/repos/${owner}/${repo}`);
 export const listUserRepos = () => request<Repository[]>('GET', '/user/repos');
+export const getRepoCreationPolicy = () => request<RepoCreationPolicy>('GET', '/user/repo-policy');
 export const listUserStarredRepos = () => request<Repository[]>('GET', '/user/starred');
 export const getRepoStars = (owner: string, repo: string) =>
   request<RepoStars>('GET', `/repos/${owner}/${repo}/stars`);
