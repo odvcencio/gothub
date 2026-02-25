@@ -66,7 +66,7 @@ Task 47 (GotHub UI: structural blame panel)
 
 ## Execution Tracker (Live)
 
-Updated: 2026-02-25 18:00 PST
+Updated: 2026-02-25 18:14 PST
 
 ### Completed
 
@@ -100,10 +100,13 @@ Updated: 2026-02-25 18:00 PST
 | 7 | next | implement pack reader delta resolution (`OFS_DELTA` / `REF_DELTA`) |
 | 9 | partial | `got gc` now prunes packed loose objects after successful pack+idx write; reachable-set/delta tuning still open |
 | 14 | partial | unchanged-tree fast-path landed (`entity_versions` copied from parent commit instead of full extraction) |
+| 25 | partial | `FindMergeBase` now computes per-call generation numbers and ancestor fast-paths with traversal limits in `browse.go` |
+| 26 | partial | generation-pruned merge-base traversal landed with highest-generation common-ancestor selection |
+| 27 | partial | bounded in-memory merge-base pair cache added; DB-backed persistent cache still pending |
 
 ### Remaining (Not Yet Implemented)
 
-- Open core gaps: 7, 8, 9, 10 (pack/gc hardening), 14 (full incremental extraction still pending), 24, 25, 26, 27 (merge-base perf/cache), 34 (GotHub benchmark breadth).
+- Open core gaps: 7, 8, 9, 10 (pack/gc hardening), 14 (full incremental extraction still pending), 24 (explicit commit generation persistence), 27 (persistent merge-base cache store/invalidation), 34 (GotHub benchmark breadth).
 - Tasks 35-39 are queued post-Phase-1 cloud multi-tenancy work.
 
 ---

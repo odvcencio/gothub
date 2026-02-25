@@ -6,6 +6,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/odvcencio/got/pkg/object"
 	"github.com/odvcencio/gothub/internal/gotstore"
@@ -349,48 +350,342 @@ func commitToInfo(hash string, c *object.CommitObj) *CommitInfo {
 
 // FindMergeBase finds the first common ancestor of two commits using BFS.
 func FindMergeBase(store *object.Store, a, b object.Hash) (object.Hash, error) {
-	visitedA := map[object.Hash]bool{a: true}
-	visitedB := map[object.Hash]bool{b: true}
-	queueA := []object.Hash{a}
-	queueB := []object.Hash{b}
+	if a == "" || b == "" {
+		return "", fmt.Errorf("no common ancestor")
+	}
+	if a == b {
+		return a, nil
+	}
+	if cached, ok := getCachedMergeBase(a, b); ok {
+		return cached, nil
+	}
 
-	for len(queueA) > 0 || len(queueB) > 0 {
-		if len(queueA) > 0 {
-			cur := queueA[0]
-			queueA = queueA[1:]
-			if visitedB[cur] {
-				return cur, nil
-			}
-			commit, err := store.ReadCommit(cur)
-			if err != nil {
-				continue
-			}
-			for _, p := range commit.Parents {
-				if !visitedA[p] {
-					visitedA[p] = true
-					queueA = append(queueA, p)
-				}
-			}
+	state := &mergeBaseSearchState{
+		store:       store,
+		commits:     make(map[object.Hash]*object.CommitObj),
+		generations: make(map[object.Hash]uint64),
+		visiting:    make(map[object.Hash]bool),
+	}
+
+	genA, err := state.generation(a)
+	if err != nil {
+		return "", err
+	}
+	genB, err := state.generation(b)
+	if err != nil {
+		return "", err
+	}
+
+	// Fast-path: one side already contains the other.
+	if genA <= genB {
+		isAncestor, err := state.isAncestor(a, b, genA, genB)
+		if err != nil {
+			return "", err
 		}
-		if len(queueB) > 0 {
-			cur := queueB[0]
-			queueB = queueB[1:]
-			if visitedA[cur] {
-				return cur, nil
-			}
-			commit, err := store.ReadCommit(cur)
-			if err != nil {
-				continue
-			}
-			for _, p := range commit.Parents {
-				if !visitedB[p] {
-					visitedB[p] = true
-					queueB = append(queueB, p)
-				}
-			}
+		if isAncestor {
+			setCachedMergeBase(a, b, a)
+			return a, nil
+		}
+		isAncestor, err = state.isAncestor(b, a, genB, genA)
+		if err != nil {
+			return "", err
+		}
+		if isAncestor {
+			setCachedMergeBase(a, b, b)
+			return b, nil
+		}
+	} else {
+		isAncestor, err := state.isAncestor(b, a, genB, genA)
+		if err != nil {
+			return "", err
+		}
+		if isAncestor {
+			setCachedMergeBase(a, b, b)
+			return b, nil
+		}
+		isAncestor, err = state.isAncestor(a, b, genA, genB)
+		if err != nil {
+			return "", err
+		}
+		if isAncestor {
+			setCachedMergeBase(a, b, a)
+			return a, nil
 		}
 	}
+
+	// Build ancestor set from the older head first, then walk the newer head
+	// and keep the highest-generation common ancestor.
+	if genA <= genB {
+		ancestors, err := state.collectAncestors(a)
+		if err != nil {
+			return "", err
+		}
+		base, found, err := state.findBestCommon(b, ancestors)
+		if err != nil {
+			return "", err
+		}
+		if found {
+			setCachedMergeBase(a, b, base)
+			return base, nil
+		}
+	} else {
+		ancestors, err := state.collectAncestors(b)
+		if err != nil {
+			return "", err
+		}
+		base, found, err := state.findBestCommon(a, ancestors)
+		if err != nil {
+			return "", err
+		}
+		if found {
+			setCachedMergeBase(a, b, base)
+			return base, nil
+		}
+	}
+
 	return "", fmt.Errorf("no common ancestor")
+}
+
+const (
+	maxMergeBaseTraversalSteps = 1_000_000
+	maxMergeBaseTraversalDepth = 1_000_000
+	mergeBaseCacheMaxEntries   = 4096
+)
+
+type mergeBaseQueueItem struct {
+	hash  object.Hash
+	depth int
+}
+
+type mergeBaseSearchState struct {
+	store       *object.Store
+	commits     map[object.Hash]*object.CommitObj
+	generations map[object.Hash]uint64
+	visiting    map[object.Hash]bool
+}
+
+func (s *mergeBaseSearchState) readCommit(h object.Hash) (*object.CommitObj, error) {
+	if c, ok := s.commits[h]; ok {
+		return c, nil
+	}
+	c, err := s.store.ReadCommit(h)
+	if err != nil {
+		return nil, fmt.Errorf("read commit %s: %w", h, err)
+	}
+	s.commits[h] = c
+	return c, nil
+}
+
+func (s *mergeBaseSearchState) generation(h object.Hash) (uint64, error) {
+	if g, ok := s.generations[h]; ok {
+		return g, nil
+	}
+	if s.visiting[h] {
+		return 0, fmt.Errorf("commit graph cycle detected at %s", h)
+	}
+	s.visiting[h] = true
+	defer delete(s.visiting, h)
+
+	commit, err := s.readCommit(h)
+	if err != nil {
+		return 0, err
+	}
+	maxParent := uint64(0)
+	for _, p := range commit.Parents {
+		if p == "" {
+			continue
+		}
+		parentGen, err := s.generation(p)
+		if err != nil {
+			return 0, err
+		}
+		if parentGen > maxParent {
+			maxParent = parentGen
+		}
+	}
+	gen := maxParent + 1
+	s.generations[h] = gen
+	return gen, nil
+}
+
+func (s *mergeBaseSearchState) isAncestor(ancestor, descendant object.Hash, ancestorGen, descendantGen uint64) (bool, error) {
+	if ancestor == descendant {
+		return true, nil
+	}
+	if ancestorGen > descendantGen {
+		return false, nil
+	}
+	visited := map[object.Hash]struct{}{descendant: {}}
+	queue := []mergeBaseQueueItem{{hash: descendant, depth: 0}}
+	steps := 0
+
+	for len(queue) > 0 {
+		item := queue[0]
+		queue = queue[1:]
+		steps++
+		if steps > maxMergeBaseTraversalSteps {
+			return false, fmt.Errorf("find merge base: traversal exceeded maximum steps (%d)", maxMergeBaseTraversalSteps)
+		}
+		if item.depth > maxMergeBaseTraversalDepth {
+			return false, fmt.Errorf("find merge base: traversal exceeded maximum depth (%d)", maxMergeBaseTraversalDepth)
+		}
+
+		cur := item.hash
+		if cur == ancestor {
+			return true, nil
+		}
+
+		curGen, err := s.generation(cur)
+		if err != nil {
+			return false, err
+		}
+		if curGen <= ancestorGen {
+			continue
+		}
+
+		commit, err := s.readCommit(cur)
+		if err != nil {
+			return false, err
+		}
+		for _, p := range commit.Parents {
+			if p == "" {
+				continue
+			}
+			if _, seen := visited[p]; seen {
+				continue
+			}
+			parentGen, err := s.generation(p)
+			if err != nil {
+				return false, err
+			}
+			if parentGen < ancestorGen {
+				continue
+			}
+			visited[p] = struct{}{}
+			queue = append(queue, mergeBaseQueueItem{hash: p, depth: item.depth + 1})
+		}
+	}
+
+	return false, nil
+}
+
+func (s *mergeBaseSearchState) collectAncestors(start object.Hash) (map[object.Hash]struct{}, error) {
+	visited := map[object.Hash]struct{}{start: {}}
+	queue := []mergeBaseQueueItem{{hash: start, depth: 0}}
+	steps := 0
+
+	for len(queue) > 0 {
+		item := queue[0]
+		queue = queue[1:]
+		steps++
+		if steps > maxMergeBaseTraversalSteps {
+			return nil, fmt.Errorf("find merge base: traversal exceeded maximum steps (%d)", maxMergeBaseTraversalSteps)
+		}
+		if item.depth > maxMergeBaseTraversalDepth {
+			return nil, fmt.Errorf("find merge base: traversal exceeded maximum depth (%d)", maxMergeBaseTraversalDepth)
+		}
+
+		commit, err := s.readCommit(item.hash)
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range commit.Parents {
+			if p == "" {
+				continue
+			}
+			if _, seen := visited[p]; seen {
+				continue
+			}
+			visited[p] = struct{}{}
+			queue = append(queue, mergeBaseQueueItem{hash: p, depth: item.depth + 1})
+		}
+	}
+
+	return visited, nil
+}
+
+func (s *mergeBaseSearchState) findBestCommon(start object.Hash, ancestors map[object.Hash]struct{}) (object.Hash, bool, error) {
+	visited := map[object.Hash]struct{}{start: {}}
+	queue := []mergeBaseQueueItem{{hash: start, depth: 0}}
+	steps := 0
+
+	var best object.Hash
+	bestGen := uint64(0)
+
+	for len(queue) > 0 {
+		item := queue[0]
+		queue = queue[1:]
+		steps++
+		if steps > maxMergeBaseTraversalSteps {
+			return "", false, fmt.Errorf("find merge base: traversal exceeded maximum steps (%d)", maxMergeBaseTraversalSteps)
+		}
+		if item.depth > maxMergeBaseTraversalDepth {
+			return "", false, fmt.Errorf("find merge base: traversal exceeded maximum depth (%d)", maxMergeBaseTraversalDepth)
+		}
+
+		cur := item.hash
+		curGen, err := s.generation(cur)
+		if err != nil {
+			return "", false, err
+		}
+		if _, ok := ancestors[cur]; ok && (best == "" || curGen > bestGen) {
+			best = cur
+			bestGen = curGen
+		}
+		if best != "" && curGen <= bestGen {
+			continue
+		}
+
+		commit, err := s.readCommit(cur)
+		if err != nil {
+			return "", false, err
+		}
+		for _, p := range commit.Parents {
+			if p == "" {
+				continue
+			}
+			if _, seen := visited[p]; seen {
+				continue
+			}
+			visited[p] = struct{}{}
+			queue = append(queue, mergeBaseQueueItem{hash: p, depth: item.depth + 1})
+		}
+	}
+
+	if best == "" {
+		return "", false, nil
+	}
+	return best, true, nil
+}
+
+var (
+	mergeBaseCacheMu sync.RWMutex
+	mergeBaseCache   = make(map[string]object.Hash)
+)
+
+func mergeBaseCacheKey(a, b object.Hash) string {
+	if a < b {
+		return string(a) + "|" + string(b)
+	}
+	return string(b) + "|" + string(a)
+}
+
+func getCachedMergeBase(a, b object.Hash) (object.Hash, bool) {
+	key := mergeBaseCacheKey(a, b)
+	mergeBaseCacheMu.RLock()
+	base, ok := mergeBaseCache[key]
+	mergeBaseCacheMu.RUnlock()
+	return base, ok
+}
+
+func setCachedMergeBase(a, b, base object.Hash) {
+	key := mergeBaseCacheKey(a, b)
+	mergeBaseCacheMu.Lock()
+	if len(mergeBaseCache) >= mergeBaseCacheMaxEntries {
+		mergeBaseCache = make(map[string]object.Hash, mergeBaseCacheMaxEntries/2)
+	}
+	mergeBaseCache[key] = base
+	mergeBaseCacheMu.Unlock()
 }
 
 // unused import guard
