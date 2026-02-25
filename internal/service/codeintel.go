@@ -1,6 +1,7 @@
 package service
 
 import (
+	"container/heap"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -34,13 +35,83 @@ const (
 var ErrInvalidSymbolSelector = errors.New("invalid symbol selector")
 
 type codeIntelCacheEntry struct {
+	key        string
 	index      *model.Index
 	lastAccess time.Time
+	heapIndex  int
+}
+
+type codeIntelIndexAccessHeap []*codeIntelCacheEntry
+
+func (h codeIntelIndexAccessHeap) Len() int { return len(h) }
+
+func (h codeIntelIndexAccessHeap) Less(i, j int) bool {
+	if h[i].lastAccess.Equal(h[j].lastAccess) {
+		return h[i].key < h[j].key
+	}
+	return h[i].lastAccess.Before(h[j].lastAccess)
+}
+
+func (h codeIntelIndexAccessHeap) Swap(i, j int) {
+	h[i], h[j] = h[j], h[i]
+	h[i].heapIndex = i
+	h[j].heapIndex = j
+}
+
+func (h *codeIntelIndexAccessHeap) Push(x any) {
+	entry := x.(*codeIntelCacheEntry)
+	entry.heapIndex = len(*h)
+	*h = append(*h, entry)
+}
+
+func (h *codeIntelIndexAccessHeap) Pop() any {
+	old := *h
+	n := len(old)
+	entry := old[n-1]
+	old[n-1] = nil
+	entry.heapIndex = -1
+	*h = old[:n-1]
+	return entry
 }
 
 type codeIntelBloomCacheEntry struct {
+	key        string
 	filter     *symbolSearchBloomFilter
 	lastAccess time.Time
+	heapIndex  int
+}
+
+type codeIntelBloomAccessHeap []*codeIntelBloomCacheEntry
+
+func (h codeIntelBloomAccessHeap) Len() int { return len(h) }
+
+func (h codeIntelBloomAccessHeap) Less(i, j int) bool {
+	if h[i].lastAccess.Equal(h[j].lastAccess) {
+		return h[i].key < h[j].key
+	}
+	return h[i].lastAccess.Before(h[j].lastAccess)
+}
+
+func (h codeIntelBloomAccessHeap) Swap(i, j int) {
+	h[i], h[j] = h[j], h[i]
+	h[i].heapIndex = i
+	h[j].heapIndex = j
+}
+
+func (h *codeIntelBloomAccessHeap) Push(x any) {
+	entry := x.(*codeIntelBloomCacheEntry)
+	entry.heapIndex = len(*h)
+	*h = append(*h, entry)
+}
+
+func (h *codeIntelBloomAccessHeap) Pop() any {
+	old := *h
+	n := len(old)
+	entry := old[n-1]
+	old[n-1] = nil
+	entry.heapIndex = -1
+	*h = old[:n-1]
+	return entry
 }
 
 // CodeIntelService provides code intelligence powered by gts-suite.
@@ -50,8 +121,10 @@ type CodeIntelService struct {
 	browseSvc *BrowseService
 
 	mu           sync.RWMutex
-	indexes      map[string]codeIntelCacheEntry      // cache: "owner/repo@commitHash" -> index
-	symbolBlooms map[string]codeIntelBloomCacheEntry // cache: "repoID@commitHash" -> bloom filter
+	indexes      map[string]*codeIntelCacheEntry // cache: "owner/repo@commitHash" -> index
+	indexAccess  codeIntelIndexAccessHeap
+	symbolBlooms map[string]*codeIntelBloomCacheEntry // cache: "repoID@commitHash" -> bloom filter
+	bloomAccess  codeIntelBloomAccessHeap
 
 	cacheMaxItems int
 	cacheTTL      time.Duration
@@ -62,8 +135,8 @@ func NewCodeIntelService(db database.DB, repoSvc *RepoService, browseSvc *Browse
 		db:            db,
 		repoSvc:       repoSvc,
 		browseSvc:     browseSvc,
-		indexes:       make(map[string]codeIntelCacheEntry),
-		symbolBlooms:  make(map[string]codeIntelBloomCacheEntry),
+		indexes:       make(map[string]*codeIntelCacheEntry),
+		symbolBlooms:  make(map[string]*codeIntelBloomCacheEntry),
 		cacheMaxItems: defaultCodeIntelCacheMaxItems,
 		cacheTTL:      defaultCodeIntelCacheTTL,
 	}
@@ -413,37 +486,113 @@ func (s *CodeIntelService) getCachedIndex(key string) (*model.Index, bool) {
 		return nil, false
 	}
 	if s.cacheTTL > 0 && now.Sub(entry.lastAccess) > s.cacheTTL {
-		delete(s.indexes, key)
+		s.removeIndexEntryLocked(entry)
 		return nil, false
 	}
 	entry.lastAccess = now
-	s.indexes[key] = entry
+	if !s.fixIndexEntryAccessLocked(entry) {
+		s.rebuildIndexAccessHeapLocked()
+		_ = s.fixIndexEntryAccessLocked(entry)
+	}
 	return entry.index, true
 }
 
 func (s *CodeIntelService) setCachedIndex(key string, idx *model.Index) {
+	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.indexes[key] = codeIntelCacheEntry{
-		index:      idx,
-		lastAccess: time.Now(),
+	if s.indexes == nil {
+		s.indexes = make(map[string]*codeIntelCacheEntry)
+	}
+	if entry, ok := s.indexes[key]; ok {
+		entry.index = idx
+		entry.lastAccess = now
+		if !s.fixIndexEntryAccessLocked(entry) {
+			s.rebuildIndexAccessHeapLocked()
+			_ = s.fixIndexEntryAccessLocked(entry)
+		}
+	} else {
+		entry := &codeIntelCacheEntry{
+			key:        key,
+			index:      idx,
+			lastAccess: now,
+			heapIndex:  -1,
+		}
+		s.indexes[key] = entry
+		heap.Push(&s.indexAccess, entry)
 	}
 	if s.cacheMaxItems <= 0 {
 		return
 	}
 	for len(s.indexes) > s.cacheMaxItems {
-		oldestKey := ""
-		var oldest time.Time
-		for k, entry := range s.indexes {
-			if oldestKey == "" || entry.lastAccess.Before(oldest) {
-				oldestKey = k
-				oldest = entry.lastAccess
-			}
+		s.evictOldestIndexEntryLocked()
+	}
+}
+
+func (s *CodeIntelService) fixIndexEntryAccessLocked(entry *codeIntelCacheEntry) bool {
+	if entry == nil {
+		return false
+	}
+	idx := entry.heapIndex
+	if idx < 0 || idx >= len(s.indexAccess) || s.indexAccess[idx] != entry {
+		return false
+	}
+	heap.Fix(&s.indexAccess, idx)
+	return true
+}
+
+func (s *CodeIntelService) removeIndexEntryLocked(entry *codeIntelCacheEntry) {
+	if entry == nil {
+		return
+	}
+
+	if current, ok := s.indexes[entry.key]; ok && current == entry {
+		delete(s.indexes, entry.key)
+	}
+
+	idx := entry.heapIndex
+	if idx >= 0 && idx < len(s.indexAccess) && s.indexAccess[idx] == entry {
+		heap.Remove(&s.indexAccess, idx)
+		return
+	}
+	for i := range s.indexAccess {
+		if s.indexAccess[i] == entry {
+			heap.Remove(&s.indexAccess, i)
+			return
 		}
-		if oldestKey == "" {
-			break
+	}
+	entry.heapIndex = -1
+}
+
+func (s *CodeIntelService) rebuildIndexAccessHeapLocked() {
+	rebuilt := make(codeIntelIndexAccessHeap, 0, len(s.indexes))
+	for key, entry := range s.indexes {
+		if entry == nil {
+			delete(s.indexes, key)
+			continue
 		}
-		delete(s.indexes, oldestKey)
+		entry.key = key
+		entry.heapIndex = len(rebuilt)
+		rebuilt = append(rebuilt, entry)
+	}
+	heap.Init(&rebuilt)
+	s.indexAccess = rebuilt
+}
+
+func (s *CodeIntelService) evictOldestIndexEntryLocked() {
+	for len(s.indexAccess) > 0 {
+		entry := heap.Pop(&s.indexAccess).(*codeIntelCacheEntry)
+		current, ok := s.indexes[entry.key]
+		if !ok || current != entry {
+			continue
+		}
+		delete(s.indexes, entry.key)
+		return
+	}
+
+	for _, entry := range s.indexes {
+		s.removeIndexEntryLocked(entry)
+		return
 	}
 }
 
@@ -464,11 +613,14 @@ func (s *CodeIntelService) getCachedSymbolBloom(key string) (*symbolSearchBloomF
 		return nil, false
 	}
 	if s.cacheTTL > 0 && now.Sub(entry.lastAccess) > s.cacheTTL {
-		delete(s.symbolBlooms, key)
+		s.removeSymbolBloomEntryLocked(entry)
 		return nil, false
 	}
 	entry.lastAccess = now
-	s.symbolBlooms[key] = entry
+	if !s.fixBloomEntryAccessLocked(entry) {
+		s.rebuildBloomAccessHeapLocked()
+		_ = s.fixBloomEntryAccessLocked(entry)
+	}
 	return entry.filter, true
 }
 
@@ -480,31 +632,101 @@ func (s *CodeIntelService) setCommitSymbolBloom(repoID int64, commitHash string,
 }
 
 func (s *CodeIntelService) setCachedSymbolBloom(key string, bloom *symbolSearchBloomFilter) {
+	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.symbolBlooms == nil {
-		s.symbolBlooms = make(map[string]codeIntelBloomCacheEntry)
+		s.symbolBlooms = make(map[string]*codeIntelBloomCacheEntry)
 	}
-	s.symbolBlooms[key] = codeIntelBloomCacheEntry{
-		filter:     bloom,
-		lastAccess: time.Now(),
+	if entry, ok := s.symbolBlooms[key]; ok {
+		entry.filter = bloom
+		entry.lastAccess = now
+		if !s.fixBloomEntryAccessLocked(entry) {
+			s.rebuildBloomAccessHeapLocked()
+			_ = s.fixBloomEntryAccessLocked(entry)
+		}
+	} else {
+		entry := &codeIntelBloomCacheEntry{
+			key:        key,
+			filter:     bloom,
+			lastAccess: now,
+			heapIndex:  -1,
+		}
+		s.symbolBlooms[key] = entry
+		heap.Push(&s.bloomAccess, entry)
 	}
 	if s.cacheMaxItems <= 0 {
 		return
 	}
 	for len(s.symbolBlooms) > s.cacheMaxItems {
-		oldestKey := ""
-		var oldest time.Time
-		for k, entry := range s.symbolBlooms {
-			if oldestKey == "" || entry.lastAccess.Before(oldest) {
-				oldestKey = k
-				oldest = entry.lastAccess
-			}
+		s.evictOldestSymbolBloomEntryLocked()
+	}
+}
+
+func (s *CodeIntelService) fixBloomEntryAccessLocked(entry *codeIntelBloomCacheEntry) bool {
+	if entry == nil {
+		return false
+	}
+	idx := entry.heapIndex
+	if idx < 0 || idx >= len(s.bloomAccess) || s.bloomAccess[idx] != entry {
+		return false
+	}
+	heap.Fix(&s.bloomAccess, idx)
+	return true
+}
+
+func (s *CodeIntelService) removeSymbolBloomEntryLocked(entry *codeIntelBloomCacheEntry) {
+	if entry == nil {
+		return
+	}
+
+	if current, ok := s.symbolBlooms[entry.key]; ok && current == entry {
+		delete(s.symbolBlooms, entry.key)
+	}
+
+	idx := entry.heapIndex
+	if idx >= 0 && idx < len(s.bloomAccess) && s.bloomAccess[idx] == entry {
+		heap.Remove(&s.bloomAccess, idx)
+		return
+	}
+	for i := range s.bloomAccess {
+		if s.bloomAccess[i] == entry {
+			heap.Remove(&s.bloomAccess, i)
+			return
 		}
-		if oldestKey == "" {
-			break
+	}
+	entry.heapIndex = -1
+}
+
+func (s *CodeIntelService) rebuildBloomAccessHeapLocked() {
+	rebuilt := make(codeIntelBloomAccessHeap, 0, len(s.symbolBlooms))
+	for key, entry := range s.symbolBlooms {
+		if entry == nil {
+			delete(s.symbolBlooms, key)
+			continue
 		}
-		delete(s.symbolBlooms, oldestKey)
+		entry.key = key
+		entry.heapIndex = len(rebuilt)
+		rebuilt = append(rebuilt, entry)
+	}
+	heap.Init(&rebuilt)
+	s.bloomAccess = rebuilt
+}
+
+func (s *CodeIntelService) evictOldestSymbolBloomEntryLocked() {
+	for len(s.bloomAccess) > 0 {
+		entry := heap.Pop(&s.bloomAccess).(*codeIntelBloomCacheEntry)
+		current, ok := s.symbolBlooms[entry.key]
+		if !ok || current != entry {
+			continue
+		}
+		delete(s.symbolBlooms, entry.key)
+		return
+	}
+
+	for _, entry := range s.symbolBlooms {
+		s.removeSymbolBloomEntryLocked(entry)
+		return
 	}
 }
 

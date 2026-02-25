@@ -24,9 +24,83 @@ var (
 	benchmarkMergeBaseSink     object.Hash
 )
 
+type benchmarkLinearCodeIntelCacheEntry struct {
+	index      *model.Index
+	lastAccess time.Time
+}
+
+type benchmarkLinearCodeIntelCache struct {
+	items    map[string]benchmarkLinearCodeIntelCacheEntry
+	maxItems int
+}
+
+func (c *benchmarkLinearCodeIntelCache) set(key string, idx *model.Index) {
+	if c.items == nil {
+		c.items = make(map[string]benchmarkLinearCodeIntelCacheEntry)
+	}
+	c.items[key] = benchmarkLinearCodeIntelCacheEntry{
+		index:      idx,
+		lastAccess: time.Now(),
+	}
+	if c.maxItems <= 0 {
+		return
+	}
+	for len(c.items) > c.maxItems {
+		oldestKey := ""
+		var oldest time.Time
+		for candidateKey, entry := range c.items {
+			if oldestKey == "" || entry.lastAccess.Before(oldest) {
+				oldestKey = candidateKey
+				oldest = entry.lastAccess
+			}
+		}
+		if oldestKey == "" {
+			break
+		}
+		delete(c.items, oldestKey)
+	}
+}
+
+type benchmarkLinearCodeIntelBloomCacheEntry struct {
+	filter     *symbolSearchBloomFilter
+	lastAccess time.Time
+}
+
+type benchmarkLinearCodeIntelBloomCache struct {
+	items    map[string]benchmarkLinearCodeIntelBloomCacheEntry
+	maxItems int
+}
+
+func (c *benchmarkLinearCodeIntelBloomCache) set(key string, filter *symbolSearchBloomFilter) {
+	if c.items == nil {
+		c.items = make(map[string]benchmarkLinearCodeIntelBloomCacheEntry)
+	}
+	c.items[key] = benchmarkLinearCodeIntelBloomCacheEntry{
+		filter:     filter,
+		lastAccess: time.Now(),
+	}
+	if c.maxItems <= 0 {
+		return
+	}
+	for len(c.items) > c.maxItems {
+		oldestKey := ""
+		var oldest time.Time
+		for candidateKey, entry := range c.items {
+			if oldestKey == "" || entry.lastAccess.Before(oldest) {
+				oldestKey = candidateKey
+				oldest = entry.lastAccess
+			}
+		}
+		if oldestKey == "" {
+			break
+		}
+		delete(c.items, oldestKey)
+	}
+}
+
 func BenchmarkCodeIntelCacheSetAndGet(b *testing.B) {
 	svc := &CodeIntelService{
-		indexes:       make(map[string]codeIntelCacheEntry),
+		indexes:       make(map[string]*codeIntelCacheEntry),
 		cacheMaxItems: 4096,
 		cacheTTL:      time.Hour,
 	}
@@ -43,7 +117,7 @@ func BenchmarkCodeIntelCacheSetAndGet(b *testing.B) {
 
 func BenchmarkCodeIntelCacheHitLookup(b *testing.B) {
 	svc := &CodeIntelService{
-		indexes:       make(map[string]codeIntelCacheEntry),
+		indexes:       make(map[string]*codeIntelCacheEntry),
 		cacheMaxItems: 8192,
 		cacheTTL:      time.Hour,
 	}
@@ -56,6 +130,64 @@ func BenchmarkCodeIntelCacheHitLookup(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_, _ = svc.getCachedIndex("acme/repo@" + strconv.Itoa(i%4096))
+	}
+}
+
+func BenchmarkCodeIntelCacheSetWithEvictionLinearScan(b *testing.B) {
+	cache := &benchmarkLinearCodeIntelCache{
+		items:    make(map[string]benchmarkLinearCodeIntelCacheEntry),
+		maxItems: 128,
+	}
+	idx := &model.Index{}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		cache.set("acme/repo@"+strconv.Itoa(i), idx)
+	}
+}
+
+func BenchmarkCodeIntelCacheSetWithEvictionHeap(b *testing.B) {
+	svc := &CodeIntelService{
+		indexes:       make(map[string]*codeIntelCacheEntry),
+		cacheMaxItems: 128,
+		cacheTTL:      time.Hour,
+	}
+	idx := &model.Index{}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		svc.setCachedIndex("acme/repo@"+strconv.Itoa(i), idx)
+	}
+}
+
+func BenchmarkCodeIntelSymbolBloomCacheSetWithEvictionHeap(b *testing.B) {
+	svc := &CodeIntelService{
+		symbolBlooms:  make(map[string]*codeIntelBloomCacheEntry),
+		cacheMaxItems: 128,
+		cacheTTL:      time.Hour,
+	}
+	filter := buildSymbolSearchBloomFromEntries(nil)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		svc.setCachedSymbolBloom("42@"+strconv.Itoa(i), filter)
+	}
+}
+
+func BenchmarkCodeIntelSymbolBloomCacheSetWithEvictionLinearScan(b *testing.B) {
+	cache := &benchmarkLinearCodeIntelBloomCache{
+		items:    make(map[string]benchmarkLinearCodeIntelBloomCacheEntry),
+		maxItems: 128,
+	}
+	filter := buildSymbolSearchBloomFromEntries(nil)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		cache.set("42@"+strconv.Itoa(i), filter)
 	}
 }
 
