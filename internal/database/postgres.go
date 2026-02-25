@@ -95,10 +95,14 @@ func (p *PostgresDB) migrateTenancySchema(ctx context.Context) error {
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT COALESCE(NULLIF(current_setting('app.tenant_id', true), ''), 'default')`,
 		`ALTER TABLE orgs ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT COALESCE(NULLIF(current_setting('app.tenant_id', true), ''), 'default')`,
 		`ALTER TABLE repositories ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT COALESCE(NULLIF(current_setting('app.tenant_id', true), ''), 'default')`,
+		`ALTER TABLE repo_webhooks ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT COALESCE(NULLIF(current_setting('app.tenant_id', true), ''), 'default')`,
+		`ALTER TABLE webhook_deliveries ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT COALESCE(NULLIF(current_setting('app.tenant_id', true), ''), 'default')`,
 		`CREATE INDEX IF NOT EXISTS idx_users_tenant_username ON users(tenant_id, username)`,
 		`CREATE INDEX IF NOT EXISTS idx_users_tenant_email ON users(tenant_id, email)`,
 		`CREATE INDEX IF NOT EXISTS idx_orgs_tenant_name ON orgs(tenant_id, name)`,
 		`CREATE INDEX IF NOT EXISTS idx_repositories_tenant_owner_name ON repositories(tenant_id, owner_user_id, owner_org_id, name)`,
+		`CREATE INDEX IF NOT EXISTS idx_repo_webhooks_tenant_repo ON repo_webhooks(tenant_id, repo_id, id DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_tenant_repo_webhook_time ON webhook_deliveries(tenant_id, repo_id, webhook_id, created_at DESC)`,
 	}
 	for _, stmt := range statements {
 		if _, err := p.db.ExecContext(ctx, stmt); err != nil {
@@ -595,6 +599,38 @@ BEGIN
 			AND policyname = 'repositories_tenant_rls'
 	) THEN
 		CREATE POLICY repositories_tenant_rls ON repositories
+		USING (gothub_tenant_rls_match(tenant_id))
+		WITH CHECK (gothub_tenant_rls_match(tenant_id));
+	END IF;
+END $$;
+
+ALTER TABLE repo_webhooks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE repo_webhooks FORCE ROW LEVEL SECURITY;
+DO $$
+BEGIN
+	IF NOT EXISTS (
+		SELECT 1 FROM pg_policies
+		WHERE schemaname = current_schema()
+			AND tablename = 'repo_webhooks'
+			AND policyname = 'repo_webhooks_tenant_rls'
+	) THEN
+		CREATE POLICY repo_webhooks_tenant_rls ON repo_webhooks
+		USING (gothub_tenant_rls_match(tenant_id))
+		WITH CHECK (gothub_tenant_rls_match(tenant_id));
+	END IF;
+END $$;
+
+ALTER TABLE webhook_deliveries ENABLE ROW LEVEL SECURITY;
+ALTER TABLE webhook_deliveries FORCE ROW LEVEL SECURITY;
+DO $$
+BEGIN
+	IF NOT EXISTS (
+		SELECT 1 FROM pg_policies
+		WHERE schemaname = current_schema()
+			AND tablename = 'webhook_deliveries'
+			AND policyname = 'webhook_deliveries_tenant_rls'
+	) THEN
+		CREATE POLICY webhook_deliveries_tenant_rls ON webhook_deliveries
 		USING (gothub_tenant_rls_match(tenant_id))
 		WITH CHECK (gothub_tenant_rls_match(tenant_id));
 	END IF;
@@ -1822,20 +1858,24 @@ func (p *PostgresDB) ListPRCheckRunsPage(ctx context.Context, prID int64, limit,
 // --- Webhooks ---
 
 func (p *PostgresDB) CreateWebhook(ctx context.Context, hook *models.Webhook) error {
+	tenantID := tenantIDForContext(ctx)
 	return p.db.QueryRowContext(ctx,
-		`INSERT INTO repo_webhooks (repo_id, url, secret, events_csv, active)
-		 VALUES ($1, $2, $3, $4, $5)
+		`INSERT INTO repo_webhooks (repo_id, url, secret, events_csv, active, tenant_id)
+		 SELECT r.id, $2, $3, $4, $5, $6
+		 FROM repositories r
+		 WHERE r.id = $1 AND r.tenant_id = $6
 		 RETURNING id, created_at, updated_at`,
-		hook.RepoID, hook.URL, hook.Secret, hook.EventsCSV, hook.Active).
+		hook.RepoID, hook.URL, hook.Secret, hook.EventsCSV, hook.Active, tenantID).
 		Scan(&hook.ID, &hook.CreatedAt, &hook.UpdatedAt)
 }
 
 func (p *PostgresDB) GetWebhook(ctx context.Context, repoID, webhookID int64) (*models.Webhook, error) {
+	tenantID := tenantIDForContext(ctx)
 	hook := &models.Webhook{}
 	err := p.db.QueryRowContext(ctx,
 		`SELECT id, repo_id, url, secret, events_csv, active, created_at, updated_at
 		 FROM repo_webhooks
-		 WHERE repo_id = $1 AND id = $2`, repoID, webhookID).
+		 WHERE repo_id = $1 AND id = $2 AND tenant_id = $3`, repoID, webhookID, tenantID).
 		Scan(&hook.ID, &hook.RepoID, &hook.URL, &hook.Secret, &hook.EventsCSV, &hook.Active, &hook.CreatedAt, &hook.UpdatedAt)
 	if err != nil {
 		return nil, err
@@ -1848,6 +1888,7 @@ func (p *PostgresDB) ListWebhooks(ctx context.Context, repoID int64) ([]models.W
 }
 
 func (p *PostgresDB) ListWebhooksPage(ctx context.Context, repoID int64, limit, offset int) ([]models.Webhook, error) {
+	tenantID := tenantIDForContext(ctx)
 	if limit <= 0 {
 		limit = 100
 	}
@@ -1857,9 +1898,9 @@ func (p *PostgresDB) ListWebhooksPage(ctx context.Context, repoID int64, limit, 
 	rows, err := p.db.QueryContext(ctx,
 		`SELECT id, repo_id, url, secret, events_csv, active, created_at, updated_at
 		 FROM repo_webhooks
-		 WHERE repo_id = $1
+		 WHERE repo_id = $1 AND tenant_id = $2
 		 ORDER BY id DESC
-		 LIMIT $2 OFFSET $3`, repoID, limit, offset)
+		 LIMIT $3 OFFSET $4`, repoID, tenantID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -1876,29 +1917,40 @@ func (p *PostgresDB) ListWebhooksPage(ctx context.Context, repoID int64, limit, 
 }
 
 func (p *PostgresDB) DeleteWebhook(ctx context.Context, repoID, webhookID int64) error {
+	tenantID := tenantIDForContext(ctx)
 	_, err := p.db.ExecContext(ctx,
-		`DELETE FROM repo_webhooks WHERE repo_id = $1 AND id = $2`, repoID, webhookID)
+		`DELETE FROM repo_webhooks WHERE repo_id = $1 AND id = $2 AND tenant_id = $3`, repoID, webhookID, tenantID)
 	return err
 }
 
 func (p *PostgresDB) CreateWebhookDelivery(ctx context.Context, delivery *models.WebhookDelivery) error {
+	tenantID := tenantIDForContext(ctx)
 	return p.db.QueryRowContext(ctx,
 		`INSERT INTO webhook_deliveries (
-			 repo_id, webhook_id, event, delivery_uid, attempt, status_code, success, error, request_body, response_body, duration_ms, redelivery_of_id
-		 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+			 repo_id, webhook_id, event, delivery_uid, attempt, status_code, success, error, request_body, response_body, duration_ms, redelivery_of_id, tenant_id
+		 )
+		 SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
+		 WHERE EXISTS (
+			 SELECT 1
+			 FROM repo_webhooks h
+			 WHERE h.repo_id = $1
+				AND h.id = $2
+				AND h.tenant_id = $13
+		 )
 		 RETURNING id, created_at`,
 		delivery.RepoID, delivery.WebhookID, delivery.Event, delivery.DeliveryUID, delivery.Attempt, delivery.StatusCode,
-		delivery.Success, delivery.Error, delivery.RequestBody, delivery.ResponseBody, delivery.DurationMS, delivery.RedeliveryOfID).
+		delivery.Success, delivery.Error, delivery.RequestBody, delivery.ResponseBody, delivery.DurationMS, delivery.RedeliveryOfID, tenantID).
 		Scan(&delivery.ID, &delivery.CreatedAt)
 }
 
 func (p *PostgresDB) GetWebhookDelivery(ctx context.Context, repoID, webhookID, deliveryID int64) (*models.WebhookDelivery, error) {
+	tenantID := tenantIDForContext(ctx)
 	d := &models.WebhookDelivery{}
 	err := p.db.QueryRowContext(ctx,
 		`SELECT id, repo_id, webhook_id, event, delivery_uid, attempt, status_code, success, error, request_body, response_body, duration_ms, redelivery_of_id, created_at
 		 FROM webhook_deliveries
-		 WHERE repo_id = $1 AND webhook_id = $2 AND id = $3`,
-		repoID, webhookID, deliveryID).
+		 WHERE repo_id = $1 AND webhook_id = $2 AND id = $3 AND tenant_id = $4`,
+		repoID, webhookID, deliveryID, tenantID).
 		Scan(&d.ID, &d.RepoID, &d.WebhookID, &d.Event, &d.DeliveryUID, &d.Attempt, &d.StatusCode, &d.Success, &d.Error,
 			&d.RequestBody, &d.ResponseBody, &d.DurationMS, &d.RedeliveryOfID, &d.CreatedAt)
 	if err != nil {
@@ -1912,6 +1964,7 @@ func (p *PostgresDB) ListWebhookDeliveries(ctx context.Context, repoID, webhookI
 }
 
 func (p *PostgresDB) ListWebhookDeliveriesPage(ctx context.Context, repoID, webhookID int64, limit, offset int) ([]models.WebhookDelivery, error) {
+	tenantID := tenantIDForContext(ctx)
 	if limit <= 0 {
 		limit = 100
 	}
@@ -1921,9 +1974,9 @@ func (p *PostgresDB) ListWebhookDeliveriesPage(ctx context.Context, repoID, webh
 	rows, err := p.db.QueryContext(ctx,
 		`SELECT id, repo_id, webhook_id, event, delivery_uid, attempt, status_code, success, error, request_body, response_body, duration_ms, redelivery_of_id, created_at
 		 FROM webhook_deliveries
-		 WHERE repo_id = $1 AND webhook_id = $2
+		 WHERE repo_id = $1 AND webhook_id = $2 AND tenant_id = $3
 		 ORDER BY id DESC
-		 LIMIT $3 OFFSET $4`, repoID, webhookID, limit, offset)
+		 LIMIT $4 OFFSET $5`, repoID, webhookID, tenantID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
