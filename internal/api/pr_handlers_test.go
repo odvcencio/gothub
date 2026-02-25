@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"testing"
 
@@ -67,5 +68,24 @@ func TestResolveMergeActorNameFallsBackWhenLookupReturnsNilUser(t *testing.T) {
 	got := s.resolveMergeActorName(context.Background(), claims)
 	if got != "user-99" {
 		t.Fatalf("expected fallback merge actor name for nil lookup result, got %q", got)
+	}
+}
+
+func TestResolveMergeActorNameFallsBackWhenLookupReturnsNoRows(t *testing.T) {
+	s := &Server{
+		db: &mergeActorLookupDB{
+			getUserByID: func(ctx context.Context, id int64) (*models.User, error) {
+				return nil, sql.ErrNoRows
+			},
+		},
+	}
+	claims := &auth.Claims{
+		UserID:   123,
+		Username: "",
+	}
+
+	got := s.resolveMergeActorName(context.Background(), claims)
+	if got != "user-123" {
+		t.Fatalf("expected fallback merge actor name for missing user, got %q", got)
 	}
 }

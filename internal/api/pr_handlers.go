@@ -51,7 +51,7 @@ func (s *Server) handleCreatePR(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Best-effort webhook emission; does not block PR creation success.
-	s.runAsync(r.Context(), "webhook pr opened", []any{"repo_id", repo.ID, "pr", pr.Number}, func(ctx context.Context) error {
+	s.runWebhookAsync(r.Context(), "webhook pr opened", []any{"repo_id", repo.ID, "pr", pr.Number}, func(ctx context.Context) error {
 		return s.webhookSvc.EmitPullRequestEvent(ctx, repo.ID, "opened", pr)
 	})
 	s.publishRepoEvent(repo.ID, "pull_request.opened", map[string]any{
@@ -243,7 +243,7 @@ func (s *Server) handleMergePR(w http.ResponseWriter, r *http.Request) {
 	})
 
 	// Best-effort webhook emission after merge.
-	s.runAsync(r.Context(), "webhook pr merged", []any{"repo_id", repo.ID, "pr", pr.Number}, func(ctx context.Context) error {
+	s.runWebhookAsync(r.Context(), "webhook pr merged", []any{"repo_id", repo.ID, "pr", pr.Number}, func(ctx context.Context) error {
 		return s.webhookSvc.EmitPullRequestEvent(ctx, repo.ID, "merged", pr)
 	})
 }
@@ -320,20 +320,25 @@ func (s *Server) resolveMergeActorName(ctx context.Context, claims *auth.Claims)
 	if claims == nil {
 		return "user-unknown"
 	}
+	fallbackName := "user-" + strconv.FormatInt(claims.UserID, 10)
 	if mergerName := strings.TrimSpace(claims.Username); mergerName != "" {
 		return mergerName
 	}
 	if s.db != nil {
 		user, err := s.db.GetUserByID(ctx, claims.UserID)
 		if err != nil {
-			slog.Warn("merge actor lookup failed", "user_id", claims.UserID, "error", err)
+			if errors.Is(err, sql.ErrNoRows) {
+				slog.Warn("merge actor lookup returned no rows", "user_id", claims.UserID)
+			} else {
+				slog.Warn("merge actor lookup failed", "user_id", claims.UserID, "error", err)
+			}
 		} else if user == nil {
 			slog.Warn("merge actor lookup returned nil user", "user_id", claims.UserID)
 		} else if mergerName := strings.TrimSpace(user.Username); mergerName != "" {
 			return mergerName
 		}
 	}
-	return "user-" + strconv.FormatInt(claims.UserID, 10)
+	return fallbackName
 }
 
 // PR Comments

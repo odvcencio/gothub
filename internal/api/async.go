@@ -12,6 +12,10 @@ const asyncTaskTimeout = 20 * time.Second
 
 func (s *Server) runAsync(ctx context.Context, operation string, attrs []any, fn func(context.Context) error) {
 	safeAttrs := append([]any(nil), attrs...)
+	parentCtx := ctx
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
 
 	go func() {
 		defer func() {
@@ -22,13 +26,17 @@ func (s *Server) runAsync(ctx context.Context, operation string, attrs []any, fn
 			}
 		}()
 
-		taskCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), asyncTaskTimeout)
+		taskCtx, cancel := context.WithTimeout(context.WithoutCancel(parentCtx), asyncTaskTimeout)
 		defer cancel()
 
 		if err := fn(taskCtx); err != nil {
 			slog.LogAttrs(taskCtx, slog.LevelError, "async task failed", asyncLogAttrs(operation, safeAttrs, "error", err)...)
 		}
 	}()
+}
+
+func (s *Server) runWebhookAsync(ctx context.Context, operation string, attrs []any, fn func(context.Context) error) {
+	s.runAsync(ctx, operation, attrs, fn)
 }
 
 func asyncLogAttrs(operation string, attrs []any, key string, value any) []slog.Attr {

@@ -39,7 +39,7 @@ func (s *Server) handleCreateIssue(w http.ResponseWriter, r *http.Request) {
 		slog.Error("notify issue opened", "error", err, "repo_id", repo.ID, "issue", issue.Number)
 	}
 
-	s.runAsync(r.Context(), "webhook issue opened", []any{"repo_id", repo.ID, "issue", issue.Number}, func(ctx context.Context) error {
+	s.runWebhookAsync(r.Context(), "webhook issue opened", []any{"repo_id", repo.ID, "issue", issue.Number}, func(ctx context.Context) error {
 		return s.webhookSvc.EmitIssueEvent(ctx, repo.ID, "opened", issue.Number, issue.Title, issue.Body, "open")
 	})
 	s.publishRepoEvent(repo.ID, "issue.opened", map[string]any{
@@ -144,7 +144,7 @@ func (s *Server) handleUpdateIssue(w http.ResponseWriter, r *http.Request) {
 			action = "reopened"
 		}
 	}
-	s.runAsync(r.Context(), "webhook issue event", []any{"repo_id", repo.ID, "issue", issue.Number, "action", action}, func(ctx context.Context) error {
+	s.runWebhookAsync(r.Context(), "webhook issue event", []any{"repo_id", repo.ID, "issue", issue.Number, "action", action}, func(ctx context.Context) error {
 		return s.webhookSvc.EmitIssueEvent(ctx, repo.ID, action, issue.Number, issue.Title, issue.Body, issue.State)
 	})
 	s.publishRepoEvent(repo.ID, "issue."+action, map[string]any{

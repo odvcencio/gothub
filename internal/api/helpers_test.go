@@ -97,6 +97,38 @@ func TestParsePathPositiveInt64(t *testing.T) {
 	}
 }
 
+func TestParsePathPositiveInt(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	if _, ok := parsePathPositiveInt(rec, req, "number", "pull request number"); ok {
+		t.Fatal("expected missing path value to fail")
+	}
+	assertJSONError(t, rec, http.StatusBadRequest, "pull request number is required")
+
+	for _, raw := range []string{"abc", "0", "-1", "9223372036854775808"} {
+		t.Run("invalid_"+raw, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.SetPathValue("number", raw)
+			rec := httptest.NewRecorder()
+			if _, ok := parsePathPositiveInt(rec, req, "number", "pull request number"); ok {
+				t.Fatalf("expected invalid path value %q to fail", raw)
+			}
+			assertJSONError(t, rec, http.StatusBadRequest, "invalid pull request number")
+		})
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	req.SetPathValue("number", " 42 ")
+	rec = httptest.NewRecorder()
+	number, ok := parsePathPositiveInt(rec, req, "number", "issue number")
+	if !ok {
+		t.Fatal("expected valid path value to parse")
+	}
+	if number != 42 {
+		t.Fatalf("expected number 42, got %d", number)
+	}
+}
+
 func assertJSONError(t *testing.T, rec *httptest.ResponseRecorder, wantStatus int, wantError string) {
 	t.Helper()
 	if rec.Code != wantStatus {

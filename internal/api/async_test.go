@@ -31,7 +31,7 @@ func (h *logCaptureHandler) WithGroup(string) slog.Handler {
 	return h
 }
 
-func TestRunAsyncRecoversPanicAndLogsSafely(t *testing.T) {
+func TestRunWebhookAsyncRecoversPanicAndLogsSafely(t *testing.T) {
 	capture := &logCaptureHandler{records: make(chan slog.Record, 1)}
 	prev := slog.Default()
 	slog.SetDefault(slog.New(capture))
@@ -40,7 +40,7 @@ func TestRunAsyncRecoversPanicAndLogsSafely(t *testing.T) {
 	})
 
 	s := &Server{}
-	s.runAsync(context.Background(), "webhook panic test", []any{123, "bad", "repo_id", int64(55), "dangling"}, func(context.Context) error {
+	s.runWebhookAsync(context.Background(), "webhook panic test", []any{123, "bad", "repo_id", int64(55), "dangling"}, func(context.Context) error {
 		panic("boom")
 	})
 
@@ -71,5 +71,26 @@ func TestRunAsyncRecoversPanicAndLogsSafely(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for async panic log")
+	}
+}
+
+func TestRunWebhookAsyncDetachedContextIgnoresParentCancel(t *testing.T) {
+	s := &Server{}
+	parentCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	done := make(chan error, 1)
+	s.runWebhookAsync(parentCtx, "webhook detached context", nil, func(ctx context.Context) error {
+		done <- ctx.Err()
+		return nil
+	})
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("expected detached async context, got err=%v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for async task execution")
 	}
 }
