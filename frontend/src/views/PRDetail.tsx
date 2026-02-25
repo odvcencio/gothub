@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'preact/hooks';
+import { useState, useEffect, useMemo, useRef } from 'preact/hooks';
 import {
   createPRComment,
   createPRReview,
@@ -55,9 +55,21 @@ export function PRDetailView({ owner, repo, number }: Props) {
   const [merging, setMerging] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
-  const appendNotice = (message: string) => {
+  const noticeCooldowns = useRef<Record<string, number>>({});
+  const appendNotice = (
+    message: string,
+    options: { dedupeKey?: string; cooldownMs?: number } = {}
+  ) => {
     const next = message.trim();
     if (!next) return;
+    const dedupeKey = (options.dedupeKey || next).toLowerCase();
+    const cooldownMs = options.cooldownMs || 0;
+    if (cooldownMs > 0) {
+      const now = Date.now();
+      const lastSeen = noticeCooldowns.current[dedupeKey] || 0;
+      if (now - lastSeen < cooldownMs) return;
+      noticeCooldowns.current[dedupeKey] = now;
+    }
     setNotice((current) => {
       if (!current) return next;
       if (current.includes(next)) return current;
@@ -85,6 +97,7 @@ export function PRDetailView({ owner, repo, number }: Props) {
     setMerging(false);
     setError('');
     setNotice('');
+    noticeCooldowns.current = {};
   }, [owner, repo, prNum]);
 
   useEffect(() => {
@@ -103,10 +116,19 @@ export function PRDetailView({ owner, repo, number }: Props) {
         if (eventPRNumber == null || eventPRNumber !== prNum) return;
 
         appendNotice(`Live update: ${event.type}`);
-        getPR(owner, repo, prNum).then(setPr).catch(e => appendNotice(e.message || 'failed to refresh pull request'));
+        getPR(owner, repo, prNum).then(setPr).catch(e => appendNotice(
+          e.message || 'failed to refresh pull request',
+          { dedupeKey: 'stream-refresh-pr', cooldownMs: 15000 }
+        ));
         if (event.type === 'pull_request.merged' || tab === 'merge') {
-          getMergeGate(owner, repo, prNum).then(setMergeGate).catch(e => appendNotice(e.message || 'failed to refresh merge gate'));
-          listPRChecks(owner, repo, prNum).then(setChecks).catch(e => appendNotice(e.message || 'failed to refresh checks'));
+          getMergeGate(owner, repo, prNum).then(setMergeGate).catch(e => appendNotice(
+            e.message || 'failed to refresh merge gate',
+            { dedupeKey: 'stream-refresh-merge-gate', cooldownMs: 15000 }
+          ));
+          listPRChecks(owner, repo, prNum).then(setChecks).catch(e => appendNotice(
+            e.message || 'failed to refresh checks',
+            { dedupeKey: 'stream-refresh-checks', cooldownMs: 15000 }
+          ));
           setMergePreview(null);
           setMergePreviewError('');
           setSemver(null);
@@ -114,7 +136,10 @@ export function PRDetailView({ owner, repo, number }: Props) {
         }
       },
       onError: (streamErr: Error) => {
-        appendNotice(streamErr.message || 'repository event stream disconnected');
+        appendNotice(
+          streamErr.message || 'repository event stream disconnected',
+          { dedupeKey: 'repo-event-stream-disconnected', cooldownMs: 30000 }
+        );
       },
     });
 
@@ -150,8 +175,14 @@ export function PRDetailView({ owner, repo, number }: Props) {
         });
     }
     if (tab === 'merge') {
-      getMergeGate(owner, repo, prNum).then(setMergeGate).catch(e => appendNotice(e.message || 'failed to load merge gate'));
-      listPRChecks(owner, repo, prNum).then(setChecks).catch(e => appendNotice(e.message || 'failed to load checks'));
+      getMergeGate(owner, repo, prNum).then(setMergeGate).catch(e => appendNotice(
+        e.message || 'failed to load merge gate',
+        { dedupeKey: 'load-merge-gate', cooldownMs: 10000 }
+      ));
+      listPRChecks(owner, repo, prNum).then(setChecks).catch(e => appendNotice(
+        e.message || 'failed to load checks',
+        { dedupeKey: 'load-checks', cooldownMs: 10000 }
+      ));
       if (pr && !semver && !semverError) {
         const spec = `${pr.target_branch}...${pr.source_branch}`;
         getSemver(owner, repo, spec)
@@ -203,8 +234,14 @@ export function PRDetailView({ owner, repo, number }: Props) {
     setMerging(true);
     try {
       await mergePR(owner, repo, prNum);
-      getPR(owner, repo, prNum).then(setPr).catch(e => appendNotice(e.message || 'failed to refresh pull request'));
-      getMergeGate(owner, repo, prNum).then(setMergeGate).catch(e => appendNotice(e.message || 'failed to refresh merge gate'));
+      getPR(owner, repo, prNum).then(setPr).catch(e => appendNotice(
+        e.message || 'failed to refresh pull request',
+        { dedupeKey: 'merge-refresh-pr', cooldownMs: 10000 }
+      ));
+      getMergeGate(owner, repo, prNum).then(setMergeGate).catch(e => appendNotice(
+        e.message || 'failed to refresh merge gate',
+        { dedupeKey: 'merge-refresh-merge-gate', cooldownMs: 10000 }
+      ));
     } catch (e: any) {
       setError(e.message);
     }
