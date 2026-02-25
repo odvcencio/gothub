@@ -17,9 +17,10 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Host           string   `yaml:"host"`
-	Port           int      `yaml:"port"`
-	TrustedProxies []string `yaml:"trusted_proxies"`
+	Host               string   `yaml:"host"`
+	Port               int      `yaml:"port"`
+	TrustedProxies     []string `yaml:"trusted_proxies"`
+	CORSAllowedOrigins []string `yaml:"cors_allowed_origins"`
 }
 
 type DatabaseConfig struct {
@@ -39,6 +40,22 @@ type AuthConfig struct {
 
 func (c *Config) Addr() string {
 	return fmt.Sprintf("%s:%d", c.Server.Host, c.Server.Port)
+}
+
+func (c *Config) ValidateServe() error {
+	if c == nil {
+		return fmt.Errorf("config is required")
+	}
+	if c.Auth.JWTSecret == "" || c.Auth.JWTSecret == "change-me-in-production" {
+		return fmt.Errorf("GOTHUB_JWT_SECRET must be set to a non-default value (example: GOTHUB_JWT_SECRET=dev-jwt-secret-change-this)")
+	}
+	if len(c.Auth.JWTSecret) < 16 {
+		return fmt.Errorf("GOTHUB_JWT_SECRET must be at least 16 characters (current length: %d)", len(c.Auth.JWTSecret))
+	}
+	if c.Storage.Path == "" {
+		return fmt.Errorf("storage.path must be configured")
+	}
+	return nil
 }
 
 func Default() *Config {
@@ -91,6 +108,9 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("GOTHUB_TRUSTED_PROXIES"); v != "" {
 		cfg.Server.TrustedProxies = parseCSV(v)
 	}
+	if v := os.Getenv("GOTHUB_CORS_ALLOW_ORIGINS"); v != "" {
+		cfg.Server.CORSAllowedOrigins = parseCSV(v)
+	}
 	if v := os.Getenv("GOTHUB_DB_DRIVER"); v != "" {
 		cfg.Database.Driver = v
 	}
@@ -123,6 +143,9 @@ func parseCSV(v string) []string {
 			continue
 		}
 		out = append(out, value)
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }
