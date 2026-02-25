@@ -1,14 +1,18 @@
 package gotprotocol
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
+	"strconv"
 	"strings"
 
+	"github.com/klauspost/compress/zstd"
 	"github.com/odvcencio/got/pkg/object"
 	"github.com/odvcencio/gothub/internal/entityutil"
 	"github.com/odvcencio/gothub/internal/gotstore"
@@ -92,8 +96,67 @@ func (h *Handler) handleListRefs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	limitStr := r.URL.Query().Get("limit")
+	cursor := r.URL.Query().Get("cursor")
+
+	// If no pagination params, return legacy flat format
+	if limitStr == "" && cursor == "" {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(refs)
+		return
+	}
+
+	// Parse limit (default 1000)
+	limit := 1000
+	if limitStr != "" {
+		if n, err := strconv.Atoi(limitStr); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if limit > 10000 {
+		limit = 10000
+	}
+
+	// Sort ref names for deterministic pagination
+	names := make([]string, 0, len(refs))
+	for name := range refs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	// Find cursor position
+	startIdx := 0
+	if cursor != "" {
+		for i, name := range names {
+			if name > cursor {
+				startIdx = i
+				break
+			}
+			if i == len(names)-1 {
+				// cursor past all refs
+				startIdx = len(names)
+			}
+		}
+	}
+
+	// Build page
+	pageRefs := make(map[string]object.Hash)
+	endIdx := startIdx + limit
+	if endIdx > len(names) {
+		endIdx = len(names)
+	}
+	for _, name := range names[startIdx:endIdx] {
+		pageRefs[name] = refs[name]
+	}
+
+	resp := map[string]any{"refs": pageRefs}
+	if endIdx < len(names) {
+		resp["cursor"] = names[endIdx-1]
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(refs)
+	json.NewEncoder(w).Encode(resp)
 }
 
 // GET /{owner}/{repo}.got/objects/{hash} — fetch a single object
@@ -200,6 +263,73 @@ func (h *Handler) handleBatchObjects(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Check if client accepts pack transport
+	acceptPack := strings.Contains(r.Header.Get("Accept"), "application/x-got-pack")
+
+	if acceptPack {
+		// Encode as pack stream
+		var packBuf bytes.Buffer
+		pw, err := object.NewPackWriter(&packBuf, uint32(len(missing)))
+		if err != nil {
+			http.Error(w, fmt.Sprintf("create pack writer: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		var entityEntries []object.PackEntityTrailerEntry
+		for _, h := range missing {
+			objType, data, err := store.Objects.Read(h)
+			if err != nil {
+				http.Error(w, fmt.Sprintf("read object %s: %v", h, err), http.StatusInternalServerError)
+				return
+			}
+			packType := objectTypeToPackType(objType)
+			if objType == object.TypeEntity || objType == object.TypeEntityList {
+				entityEntries = append(entityEntries, object.PackEntityTrailerEntry{
+					ObjectHash: h,
+					StableID:   "type:" + string(objType),
+				})
+			}
+			if err := pw.WriteEntry(packType, data); err != nil {
+				http.Error(w, fmt.Sprintf("write pack entry: %v", err), http.StatusInternalServerError)
+				return
+			}
+		}
+
+		if len(entityEntries) > 0 {
+			if _, err := pw.FinishWithEntityTrailer(entityEntries); err != nil {
+				http.Error(w, fmt.Sprintf("finish pack: %v", err), http.StatusInternalServerError)
+				return
+			}
+		} else {
+			if _, err := pw.Finish(); err != nil {
+				http.Error(w, fmt.Sprintf("finish pack: %v", err), http.StatusInternalServerError)
+				return
+			}
+		}
+
+		packData := packBuf.Bytes()
+
+		// Compress with zstd if client accepts it
+		if strings.Contains(r.Header.Get("Accept-Encoding"), "zstd") {
+			enc, err := zstd.NewWriter(nil)
+			if err != nil {
+				http.Error(w, "zstd init: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			packData = enc.EncodeAll(packData, nil)
+			enc.Close()
+			w.Header().Set("Content-Encoding", "zstd")
+		}
+
+		if truncated {
+			w.Header().Set("X-Truncated", "true")
+		}
+		w.Header().Set("Content-Type", "application/x-got-pack")
+		w.Write(packData)
+		return
+	}
+
+	// Existing JSON response path
 	type batchObject struct {
 		Hash string `json:"hash"`
 		Type string `json:"type"`
@@ -249,44 +379,113 @@ func (h *Handler) handlePushObjects(w http.ResponseWriter, r *http.Request) {
 		hash    object.Hash
 	}
 
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxPushBodyBytes))
-	decoded := make([]decodedPushObject, 0, 128)
+	var decoded []decodedPushObject
 	known := make(map[object.Hash]object.ObjectType)
-	for {
-		var obj pushedObject
-		if err := dec.Decode(&obj); err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			http.Error(w, fmt.Sprintf("decode object %d: %v", len(decoded), err), http.StatusBadRequest)
-			return
-		}
-		if len(decoded) >= maxPushObjectCount {
-			writeJSONError(w, "payload_too_large", "too many objects in push", "", http.StatusRequestEntityTooLarge)
-			return
-		}
-		objType, err := parsePushedObjectType(obj.Type)
+	contentType := r.Header.Get("Content-Type")
+
+	if strings.HasPrefix(contentType, "application/x-got-pack") {
+		// Pack transport: read body, optionally decompress zstd, decode pack
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxPushBodyBytes))
 		if err != nil {
-			http.Error(w, fmt.Sprintf("object %d: %v", len(decoded), err), http.StatusBadRequest)
+			http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		if len(obj.Data) > maxPushObjectBytes {
-			http.Error(w, fmt.Sprintf("object %d exceeds %d-byte limit", len(decoded), maxPushObjectBytes), http.StatusRequestEntityTooLarge)
-			return
-		}
-		hash := object.HashObject(objType, obj.Data)
-		if provided := strings.TrimSpace(obj.Hash); provided != "" {
-			if object.Hash(provided) != hash {
-				writeJSONError(w, "hash_mismatch", "object hash mismatch", fmt.Sprintf("computed %s, got %s", hash, provided), http.StatusBadRequest)
+
+		if strings.Contains(r.Header.Get("Content-Encoding"), "zstd") {
+			dec, err := zstd.NewReader(nil)
+			if err != nil {
+				http.Error(w, "zstd init: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			body, err = dec.DecodeAll(body, nil)
+			dec.Close()
+			if err != nil {
+				http.Error(w, "decompress: "+err.Error(), http.StatusBadRequest)
 				return
 			}
 		}
-		decoded = append(decoded, decodedPushObject{
-			objType: objType,
-			data:    obj.Data,
-			hash:    hash,
-		})
-		known[hash] = objType
+
+		pf, err := object.ReadPack(body)
+		if err != nil {
+			http.Error(w, "read pack: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		resolved, err := object.ResolvePackEntries(pf.Entries)
+		if err != nil {
+			http.Error(w, "resolve pack: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		// Build entity type overrides from trailer
+		typeOverrides := map[object.Hash]object.ObjectType{}
+		if pf.EntityTrailer != nil {
+			for _, entry := range pf.EntityTrailer.Entries {
+				if len(entry.StableID) > 5 && entry.StableID[:5] == "type:" {
+					typeOverrides[entry.ObjectHash] = object.ObjectType(entry.StableID[5:])
+				}
+			}
+		}
+
+		if len(resolved) > maxPushObjectCount {
+			writeJSONError(w, "payload_too_large", "too many objects in push", "", http.StatusRequestEntityTooLarge)
+			return
+		}
+
+		decoded = make([]decodedPushObject, 0, len(resolved))
+		for _, entry := range resolved {
+			objType := packTypeToObjectType(entry.Type)
+			hash := object.HashObject(objType, entry.Data)
+			if override, ok := typeOverrides[hash]; ok {
+				objType = override
+				hash = object.HashObject(objType, entry.Data)
+			}
+			if len(entry.Data) > maxPushObjectBytes {
+				http.Error(w, fmt.Sprintf("object exceeds %d-byte limit", maxPushObjectBytes), http.StatusRequestEntityTooLarge)
+				return
+			}
+			decoded = append(decoded, decodedPushObject{objType: objType, data: entry.Data, hash: hash})
+			known[hash] = objType
+		}
+	} else {
+		// Existing NDJSON path
+		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxPushBodyBytes))
+		decoded = make([]decodedPushObject, 0, 128)
+		for {
+			var obj pushedObject
+			if err := dec.Decode(&obj); err != nil {
+				if errors.Is(err, io.EOF) {
+					break
+				}
+				http.Error(w, fmt.Sprintf("decode object %d: %v", len(decoded), err), http.StatusBadRequest)
+				return
+			}
+			if len(decoded) >= maxPushObjectCount {
+				writeJSONError(w, "payload_too_large", "too many objects in push", "", http.StatusRequestEntityTooLarge)
+				return
+			}
+			objType, err := parsePushedObjectType(obj.Type)
+			if err != nil {
+				http.Error(w, fmt.Sprintf("object %d: %v", len(decoded), err), http.StatusBadRequest)
+				return
+			}
+			if len(obj.Data) > maxPushObjectBytes {
+				http.Error(w, fmt.Sprintf("object %d exceeds %d-byte limit", len(decoded), maxPushObjectBytes), http.StatusRequestEntityTooLarge)
+				return
+			}
+			hash := object.HashObject(objType, obj.Data)
+			if provided := strings.TrimSpace(obj.Hash); provided != "" {
+				if object.Hash(provided) != hash {
+					writeJSONError(w, "hash_mismatch", "object hash mismatch", fmt.Sprintf("computed %s, got %s", hash, provided), http.StatusBadRequest)
+					return
+				}
+			}
+			decoded = append(decoded, decodedPushObject{
+				objType: objType,
+				data:    obj.Data,
+				hash:    hash,
+			})
+			known[hash] = objType
+		}
 	}
 
 	for i, obj := range decoded {
@@ -542,6 +741,36 @@ func parseRefUpdates(w http.ResponseWriter, r *http.Request) ([]refUpdateItem, e
 		out = append(out, refUpdateItem{Name: n, New: &h})
 	}
 	return out, nil
+}
+
+func objectTypeToPackType(t object.ObjectType) object.PackObjectType {
+	switch t {
+	case object.TypeCommit:
+		return object.PackCommit
+	case object.TypeTree:
+		return object.PackTree
+	case object.TypeBlob, object.TypeEntity, object.TypeEntityList:
+		return object.PackBlob
+	case object.TypeTag:
+		return object.PackTag
+	default:
+		return object.PackBlob
+	}
+}
+
+func packTypeToObjectType(t object.PackObjectType) object.ObjectType {
+	switch t {
+	case object.PackCommit:
+		return object.TypeCommit
+	case object.PackTree:
+		return object.TypeTree
+	case object.PackBlob:
+		return object.TypeBlob
+	case object.PackTag:
+		return object.TypeTag
+	default:
+		return object.TypeBlob
+	}
 }
 
 func parsePushedObjectType(raw string) (object.ObjectType, error) {
