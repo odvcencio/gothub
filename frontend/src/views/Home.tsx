@@ -3,14 +3,11 @@ import {
   getToken,
   subscribeAuthTokenChange,
   listUserRepos,
-  getRepoCreationPolicy,
-  createRepo,
   getRepo,
   listPRs,
   listTree,
   searchSymbols,
   type PullRequest,
-  type RepoCreationPolicy,
   type Repository,
   type TreeEntry,
 } from '../api/client';
@@ -29,11 +26,6 @@ export function Home() {
 
 function Dashboard() {
   const [repos, setRepos] = useState<Repository[]>([]);
-  const [repoPolicy, setRepoPolicy] = useState<RepoCreationPolicy | null>(null);
-  const [showCreate, setShowCreate] = useState(false);
-  const [name, setName] = useState('');
-  const [desc, setDesc] = useState('');
-  const [priv, setPriv] = useState(false);
   const [error, setError] = useState('');
   const [showOnboarding, setShowOnboarding] = useState(() => !hasSeenOnboardingDemo());
   const [demo, setDemo] = useState<DemoContext | null>(null);
@@ -55,12 +47,8 @@ function Dashboard() {
   useEffect(() => {
     const loadDashboard = async () => {
       try {
-        const [items, policy] = await Promise.all([
-          listUserRepos(),
-          getRepoCreationPolicy(),
-        ]);
+        const items = await listUserRepos();
         setRepos(Array.isArray(items) ? items : []);
-        setRepoPolicy(policy);
         setError('');
       } catch (e: any) {
         setError(e.message || 'failed to load dashboard');
@@ -98,35 +86,6 @@ function Dashboard() {
     setShowOnboarding(false);
     markOnboardingDemoSeen();
   };
-
-  const handleCreate = async (e: Event) => {
-    e.preventDefault();
-    setError('');
-    if (priv && repoPolicy && !repoPolicy.can_create_private) {
-      setError(repoPolicy.private_reason || 'private repositories are not available for this account');
-      return;
-    }
-    if (!priv && repoPolicy && !repoPolicy.can_create_public) {
-      setError(repoPolicy.public_reason || 'public repositories are not available for this account');
-      return;
-    }
-    try {
-      await createRepo(name, desc, priv);
-      setShowCreate(false);
-      setName(''); setDesc('');
-      const [items, policy] = await Promise.all([
-        listUserRepos(),
-        getRepoCreationPolicy(),
-      ]);
-      setRepos(Array.isArray(items) ? items : []);
-      setRepoPolicy(policy);
-      setError('');
-    } catch (err: any) {
-      setError(err.message);
-    }
-  };
-
-  const createBlocked = showCreate && (!!repoPolicy && (priv ? !repoPolicy.can_create_private : !repoPolicy.can_create_public));
 
   return (
     <div>
@@ -245,57 +204,6 @@ function Dashboard() {
               </div>
             </div>
           )}
-        </div>
-      )}
-
-      {showCreate && (
-        <div style={{ border: '1px solid #30363d', borderRadius: '6px', padding: '16px', marginBottom: '20px' }}>
-          <form onSubmit={handleCreate} style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-            <input value={name} onInput={(e: any) => setName(e.target.value)} placeholder="Repository name" style={inputStyle} />
-            <input value={desc} onInput={(e: any) => setDesc(e.target.value)} placeholder="Description (optional)" style={inputStyle} />
-            {repoPolicy && (
-              <div style={{ color: '#8b949e', fontSize: '12px', lineHeight: 1.5 }}>
-                {repoPolicy.max_public_repos > 0 && (
-                  <div>Public repos: {repoPolicy.public_repo_count}/{repoPolicy.max_public_repos}</div>
-                )}
-                {repoPolicy.max_private_repos > 0 && (
-                  <div>Private repos: {repoPolicy.private_repo_count}/{repoPolicy.max_private_repos}</div>
-                )}
-                {!repoPolicy.can_create_private && repoPolicy.private_reason && (
-                  <div style={{ color: '#d29922' }}>Private: {repoPolicy.private_reason}</div>
-                )}
-                {!repoPolicy.can_create_public && repoPolicy.public_reason && (
-                  <div style={{ color: '#d29922' }}>Public: {repoPolicy.public_reason}</div>
-                )}
-              </div>
-            )}
-            <label style={{ color: '#c9d1d9', fontSize: '13px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <input
-                type="checkbox"
-                checked={priv}
-                onChange={(e: any) => setPriv(e.target.checked)}
-                disabled={!!repoPolicy && !repoPolicy.can_create_private}
-              />
-              Private
-            </label>
-            <button
-              type="submit"
-              disabled={createBlocked}
-              style={{
-                background: '#238636',
-                color: '#fff',
-                border: 'none',
-                padding: '8px 16px',
-                borderRadius: '6px',
-                cursor: createBlocked ? 'not-allowed' : 'pointer',
-                fontWeight: 'bold',
-                alignSelf: 'flex-start',
-                opacity: createBlocked ? 0.6 : 1,
-              }}
-            >
-              Create repository
-            </button>
-          </form>
         </div>
       )}
 
@@ -594,11 +502,3 @@ const demoStepButtonStyle = {
   fontSize: '13px',
 };
 
-const inputStyle = {
-  background: '#0d1117',
-  border: '1px solid #30363d',
-  borderRadius: '6px',
-  padding: '10px 12px',
-  color: '#c9d1d9',
-  fontSize: '14px',
-};
