@@ -619,6 +619,64 @@ func TestSQLiteCreatePullRequestAssignsUniqueNumbersConcurrently(t *testing.T) {
 	}
 }
 
+func TestSQLiteListPullRequestsPageAppliesStateAndOffset(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	user := &models.User{Username: "alice", Email: "alice@example.com", PasswordHash: "x"}
+	if err := db.CreateUser(ctx, user); err != nil {
+		t.Fatal(err)
+	}
+	repo := &models.Repository{
+		OwnerUserID:   &user.ID,
+		Name:          "repo",
+		DefaultBranch: "main",
+		StoragePath:   "pending",
+	}
+	if err := db.CreateRepository(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 6; i++ {
+		state := "open"
+		if i%2 == 1 {
+			state = "closed"
+		}
+		pr := &models.PullRequest{
+			RepoID:       repo.ID,
+			Title:        "PR",
+			Body:         "",
+			State:        state,
+			AuthorID:     user.ID,
+			SourceBranch: "feature-" + string(rune('a'+i)),
+			TargetBranch: "main",
+		}
+		if err := db.CreatePullRequest(ctx, pr); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	paged, err := db.ListPullRequestsPage(ctx, repo.ID, "open", 2, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paged) != 2 {
+		t.Fatalf("expected 2 paged pull requests, got %+v", paged)
+	}
+	if paged[0].Number != 3 || paged[1].Number != 1 {
+		t.Fatalf("unexpected paged pull requests: %+v", paged)
+	}
+}
+
 func TestSQLiteSetHashMappingRemapsGitHash(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	db, err := OpenSQLite(dbPath)
@@ -1378,6 +1436,82 @@ func TestSQLiteRepoStarsLifecycle(t *testing.T) {
 	}
 }
 
+func TestSQLiteRepoStarsPageQueriesApplyLimitOffset(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	alice := &models.User{Username: "alice", Email: "alice@example.com", PasswordHash: "x"}
+	bob := &models.User{Username: "bob", Email: "bob@example.com", PasswordHash: "x"}
+	carol := &models.User{Username: "carol", Email: "carol@example.com", PasswordHash: "x"}
+	dave := &models.User{Username: "dave", Email: "dave@example.com", PasswordHash: "x"}
+	erin := &models.User{Username: "erin", Email: "erin@example.com", PasswordHash: "x"}
+	for _, u := range []*models.User{alice, bob, carol, dave, erin} {
+		if err := db.CreateUser(ctx, u); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	repo := &models.Repository{
+		OwnerUserID:   &alice.ID,
+		Name:          "repo",
+		DefaultBranch: "main",
+		StoragePath:   "pending",
+	}
+	if err := db.CreateRepository(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, u := range []*models.User{bob, carol, dave, erin} {
+		if err := db.AddRepoStar(ctx, repo.ID, u.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	stargazers, err := db.ListRepoStargazersPage(ctx, repo.ID, 2, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stargazers) != 2 {
+		t.Fatalf("expected 2 paged stargazers, got %+v", stargazers)
+	}
+	if stargazers[0].Username != "dave" || stargazers[1].Username != "carol" {
+		t.Fatalf("unexpected paged stargazers: %+v", stargazers)
+	}
+
+	repoA := &models.Repository{OwnerUserID: &alice.ID, Name: "a", DefaultBranch: "main", StoragePath: "pending-a"}
+	repoB := &models.Repository{OwnerUserID: &alice.ID, Name: "b", DefaultBranch: "main", StoragePath: "pending-b"}
+	repoC := &models.Repository{OwnerUserID: &alice.ID, Name: "c", DefaultBranch: "main", StoragePath: "pending-c"}
+	repoD := &models.Repository{OwnerUserID: &alice.ID, Name: "d", DefaultBranch: "main", StoragePath: "pending-d"}
+	for _, r := range []*models.Repository{repoA, repoB, repoC, repoD} {
+		if err := db.CreateRepository(ctx, r); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.AddRepoStar(ctx, r.ID, bob.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	starredRepos, err := db.ListUserStarredRepositoriesPage(ctx, bob.ID, 2, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(starredRepos) != 2 {
+		t.Fatalf("expected 2 paged starred repositories, got %+v", starredRepos)
+	}
+	if starredRepos[0].Name != "c" || starredRepos[1].Name != "b" {
+		t.Fatalf("unexpected paged starred repositories: %+v", starredRepos)
+	}
+}
+
 func TestSQLiteBranchProtectionRuleCRUD(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	db, err := OpenSQLite(dbPath)
@@ -1714,6 +1848,62 @@ func TestSQLiteIssueCRUDAndComments(t *testing.T) {
 	}
 	if len(comments) != 1 || comments[0].Body != "first comment" {
 		t.Fatalf("unexpected comments: %+v", comments)
+	}
+}
+
+func TestSQLiteListIssuesPageAppliesStateAndOffset(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	user := &models.User{Username: "alice", Email: "alice@example.com", PasswordHash: "x"}
+	if err := db.CreateUser(ctx, user); err != nil {
+		t.Fatal(err)
+	}
+	repo := &models.Repository{
+		OwnerUserID:   &user.ID,
+		Name:          "repo",
+		DefaultBranch: "main",
+		StoragePath:   "pending",
+	}
+	if err := db.CreateRepository(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 6; i++ {
+		state := "open"
+		if i%2 == 1 {
+			state = "closed"
+		}
+		issue := &models.Issue{
+			RepoID:   repo.ID,
+			Title:    "Issue",
+			Body:     "",
+			State:    state,
+			AuthorID: user.ID,
+		}
+		if err := db.CreateIssue(ctx, issue); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	paged, err := db.ListIssuesPage(ctx, repo.ID, "open", 2, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paged) != 2 {
+		t.Fatalf("expected 2 paged issues, got %+v", paged)
+	}
+	if paged[0].Number != 3 || paged[1].Number != 1 {
+		t.Fatalf("unexpected paged issues: %+v", paged)
 	}
 }
 
