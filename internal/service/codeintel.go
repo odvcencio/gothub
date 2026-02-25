@@ -205,7 +205,7 @@ func (s *CodeIntelService) EnsureCommitIndexed(ctx context.Context, repoID int64
 		return nil
 	}
 
-	idx, err := s.buildIndexFromStore(store, commitHash, cacheKey)
+	idx, err := s.buildIndexForCommit(ctx, repoID, store, cacheKey, commitHash)
 	if err != nil {
 		return err
 	}
@@ -291,6 +291,53 @@ func (s *CodeIntelService) computeAndPersistCommitGeneration(
 	return gen, parentCount, nil
 }
 
+func (s *CodeIntelService) buildIndexForCommit(ctx context.Context, repoID int64, store *gotstore.RepoStore, indexRoot string, commitHash object.Hash) (*model.Index, error) {
+	commit, err := store.Objects.ReadCommit(commitHash)
+	if err == nil && len(commit.Parents) == 1 {
+		parentHash := commit.Parents[0]
+		if parentHash != "" {
+			parentIndex, ok := s.loadParentIndexForIncremental(ctx, store, repoID, indexRoot, parentHash)
+			if ok {
+				parentCommit, parentErr := store.Objects.ReadCommit(parentHash)
+				if parentErr == nil {
+					if idx, incErr := s.buildIndexIncrementalFromParent(store, commitHash, commit.TreeHash, parentCommit.TreeHash, parentIndex, indexRoot); incErr == nil {
+						return idx, nil
+					}
+				}
+			}
+		}
+	}
+
+	return s.buildIndexFromStore(store, commitHash, indexRoot)
+}
+
+func (s *CodeIntelService) loadParentIndexForIncremental(
+	ctx context.Context,
+	store *gotstore.RepoStore,
+	repoID int64,
+	cacheKey string,
+	parentHash object.Hash,
+) (*model.Index, bool) {
+	if strings.TrimSpace(string(parentHash)) == "" {
+		return nil, false
+	}
+	if strings.TrimSpace(cacheKey) != "" {
+		key := fmt.Sprintf("%s@%s", cacheKey, parentHash)
+		if idx, ok := s.getCachedIndex(key); ok {
+			return idx, true
+		}
+	}
+
+	idx, ok, err := s.loadPersistedIndex(ctx, store, repoID, string(parentHash))
+	if err != nil || !ok {
+		return nil, false
+	}
+	if strings.TrimSpace(cacheKey) != "" {
+		s.setCachedIndex(fmt.Sprintf("%s@%s", cacheKey, parentHash), idx)
+	}
+	return idx, true
+}
+
 func (s *CodeIntelService) buildIndexFromStore(store *gotstore.RepoStore, commitHash object.Hash, indexRoot string) (*model.Index, error) {
 	// Read file blobs directly from the object store to avoid temp-dir materialization.
 	files, err := s.flattenTreeForCommit(store, commitHash)
@@ -311,39 +358,195 @@ func (s *CodeIntelService) buildIndexFromStore(store *gotstore.RepoStore, commit
 
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
 	for _, fe := range files {
-		parser, ok := builder.ParserForPath(fe.Path)
-		if !ok {
+		summary, parseErr, parsed := s.parseCodeIntelFileSummary(store, builder, fe.Path, fe.BlobHash)
+		if !parsed {
 			continue
 		}
-		blob, err := store.Objects.ReadBlob(object.Hash(fe.BlobHash))
-		if err != nil {
-			idx.Errors = append(idx.Errors, model.ParseError{
-				Path:  fe.Path,
-				Error: fmt.Sprintf("read blob: %v", err),
-			})
+		if parseErr != nil {
+			idx.Errors = append(idx.Errors, *parseErr)
 			continue
-		}
-		summary, err := parser.Parse(fe.Path, blob.Data)
-		if err != nil {
-			idx.Errors = append(idx.Errors, model.ParseError{
-				Path:  fe.Path,
-				Error: err.Error(),
-			})
-			continue
-		}
-
-		summary.Path = fe.Path
-		summary.Language = parser.Language()
-		summary.SizeBytes = int64(len(blob.Data))
-		for i := range summary.Symbols {
-			summary.Symbols[i].File = fe.Path
-		}
-		for i := range summary.References {
-			summary.References[i].File = fe.Path
 		}
 		idx.Files = append(idx.Files, summary)
 	}
 	return idx, nil
+}
+
+func (s *CodeIntelService) buildIndexIncrementalFromParent(
+	store *gotstore.RepoStore,
+	commitHash object.Hash,
+	commitTreeHash object.Hash,
+	parentTreeHash object.Hash,
+	parentIndex *model.Index,
+	indexRoot string,
+) (*model.Index, error) {
+	if parentIndex == nil {
+		return nil, fmt.Errorf("missing parent index")
+	}
+
+	changedPaths, commitFilesByPath, err := changedCodeIntelFilesBetweenTrees(store.Objects, parentTreeHash, commitTreeHash)
+	if err != nil {
+		return nil, fmt.Errorf("diff trees: %w", err)
+	}
+
+	if strings.TrimSpace(indexRoot) == "" {
+		indexRoot = string(commitHash)
+	}
+	idx := &model.Index{
+		Version:     repoIndexSchemaVersion,
+		Root:        fmt.Sprintf("%s@%s", indexRoot, commitHash),
+		GeneratedAt: time.Now().UTC(),
+		Files:       make([]model.FileSummary, 0, len(commitFilesByPath)),
+	}
+
+	parentFilesByPath := codeIntelFileSummariesByPath(parentIndex)
+	parentErrorsByPath := codeIntelParseErrorsByPath(parentIndex)
+	changedSummaries := make(map[string]model.FileSummary, len(changedPaths))
+	changedErrorsByPath := make(map[string][]model.ParseError)
+	builder := index.NewBuilder()
+
+	changed := make([]string, 0, len(changedPaths))
+	for path := range changedPaths {
+		changed = append(changed, path)
+	}
+	sort.Strings(changed)
+	for _, path := range changed {
+		fe, exists := commitFilesByPath[path]
+		if !exists {
+			// File removed from commit tree.
+			continue
+		}
+		summary, parseErr, parsed := s.parseCodeIntelFileSummary(store, builder, path, fe.BlobHash)
+		if !parsed {
+			continue
+		}
+		if parseErr != nil {
+			changedErrorsByPath[path] = append(changedErrorsByPath[path], *parseErr)
+			continue
+		}
+		changedSummaries[path] = summary
+	}
+
+	paths := make([]string, 0, len(commitFilesByPath))
+	for path := range commitFilesByPath {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	for _, path := range paths {
+		if _, changed := changedPaths[path]; changed {
+			if summary, ok := changedSummaries[path]; ok {
+				idx.Files = append(idx.Files, summary)
+			}
+			if parseErrs, ok := changedErrorsByPath[path]; ok {
+				idx.Errors = append(idx.Errors, parseErrs...)
+			}
+			continue
+		}
+
+		if summary, ok := parentFilesByPath[path]; ok {
+			idx.Files = append(idx.Files, summary)
+		}
+		if parseErrs, ok := parentErrorsByPath[path]; ok {
+			idx.Errors = append(idx.Errors, parseErrs...)
+		}
+	}
+
+	sort.Slice(idx.Errors, func(i, j int) bool {
+		if idx.Errors[i].Path == idx.Errors[j].Path {
+			return idx.Errors[i].Error < idx.Errors[j].Error
+		}
+		return idx.Errors[i].Path < idx.Errors[j].Path
+	})
+	return idx, nil
+}
+
+func (s *CodeIntelService) parseCodeIntelFileSummary(
+	store *gotstore.RepoStore,
+	builder *index.Builder,
+	path string,
+	blobHash string,
+) (model.FileSummary, *model.ParseError, bool) {
+	parser, ok := builder.ParserForPath(path)
+	if !ok {
+		return model.FileSummary{}, nil, false
+	}
+	blob, err := store.Objects.ReadBlob(object.Hash(blobHash))
+	if err != nil {
+		return model.FileSummary{}, &model.ParseError{
+			Path:  path,
+			Error: fmt.Sprintf("read blob: %v", err),
+		}, true
+	}
+	summary, err := parser.Parse(path, blob.Data)
+	if err != nil {
+		return model.FileSummary{}, &model.ParseError{
+			Path:  path,
+			Error: err.Error(),
+		}, true
+	}
+
+	summary.Path = path
+	summary.Language = parser.Language()
+	summary.SizeBytes = int64(len(blob.Data))
+	for i := range summary.Symbols {
+		summary.Symbols[i].File = path
+	}
+	for i := range summary.References {
+		summary.References[i].File = path
+	}
+	return summary, nil, true
+}
+
+func changedCodeIntelFilesBetweenTrees(store *object.Store, parentTreeHash, commitTreeHash object.Hash) (map[string]struct{}, map[string]FileEntry, error) {
+	parentFiles, err := flattenTree(store, parentTreeHash, "")
+	if err != nil {
+		return nil, nil, err
+	}
+	commitFiles, err := flattenTree(store, commitTreeHash, "")
+	if err != nil {
+		return nil, nil, err
+	}
+
+	parentFilesByPath := fileEntriesByPath(parentFiles)
+	commitFilesByPath := fileEntriesByPath(commitFiles)
+	changedPaths := make(map[string]struct{})
+
+	for path, commitFile := range commitFilesByPath {
+		parentFile, ok := parentFilesByPath[path]
+		if !ok || parentFile.BlobHash != commitFile.BlobHash {
+			changedPaths[path] = struct{}{}
+		}
+	}
+	for path := range parentFilesByPath {
+		if _, ok := commitFilesByPath[path]; !ok {
+			changedPaths[path] = struct{}{}
+		}
+	}
+
+	return changedPaths, commitFilesByPath, nil
+}
+
+func codeIntelFileSummariesByPath(idx *model.Index) map[string]model.FileSummary {
+	if idx == nil {
+		return nil
+	}
+	byPath := make(map[string]model.FileSummary, len(idx.Files))
+	for i := range idx.Files {
+		file := idx.Files[i]
+		byPath[file.Path] = file
+	}
+	return byPath
+}
+
+func codeIntelParseErrorsByPath(idx *model.Index) map[string][]model.ParseError {
+	if idx == nil || len(idx.Errors) == 0 {
+		return nil
+	}
+	byPath := make(map[string][]model.ParseError, len(idx.Errors))
+	for i := range idx.Errors {
+		parseErr := idx.Errors[i]
+		byPath[parseErr.Path] = append(byPath[parseErr.Path], parseErr)
+	}
+	return byPath
 }
 
 func (s *CodeIntelService) flattenTreeForCommit(store *gotstore.RepoStore, commitHash object.Hash) ([]FileEntry, error) {

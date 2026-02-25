@@ -18,10 +18,11 @@ import (
 )
 
 var (
-	benchmarkSymbolResultsSink []SymbolResult
-	benchmarkImpactDefsSink    []xref.Definition
-	benchmarkImpactCallersSink []ImpactDirectCaller
-	benchmarkMergeBaseSink     object.Hash
+	benchmarkSymbolResultsSink  []SymbolResult
+	benchmarkImpactDefsSink     []xref.Definition
+	benchmarkImpactCallersSink  []ImpactDirectCaller
+	benchmarkMergeBaseSink      object.Hash
+	benchmarkCodeIntelIndexSink *model.Index
 )
 
 type benchmarkLinearCodeIntelCacheEntry struct {
@@ -245,6 +246,75 @@ func BenchmarkCodeIntelSymbolSearchSelector(b *testing.B) {
 	}
 }
 
+func BenchmarkCodeIntelIndexBuildFullVsIncremental(b *testing.B) {
+	_, prSvc, store, _ := setupPRMergeBenchmarkService(b)
+	browseSvc := NewBrowseService(prSvc.repoSvc)
+	codeIntelSvc := NewCodeIntelService(prSvc.db, prSvc.repoSvc, browseSvc)
+
+	parentFiles := benchmarkSyntheticGoFiles(512)
+	parent := writeBenchmarkCommitWithFiles(b, store, parentFiles, nil, "base", 1700003000)
+
+	commitFiles := cloneBenchmarkSyntheticFiles(parentFiles)
+	commitFiles["pkg000/file000.go"] = "package pkg000\n\nfunc Helper000() int { return 9000 }\n"
+	commit := writeBenchmarkCommitWithFiles(b, store, commitFiles, []object.Hash{parent}, "head", 1700003010)
+
+	parentCommit, err := store.Objects.ReadCommit(parent)
+	if err != nil {
+		b.Fatalf("read parent commit: %v", err)
+	}
+	commitObj, err := store.Objects.ReadCommit(commit)
+	if err != nil {
+		b.Fatalf("read head commit: %v", err)
+	}
+
+	parentIndex, err := codeIntelSvc.buildIndexFromStore(store, parent, "bench/repo")
+	if err != nil {
+		b.Fatalf("build parent index: %v", err)
+	}
+
+	fullResult, err := codeIntelSvc.buildIndexFromStore(store, commit, "bench/repo")
+	if err != nil {
+		b.Fatalf("build full index fixture: %v", err)
+	}
+	incrementalResult, err := codeIntelSvc.buildIndexIncrementalFromParent(store, commit, commitObj.TreeHash, parentCommit.TreeHash, parentIndex, "bench/repo")
+	if err != nil {
+		b.Fatalf("build incremental index fixture: %v", err)
+	}
+	if fullResult.FileCount() != incrementalResult.FileCount() {
+		b.Fatalf("fixture mismatch: full file_count=%d incremental file_count=%d", fullResult.FileCount(), incrementalResult.FileCount())
+	}
+	if fullResult.SymbolCount() != incrementalResult.SymbolCount() {
+		b.Fatalf("fixture mismatch: full symbol_count=%d incremental symbol_count=%d", fullResult.SymbolCount(), incrementalResult.SymbolCount())
+	}
+	if len(fullResult.Errors) != len(incrementalResult.Errors) {
+		b.Fatalf("fixture mismatch: full errors=%d incremental errors=%d", len(fullResult.Errors), len(incrementalResult.Errors))
+	}
+
+	b.Run("full_rebuild", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			idx, err := codeIntelSvc.buildIndexFromStore(store, commit, "bench/repo")
+			if err != nil {
+				b.Fatalf("full rebuild: %v", err)
+			}
+			benchmarkCodeIntelIndexSink = idx
+		}
+	})
+
+	b.Run("incremental", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			idx, err := codeIntelSvc.buildIndexIncrementalFromParent(store, commit, commitObj.TreeHash, parentCommit.TreeHash, parentIndex, "bench/repo")
+			if err != nil {
+				b.Fatalf("incremental rebuild: %v", err)
+			}
+			benchmarkCodeIntelIndexSink = idx
+		}
+	})
+}
+
 func BenchmarkImpactAnalysisPreparationFromGraph(b *testing.B) {
 	graph := benchmarkImpactGraph(512, 4)
 	symbol := "ProcessOrder"
@@ -433,4 +503,58 @@ func writeBenchmarkMainCommit(b *testing.B, store *gotstore.RepoStore, content s
 		b.Fatalf("write commit: %v", err)
 	}
 	return commitHash
+}
+
+func writeBenchmarkCommitWithFiles(
+	b *testing.B,
+	store *gotstore.RepoStore,
+	files map[string]string,
+	parents []object.Hash,
+	message string,
+	ts int64,
+) object.Hash {
+	b.Helper()
+
+	blobHashes := make(map[string]object.Hash, len(files))
+	for path, content := range files {
+		blobHash, err := store.Objects.WriteBlob(&object.Blob{Data: []byte(content)})
+		if err != nil {
+			b.Fatalf("write blob for %s: %v", path, err)
+		}
+		blobHashes[path] = blobHash
+	}
+
+	treeHash, err := buildTreeFromFiles(store.Objects, blobHashes)
+	if err != nil {
+		b.Fatalf("build tree: %v", err)
+	}
+	commitHash, err := store.Objects.WriteCommit(&object.CommitObj{
+		TreeHash:  treeHash,
+		Parents:   parents,
+		Author:    "bench",
+		Timestamp: ts,
+		Message:   message,
+	})
+	if err != nil {
+		b.Fatalf("write commit: %v", err)
+	}
+	return commitHash
+}
+
+func benchmarkSyntheticGoFiles(fileCount int) map[string]string {
+	files := make(map[string]string, fileCount)
+	for i := 0; i < fileCount; i++ {
+		pkg := i / 32
+		path := fmt.Sprintf("pkg%03d/file%03d.go", pkg, i)
+		files[path] = fmt.Sprintf("package pkg%03d\n\nfunc Helper%03d() int { return %d }\n", pkg, i, i)
+	}
+	return files
+}
+
+func cloneBenchmarkSyntheticFiles(src map[string]string) map[string]string {
+	cloned := make(map[string]string, len(src))
+	for path, content := range src {
+		cloned[path] = content
+	}
+	return cloned
 }
