@@ -66,7 +66,7 @@ Task 47 (GotHub UI: structural blame panel)
 
 ## Execution Tracker (Live)
 
-Updated: 2026-02-25 17:10 PST
+Updated: 2026-02-25 17:38 PST
 
 ### Completed
 
@@ -78,6 +78,8 @@ Updated: 2026-02-25 17:10 PST
 | 4 | complete | got | `4b916f1` | `go test ./pkg/object -run TestWritePackIndex -v`, `go test ./...` |
 | 5 | complete | got | `eed3d13` | `go test ./pkg/object -run 'TestReadPackIndex|TestReadPackIndexFromReader' -v`, `go test ./...` |
 | 6 | complete | got | `5c4f60f` | `go test ./pkg/object -run 'TestOfsDelta|TestBuildInsertOnlyDelta|TestPackWriterWriteOfsDelta' -v`, `go test ./...` |
+| 11 | complete | got | `c3b2d67` | `go test ./pkg/object -run TestStoreHasChecksPackedObjects -v`, `go test ./...` |
+| 13 | complete | gothub | `d678897` | `go test ./internal/jobs -run TestWorkerPool -v`, `go test ./...` |
 | 40 | complete | gothub | `2930c83` | `frontend/src/views/PRDetail.tsx` (`PRImpactSummary`, `summarizeDiff`) |
 | 41 | complete | gothub | `2930c83` | `frontend/src/views/PRDetail.tsx` (`SemverPanel`), `frontend/src/api/client.ts` (`getSemver`) |
 | 42 | complete | gothub | `2930c83` | `frontend/src/views/PRDetail.tsx` (`MergeGatePanel`), `internal/service/policy.go` (`entity_owner_approvals`) |
@@ -98,7 +100,7 @@ Updated: 2026-02-25 17:10 PST
 
 ### Remaining (Not Yet Implemented)
 
-- Tasks 8-34 are pending.
+- Open core gaps: 7, 8, 9, 10 (pack/gc hardening), 14 (incremental extraction), 24, 25, 26, 27 (merge-base perf/cache), 33, 34 (bench suites).
 - Tasks 35-39 are queued post-Phase-1 cloud multi-tenancy work.
 
 ---
