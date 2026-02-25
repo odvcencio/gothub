@@ -66,7 +66,7 @@ Task 47 (GotHub UI: structural blame panel)
 
 ## Execution Tracker (Live)
 
-Updated: 2026-02-25 17:45 PST
+Updated: 2026-02-25 17:52 PST
 
 ### Completed
 
@@ -97,6 +97,7 @@ Updated: 2026-02-25 17:45 PST
 | Task | Status | Notes |
 |------|--------|-------|
 | 7 | next | implement pack reader delta resolution (`OFS_DELTA` / `REF_DELTA`) |
+| 9 | partial | `got gc` now prunes packed loose objects after successful pack+idx write; reachable-set/delta tuning still open |
 | 14 | partial | unchanged-tree fast-path landed (`entity_versions` copied from parent commit instead of full extraction) |
 
 ### Remaining (Not Yet Implemented)
