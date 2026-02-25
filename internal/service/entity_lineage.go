@@ -67,11 +67,11 @@ func (s *EntityLineageService) indexCommitEntities(ctx context.Context, repoID i
 	if err == nil && done {
 		return nil
 	}
-	copied, err := s.copyParentVersionsIfTreeUnchanged(ctx, repoID, store, commitHash, commit)
+	handled, err := s.indexCommitEntitiesSingleParentIncremental(ctx, repoID, store, commitHash, commit)
 	if err != nil {
 		return err
 	}
-	if copied {
+	if handled {
 		return nil
 	}
 
@@ -80,31 +80,79 @@ func (s *EntityLineageService) indexCommitEntities(ctx context.Context, repoID i
 		return err
 	}
 
+	parentVersions, err := s.listParentEntityVersions(ctx, repoID, commit.Parents)
+	if err != nil {
+		return err
+	}
+	return s.persistEntitySnapshots(ctx, repoID, string(commitHash), snapshots, parentVersions)
+}
+
+func (s *EntityLineageService) indexCommitEntitiesSingleParentIncremental(ctx context.Context, repoID int64, store *gotstore.RepoStore, commitHash object.Hash, commit *object.CommitObj) (bool, error) {
+	if commit == nil || len(commit.Parents) != 1 {
+		return false, nil
+	}
+	parentHash := commit.Parents[0]
+	if parentHash == "" {
+		return false, nil
+	}
+
+	parentCommit, err := store.Objects.ReadCommit(parentHash)
+	if err != nil {
+		return false, err
+	}
+
+	parentVersions, err := s.db.ListEntityVersionsByCommit(ctx, repoID, string(parentHash))
+	if err != nil {
+		return false, err
+	}
+	if len(parentVersions) == 0 {
+		return false, nil
+	}
+
+	currentCommit := string(commitHash)
+	if parentCommit.TreeHash == commit.TreeHash {
+		if err := s.copyParentVersions(ctx, repoID, currentCommit, parentVersions, nil); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+
+	changedPaths, commitFilesByPath, err := changedFilesBetweenTrees(store.Objects, parentCommit.TreeHash, commit.TreeHash)
+	if err != nil {
+		return false, err
+	}
+
+	if err := s.copyParentVersions(ctx, repoID, currentCommit, parentVersions, changedPaths); err != nil {
+		return false, err
+	}
+	if len(changedPaths) == 0 {
+		return true, nil
+	}
+
+	changedSnapshots := collectEntitySnapshotsForChangedPaths(store.Objects, commitFilesByPath, changedPaths)
+	if err := s.persistEntitySnapshots(ctx, repoID, currentCommit, changedSnapshots, parentVersions); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *EntityLineageService) listParentEntityVersions(ctx context.Context, repoID int64, parents []object.Hash) ([]models.EntityVersion, error) {
 	parentVersions := make([]models.EntityVersion, 0)
-	for _, p := range commit.Parents {
+	for _, p := range parents {
 		versions, err := s.db.ListEntityVersionsByCommit(ctx, repoID, string(p))
 		if err != nil {
-			return err
+			return nil, err
 		}
 		parentVersions = append(parentVersions, versions...)
 	}
+	return parentVersions, nil
+}
 
-	byBody := make(map[string][]string)
-	bySig := make(map[string][]string)
-	for i := range parentVersions {
-		v := parentVersions[i]
-		if strings.TrimSpace(v.StableID) == "" {
-			continue
-		}
-		if strings.TrimSpace(v.BodyHash) != "" {
-			appendUniqueString(byBody, v.BodyHash, v.StableID)
-		}
-		appendUniqueString(bySig, signatureKey(v.Name, v.DeclKind, v.Receiver), v.StableID)
-	}
-
+func (s *EntityLineageService) persistEntitySnapshots(ctx context.Context, repoID int64, commitHash string, snapshots []entitySnapshot, parentVersions []models.EntityVersion) error {
+	byBody, bySig := buildStableIDLookup(parentVersions)
 	for i := range snapshots {
 		snap := snapshots[i]
-		stableID := pickStableID(repoID, string(commitHash), snap, byBody, bySig)
+		stableID := pickStableID(repoID, commitHash, snap, byBody, bySig)
 
 		if err := s.db.UpsertEntityIdentity(ctx, &models.EntityIdentity{
 			RepoID:          repoID,
@@ -112,8 +160,8 @@ func (s *EntityLineageService) indexCommitEntities(ctx context.Context, repoID i
 			Name:            snap.Name,
 			DeclKind:        snap.DeclKind,
 			Receiver:        snap.Receiver,
-			FirstSeenCommit: string(commitHash),
-			LastSeenCommit:  string(commitHash),
+			FirstSeenCommit: commitHash,
+			LastSeenCommit:  commitHash,
 		}); err != nil {
 			return err
 		}
@@ -121,7 +169,7 @@ func (s *EntityLineageService) indexCommitEntities(ctx context.Context, repoID i
 		if err := s.db.SetEntityVersion(ctx, &models.EntityVersion{
 			RepoID:     repoID,
 			StableID:   stableID,
-			CommitHash: string(commitHash),
+			CommitHash: commitHash,
 			Path:       snap.Path,
 			EntityHash: snap.EntityHash,
 			BodyHash:   snap.BodyHash,
@@ -135,42 +183,22 @@ func (s *EntityLineageService) indexCommitEntities(ctx context.Context, repoID i
 	return nil
 }
 
-func (s *EntityLineageService) copyParentVersionsIfTreeUnchanged(ctx context.Context, repoID int64, store *gotstore.RepoStore, commitHash object.Hash, commit *object.CommitObj) (bool, error) {
-	if commit == nil || len(commit.Parents) != 1 {
-		return false, nil
-	}
-	parentHash := commit.Parents[0]
-	if parentHash == "" {
-		return false, nil
-	}
-
-	parentCommit, err := store.Objects.ReadCommit(parentHash)
-	if err != nil {
-		return false, err
-	}
-	if parentCommit.TreeHash != commit.TreeHash {
-		return false, nil
-	}
-
-	parentVersions, err := s.db.ListEntityVersionsByCommit(ctx, repoID, string(parentHash))
-	if err != nil {
-		return false, err
-	}
-	if len(parentVersions) == 0 {
-		return false, nil
-	}
-
-	currentCommit := string(commitHash)
+func (s *EntityLineageService) copyParentVersions(ctx context.Context, repoID int64, commitHash string, parentVersions []models.EntityVersion, changedPaths map[string]struct{}) error {
 	for i := range parentVersions {
 		parentVersion := parentVersions[i]
 		if strings.TrimSpace(parentVersion.StableID) == "" {
 			continue
 		}
+		if changedPaths != nil {
+			if _, changed := changedPaths[parentVersion.Path]; changed {
+				continue
+			}
+		}
 
 		if err := s.db.SetEntityVersion(ctx, &models.EntityVersion{
 			RepoID:     repoID,
 			StableID:   parentVersion.StableID,
-			CommitHash: currentCommit,
+			CommitHash: commitHash,
 			Path:       parentVersion.Path,
 			EntityHash: parentVersion.EntityHash,
 			BodyHash:   parentVersion.BodyHash,
@@ -178,7 +206,7 @@ func (s *EntityLineageService) copyParentVersionsIfTreeUnchanged(ctx context.Con
 			DeclKind:   parentVersion.DeclKind,
 			Receiver:   parentVersion.Receiver,
 		}); err != nil {
-			return false, err
+			return err
 		}
 
 		if err := s.db.UpsertEntityIdentity(ctx, &models.EntityIdentity{
@@ -188,13 +216,82 @@ func (s *EntityLineageService) copyParentVersionsIfTreeUnchanged(ctx context.Con
 			DeclKind:        parentVersion.DeclKind,
 			Receiver:        parentVersion.Receiver,
 			FirstSeenCommit: parentVersion.CommitHash,
-			LastSeenCommit:  currentCommit,
+			LastSeenCommit:  commitHash,
 		}); err != nil {
-			return false, err
+			return err
+		}
+	}
+	return nil
+}
+
+func buildStableIDLookup(parentVersions []models.EntityVersion) (map[string][]string, map[string][]string) {
+	byBody := make(map[string][]string)
+	bySig := make(map[string][]string)
+	for i := range parentVersions {
+		v := parentVersions[i]
+		if strings.TrimSpace(v.StableID) == "" {
+			continue
+		}
+		if strings.TrimSpace(v.BodyHash) != "" {
+			appendUniqueString(byBody, v.BodyHash, v.StableID)
+		}
+		appendUniqueString(bySig, signatureKey(v.Name, v.DeclKind, v.Receiver), v.StableID)
+	}
+	return byBody, bySig
+}
+
+func changedFilesBetweenTrees(store *object.Store, parentTreeHash, commitTreeHash object.Hash) (map[string]struct{}, map[string]FileEntry, error) {
+	parentFiles, err := flattenTree(store, parentTreeHash, "")
+	if err != nil {
+		return nil, nil, err
+	}
+	commitFiles, err := flattenTree(store, commitTreeHash, "")
+	if err != nil {
+		return nil, nil, err
+	}
+
+	parentFilesByPath := fileEntriesByPath(parentFiles)
+	commitFilesByPath := fileEntriesByPath(commitFiles)
+	changedPaths := make(map[string]struct{})
+
+	for path, commitFile := range commitFilesByPath {
+		parentFile, ok := parentFilesByPath[path]
+		if !ok || parentFile.BlobHash != commitFile.BlobHash || parentFile.EntityListHash != commitFile.EntityListHash {
+			changedPaths[path] = struct{}{}
+		}
+	}
+	for path := range parentFilesByPath {
+		if _, ok := commitFilesByPath[path]; !ok {
+			changedPaths[path] = struct{}{}
 		}
 	}
 
-	return true, nil
+	return changedPaths, commitFilesByPath, nil
+}
+
+func fileEntriesByPath(files []FileEntry) map[string]FileEntry {
+	byPath := make(map[string]FileEntry, len(files))
+	for i := range files {
+		byPath[files[i].Path] = files[i]
+	}
+	return byPath
+}
+
+func collectEntitySnapshotsForChangedPaths(store *object.Store, commitFilesByPath map[string]FileEntry, changedPaths map[string]struct{}) []entitySnapshot {
+	paths := make([]string, 0, len(changedPaths))
+	for path := range changedPaths {
+		if _, exists := commitFilesByPath[path]; exists {
+			paths = append(paths, path)
+		}
+	}
+	sort.Strings(paths)
+
+	snapshots := make([]entitySnapshot, 0)
+	for i := range paths {
+		path := paths[i]
+		snapshots = append(snapshots, collectEntitySnapshotsForFile(store, path, commitFilesByPath[path])...)
+	}
+	return snapshots
 }
 
 func collectEntitySnapshots(store *object.Store, treeHash object.Hash, prefix string) ([]entitySnapshot, error) {
@@ -216,59 +313,71 @@ func collectEntitySnapshots(store *object.Store, treeHash object.Hash, prefix st
 			snapshots = append(snapshots, child...)
 			continue
 		}
-		if e.EntityListHash != "" {
-			el, err := store.ReadEntityList(e.EntityListHash)
+		snapshots = append(snapshots, collectEntitySnapshotsForFile(store, fullPath, FileEntry{
+			Path:           fullPath,
+			BlobHash:       string(e.BlobHash),
+			EntityListHash: string(e.EntityListHash),
+		})...)
+	}
+	return snapshots, nil
+}
+
+func collectEntitySnapshotsForFile(store *object.Store, fullPath string, file FileEntry) []entitySnapshot {
+	if file.EntityListHash != "" {
+		el, err := store.ReadEntityList(object.Hash(file.EntityListHash))
+		if err != nil {
+			return nil
+		}
+		snapshots := make([]entitySnapshot, 0, len(el.EntityRefs))
+		for _, ref := range el.EntityRefs {
+			ent, err := store.ReadEntity(ref)
 			if err != nil {
 				continue
 			}
-			for _, ref := range el.EntityRefs {
-				ent, err := store.ReadEntity(ref)
-				if err != nil {
-					continue
-				}
-				bodyHash := strings.TrimSpace(string(ent.BodyHash))
-				if bodyHash == "" {
-					bodyHash = string(object.HashBytes(ent.Body))
-				}
-				snapshots = append(snapshots, entitySnapshot{
-					Path:       fullPath,
-					EntityHash: string(ref),
-					BodyHash:   bodyHash,
-					Kind:       ent.Kind,
-					Name:       ent.Name,
-					DeclKind:   ent.DeclKind,
-					Receiver:   ent.Receiver,
-				})
-			}
-			continue
-		}
-
-		blob, err := store.ReadBlob(e.BlobHash)
-		if err != nil {
-			continue
-		}
-		extracted, err := entity.Extract(fullPath, blob.Data)
-		if err != nil {
-			continue
-		}
-		for _, ent := range extracted.Entities {
-			bodyHash := strings.TrimSpace(ent.BodyHash)
+			bodyHash := strings.TrimSpace(string(ent.BodyHash))
 			if bodyHash == "" {
 				bodyHash = string(object.HashBytes(ent.Body))
 			}
-			syntheticHash := syntheticEntityHash(fullPath, ent.Name, ent.DeclKind, ent.Receiver, bodyHash)
 			snapshots = append(snapshots, entitySnapshot{
 				Path:       fullPath,
-				EntityHash: syntheticHash,
+				EntityHash: string(ref),
 				BodyHash:   bodyHash,
-				Kind:       extractedEntityKindToString(ent.Kind),
+				Kind:       ent.Kind,
 				Name:       ent.Name,
 				DeclKind:   ent.DeclKind,
 				Receiver:   ent.Receiver,
 			})
 		}
+		return snapshots
 	}
-	return snapshots, nil
+
+	blob, err := store.ReadBlob(object.Hash(file.BlobHash))
+	if err != nil {
+		return nil
+	}
+	extracted, err := entity.Extract(fullPath, blob.Data)
+	if err != nil {
+		return nil
+	}
+
+	snapshots := make([]entitySnapshot, 0, len(extracted.Entities))
+	for _, ent := range extracted.Entities {
+		bodyHash := strings.TrimSpace(ent.BodyHash)
+		if bodyHash == "" {
+			bodyHash = string(object.HashBytes(ent.Body))
+		}
+		syntheticHash := syntheticEntityHash(fullPath, ent.Name, ent.DeclKind, ent.Receiver, bodyHash)
+		snapshots = append(snapshots, entitySnapshot{
+			Path:       fullPath,
+			EntityHash: syntheticHash,
+			BodyHash:   bodyHash,
+			Kind:       extractedEntityKindToString(ent.Kind),
+			Name:       ent.Name,
+			DeclKind:   ent.DeclKind,
+			Receiver:   ent.Receiver,
+		})
+	}
+	return snapshots
 }
 
 func extractedEntityKindToString(k entity.EntityKind) string {
