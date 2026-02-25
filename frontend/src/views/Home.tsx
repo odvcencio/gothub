@@ -462,20 +462,48 @@ function Dashboard() {
         <div style={{ color: '#8b949e', padding: '40px 0', textAlign: 'center' }}>No repositories yet</div>
       ) : (
         <div style={{ border: '1px solid #30363d', borderRadius: '6px' }}>
-          {repos.map((r) => (
-            <a key={r.id} href={`/${r.owner_name || r.name}/${r.name}`}
-              style={{ display: 'block', padding: '12px 16px', borderBottom: '1px solid #21262d', color: '#58a6ff', fontWeight: 'bold' }}>
-              {r.owner_name && <span style={{ color: '#8b949e', fontWeight: 'normal' }}>{r.owner_name}/</span>}
-              {r.name}
-              {r.description && <span style={{ color: '#8b949e', fontWeight: 'normal', marginLeft: '12px', fontSize: '13px' }}>{r.description}</span>}
-              {r.parent_owner && r.parent_name && (
-                <span style={{ color: '#8b949e', fontWeight: 'normal', marginLeft: '12px', fontSize: '13px' }}>
-                  forked from {r.parent_owner}/{r.parent_name}
-                </span>
-              )}
-              {r.is_private && <span style={{ color: '#8b949e', fontWeight: 'normal', marginLeft: '8px', fontSize: '11px', border: '1px solid #30363d', padding: '1px 6px', borderRadius: '12px' }}>Private</span>}
-            </a>
-          ))}
+          {repos.map((r, idx) => {
+            const repoOwner = getRepoOwner(r);
+            const repoHref = repoOwner ? `/${repoOwner}/${r.name}` : `/${r.name}`;
+
+            return (
+              <div
+                key={r.id}
+                style={{
+                  display: 'block',
+                  padding: '12px 16px',
+                  borderBottom: idx === repos.length - 1 ? 'none' : '1px solid #21262d',
+                }}
+              >
+                <div style={{ marginBottom: '6px' }}>
+                  <a href={repoHref} style={{ color: '#58a6ff', fontWeight: 'bold', textDecoration: 'none' }}>
+                    {repoOwner && <span style={{ color: '#8b949e', fontWeight: 'normal' }}>{repoOwner}/</span>}
+                    {r.name}
+                  </a>
+                  {r.is_private && (
+                    <span style={{ color: '#8b949e', fontWeight: 'normal', marginLeft: '8px', fontSize: '11px', border: '1px solid #30363d', padding: '1px 6px', borderRadius: '12px' }}>
+                      Private
+                    </span>
+                  )}
+                </div>
+
+                {r.description && (
+                  <div style={{ color: '#8b949e', fontWeight: 'normal', fontSize: '13px' }}>
+                    {r.description}
+                  </div>
+                )}
+
+                {r.parent_owner && r.parent_name && (
+                  <div style={{ color: '#8b949e', fontWeight: 'normal', marginTop: '4px', fontSize: '13px' }}>
+                    forked from{' '}
+                    <a href={`/${r.parent_owner}/${r.parent_name}`} style={{ color: '#58a6ff', textDecoration: 'none' }}>
+                      {r.parent_owner}/{r.parent_name}
+                    </a>
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
     </div>

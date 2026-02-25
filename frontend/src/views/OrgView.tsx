@@ -95,44 +95,57 @@ export function OrgDetailView({ org }: Props) {
           <div style={{ color: '#8b949e', padding: '20px 0', fontSize: '14px' }}>No repositories yet</div>
         ) : (
           <div style={{ border: '1px solid #30363d', borderRadius: '6px' }}>
-            {repos.map((repo, idx) => (
-              <a
-                key={repo.id}
-                href={`/${repo.owner_name}/${repo.name}`}
-                style={{
-                  display: 'block',
-                  padding: '12px 16px',
-                  borderTop: idx === 0 ? 'none' : '1px solid #21262d',
-                  color: '#58a6ff',
-                  textDecoration: 'none',
-                  fontWeight: 'bold',
-                  fontSize: '14px',
-                }}
-              >
-                {repo.name}
-                {repo.is_private && (
-                  <span style={{
-                    color: '#8b949e',
-                    fontSize: '11px',
-                    fontWeight: 'normal',
-                    marginLeft: '8px',
-                    border: '1px solid #30363d',
-                    padding: '1px 6px',
-                    borderRadius: '12px',
-                  }}>Private</span>
-                )}
-                {repo.description && (
-                  <span style={{ color: '#8b949e', fontWeight: 'normal', marginLeft: '12px', fontSize: '13px' }}>
-                    {repo.description}
-                  </span>
-                )}
-                {repo.parent_owner && repo.parent_name && (
-                  <span style={{ color: '#8b949e', fontWeight: 'normal', marginLeft: '12px', fontSize: '13px' }}>
-                    forked from {repo.parent_owner}/{repo.parent_name}
-                  </span>
-                )}
-              </a>
-            ))}
+            {repos.map((repo, idx) => {
+              const repoOwner = repo.owner_name || org || '';
+              return (
+                <div
+                  key={repo.id}
+                  style={{
+                    display: 'block',
+                    padding: '12px 16px',
+                    borderTop: idx === 0 ? 'none' : '1px solid #21262d',
+                  }}
+                >
+                  <div style={{ marginBottom: '6px' }}>
+                    <a
+                      href={`/${repoOwner}/${repo.name}`}
+                      style={{
+                        color: '#58a6ff',
+                        textDecoration: 'none',
+                        fontWeight: 'bold',
+                        fontSize: '14px',
+                      }}
+                    >
+                      {repo.name}
+                    </a>
+                    {repo.is_private && (
+                      <span style={{
+                        color: '#8b949e',
+                        fontSize: '11px',
+                        fontWeight: 'normal',
+                        marginLeft: '8px',
+                        border: '1px solid #30363d',
+                        padding: '1px 6px',
+                        borderRadius: '12px',
+                      }}>Private</span>
+                    )}
+                  </div>
+                  {repo.description && (
+                    <div style={{ color: '#8b949e', fontWeight: 'normal', fontSize: '13px' }}>
+                      {repo.description}
+                    </div>
+                  )}
+                  {repo.parent_owner && repo.parent_name && (
+                    <div style={{ color: '#8b949e', fontWeight: 'normal', marginTop: '4px', fontSize: '13px' }}>
+                      forked from{' '}
+                      <a href={`/${repo.parent_owner}/${repo.parent_name}`} style={{ color: '#58a6ff', textDecoration: 'none' }}>
+                        {repo.parent_owner}/{repo.parent_name}
+                      </a>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
