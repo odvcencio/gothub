@@ -348,8 +348,18 @@ func commitToInfo(hash string, c *object.CommitObj) *CommitInfo {
 	}
 }
 
+type MergeBaseOptions struct {
+	GenerationLookup func(hash object.Hash) (uint64, bool, error)
+}
+
 // FindMergeBase finds the first common ancestor of two commits using BFS.
 func FindMergeBase(store *object.Store, a, b object.Hash) (object.Hash, error) {
+	return FindMergeBaseWithOptions(store, a, b, MergeBaseOptions{})
+}
+
+// FindMergeBaseWithOptions finds the first common ancestor and can use
+// persisted generation metadata when available.
+func FindMergeBaseWithOptions(store *object.Store, a, b object.Hash, opts MergeBaseOptions) (object.Hash, error) {
 	if a == "" || b == "" {
 		return "", fmt.Errorf("no common ancestor")
 	}
@@ -361,10 +371,11 @@ func FindMergeBase(store *object.Store, a, b object.Hash) (object.Hash, error) {
 	}
 
 	state := &mergeBaseSearchState{
-		store:       store,
-		commits:     make(map[object.Hash]*object.CommitObj),
-		generations: make(map[object.Hash]uint64),
-		visiting:    make(map[object.Hash]bool),
+		store:            store,
+		commits:          make(map[object.Hash]*object.CommitObj),
+		generations:      make(map[object.Hash]uint64),
+		visiting:         make(map[object.Hash]bool),
+		generationLookup: opts.GenerationLookup,
 	}
 
 	genA, err := state.generation(a)
@@ -458,10 +469,11 @@ type mergeBaseQueueItem struct {
 }
 
 type mergeBaseSearchState struct {
-	store       *object.Store
-	commits     map[object.Hash]*object.CommitObj
-	generations map[object.Hash]uint64
-	visiting    map[object.Hash]bool
+	store            *object.Store
+	commits          map[object.Hash]*object.CommitObj
+	generations      map[object.Hash]uint64
+	visiting         map[object.Hash]bool
+	generationLookup func(hash object.Hash) (uint64, bool, error)
 }
 
 func (s *mergeBaseSearchState) readCommit(h object.Hash) (*object.CommitObj, error) {
@@ -479,6 +491,14 @@ func (s *mergeBaseSearchState) readCommit(h object.Hash) (*object.CommitObj, err
 func (s *mergeBaseSearchState) generation(h object.Hash) (uint64, error) {
 	if g, ok := s.generations[h]; ok {
 		return g, nil
+	}
+	if s.generationLookup != nil {
+		if g, ok, err := s.generationLookup(h); err != nil {
+			return 0, err
+		} else if ok && g > 0 {
+			s.generations[h] = g
+			return g, nil
+		}
 	}
 	if s.visiting[h] {
 		return 0, fmt.Errorf("commit graph cycle detected at %s", h)

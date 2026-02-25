@@ -331,6 +331,16 @@ CREATE TABLE IF NOT EXISTS hash_mapping (
 	UNIQUE (repo_id, got_hash)
 );
 
+CREATE TABLE IF NOT EXISTS commit_metadata (
+	repo_id INTEGER NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+	commit_hash TEXT NOT NULL,
+	generation INTEGER NOT NULL,
+	parent_count INTEGER NOT NULL DEFAULT 0,
+	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (repo_id, commit_hash)
+);
+
 CREATE TABLE IF NOT EXISTS merge_base_cache (
 	repo_id INTEGER NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
 	left_hash TEXT NOT NULL,
@@ -490,6 +500,7 @@ CREATE TABLE IF NOT EXISTS xref_edges (
 
 CREATE INDEX IF NOT EXISTS idx_hash_mapping_git ON hash_mapping(repo_id, git_hash);
 CREATE INDEX IF NOT EXISTS idx_hash_mapping_got ON hash_mapping(repo_id, got_hash);
+CREATE INDEX IF NOT EXISTS idx_commit_metadata_repo_generation ON commit_metadata(repo_id, generation DESC);
 CREATE INDEX IF NOT EXISTS idx_merge_base_cache_repo ON merge_base_cache(repo_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_magic_link_tokens_hash ON magic_link_tokens(token_hash);
 CREATE INDEX IF NOT EXISTS idx_magic_link_tokens_user ON magic_link_tokens(user_id, created_at DESC);
@@ -803,6 +814,13 @@ func (s *SQLiteDB) CloneRepoMetadata(ctx context.Context, sourceRepoID, targetRe
 			query: `INSERT INTO hash_mapping (repo_id, git_hash, got_hash, object_type)
 					SELECT ?, git_hash, got_hash, object_type
 					FROM hash_mapping
+					WHERE repo_id = ?`,
+			args: []any{targetRepoID, sourceRepoID},
+		},
+		{
+			query: `INSERT INTO commit_metadata (repo_id, commit_hash, generation, parent_count, created_at, updated_at)
+					SELECT ?, commit_hash, generation, parent_count, created_at, updated_at
+					FROM commit_metadata
 					WHERE repo_id = ?`,
 			args: []any{targetRepoID, sourceRepoID},
 		},
@@ -1998,6 +2016,56 @@ func (s *SQLiteDB) GetGitHash(ctx context.Context, repoID int64, gotHash string)
 	err := s.db.QueryRowContext(ctx,
 		`SELECT git_hash FROM hash_mapping WHERE repo_id = ? AND got_hash = ?`, repoID, gotHash).Scan(&h)
 	return h, err
+}
+
+func (s *SQLiteDB) UpsertCommitMetadata(ctx context.Context, metadata *models.CommitMetadata) error {
+	if metadata == nil {
+		return fmt.Errorf("commit metadata is nil")
+	}
+	commitHash := strings.TrimSpace(metadata.CommitHash)
+	if metadata.RepoID <= 0 || commitHash == "" {
+		return fmt.Errorf("commit metadata requires repo id and commit hash")
+	}
+	if metadata.Generation <= 0 {
+		return fmt.Errorf("commit metadata requires positive generation")
+	}
+	parentCount := metadata.ParentCount
+	if parentCount < 0 {
+		parentCount = 0
+	}
+
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO commit_metadata (repo_id, commit_hash, generation, parent_count)
+		 VALUES (?, ?, ?, ?)
+		 ON CONFLICT(repo_id, commit_hash) DO UPDATE SET
+			 generation = excluded.generation,
+			 parent_count = excluded.parent_count,
+			 updated_at = CURRENT_TIMESTAMP`,
+		metadata.RepoID, commitHash, metadata.Generation, parentCount,
+	)
+	return err
+}
+
+func (s *SQLiteDB) GetCommitMetadata(ctx context.Context, repoID int64, commitHash string) (*models.CommitMetadata, bool, error) {
+	commitHash = strings.TrimSpace(commitHash)
+	if repoID <= 0 || commitHash == "" {
+		return nil, false, nil
+	}
+
+	meta := &models.CommitMetadata{}
+	err := s.db.QueryRowContext(ctx,
+		`SELECT repo_id, commit_hash, generation, parent_count, created_at, updated_at
+		 FROM commit_metadata
+		 WHERE repo_id = ? AND commit_hash = ?`,
+		repoID, commitHash,
+	).Scan(&meta.RepoID, &meta.CommitHash, &meta.Generation, &meta.ParentCount, &meta.CreatedAt, &meta.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return meta, true, nil
 }
 
 func normalizeMergeBasePair(leftHash, rightHash string) (string, string) {

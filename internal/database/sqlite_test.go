@@ -306,6 +306,14 @@ func TestSQLiteCloneRepoMetadataCopiesRecords(t *testing.T) {
 	if err := db.SetMergeBaseCache(ctx, src.ID, gotHash, commitHash, gotHash); err != nil {
 		t.Fatal(err)
 	}
+	if err := db.UpsertCommitMetadata(ctx, &models.CommitMetadata{
+		RepoID:      src.ID,
+		CommitHash:  commitHash,
+		Generation:  42,
+		ParentCount: 2,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if err := db.SetCommitIndex(ctx, src.ID, commitHash, indexHash); err != nil {
 		t.Fatal(err)
 	}
@@ -405,6 +413,16 @@ func TestSQLiteCloneRepoMetadataCopiesRecords(t *testing.T) {
 	}
 	if !ok || gotDstBase != gotHash {
 		t.Fatalf("expected copied merge base cache %q, got ok=%v base=%q", gotHash, ok, gotDstBase)
+	}
+	gotMeta, ok, err := db.GetCommitMetadata(ctx, dst.ID, commitHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatalf("expected copied commit metadata for %s", commitHash)
+	}
+	if gotMeta.Generation != 42 || gotMeta.ParentCount != 2 {
+		t.Fatalf("expected copied commit metadata generation=42 parent_count=2, got %+v", gotMeta)
 	}
 
 	gotDstIndex, err := db.GetCommitIndex(ctx, dst.ID, commitHash)
@@ -729,6 +747,83 @@ func TestSQLiteSetHashMappingRemapsGitHash(t *testing.T) {
 
 	if _, err := db.GetGitHash(ctx, repo.ID, first.GotHash); err != sql.ErrNoRows {
 		t.Fatalf("expected old got hash mapping to be removed, got err=%v", err)
+	}
+}
+
+func TestSQLiteCommitMetadataUpsertAndGet(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	user := &models.User{Username: "alice", Email: "alice@example.com", PasswordHash: "x"}
+	if err := db.CreateUser(ctx, user); err != nil {
+		t.Fatal(err)
+	}
+	repo := &models.Repository{
+		OwnerUserID:   &user.ID,
+		Name:          "repo",
+		DefaultBranch: "main",
+		StoragePath:   "pending",
+	}
+	if err := db.CreateRepository(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+
+	commitHash := strings.Repeat("a", 64)
+	if err := db.UpsertCommitMetadata(ctx, &models.CommitMetadata{
+		RepoID:      repo.ID,
+		CommitHash:  commitHash,
+		Generation:  7,
+		ParentCount: 2,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	meta, ok, err := db.GetCommitMetadata(ctx, repo.ID, commitHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("expected commit metadata hit")
+	}
+	if meta.Generation != 7 || meta.ParentCount != 2 {
+		t.Fatalf("expected generation=7 parent_count=2, got %+v", meta)
+	}
+
+	if err := db.UpsertCommitMetadata(ctx, &models.CommitMetadata{
+		RepoID:      repo.ID,
+		CommitHash:  commitHash,
+		Generation:  9,
+		ParentCount: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	meta, ok, err = db.GetCommitMetadata(ctx, repo.ID, commitHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("expected commit metadata hit after upsert")
+	}
+	if meta.Generation != 9 || meta.ParentCount != 1 {
+		t.Fatalf("expected upserted generation=9 parent_count=1, got %+v", meta)
+	}
+
+	_, ok, err = db.GetCommitMetadata(ctx, repo.ID, strings.Repeat("b", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatal("expected commit metadata miss")
 	}
 }
 

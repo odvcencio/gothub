@@ -126,6 +126,8 @@ type DB interface {
 	SetHashMappings(ctx context.Context, mappings []models.HashMapping) error
 	GetGotHash(ctx context.Context, repoID int64, gitHash string) (string, error)
 	GetGitHash(ctx context.Context, repoID int64, gotHash string) (string, error)
+	UpsertCommitMetadata(ctx context.Context, metadata *models.CommitMetadata) error
+	GetCommitMetadata(ctx context.Context, repoID int64, commitHash string) (*models.CommitMetadata, bool, error)
 	SetMergeBaseCache(ctx context.Context, repoID int64, leftHash, rightHash, baseHash string) error
 	GetMergeBaseCache(ctx context.Context, repoID int64, leftHash, rightHash string) (string, bool, error)
 	EnqueueIndexingJob(ctx context.Context, job *models.IndexingJob) error

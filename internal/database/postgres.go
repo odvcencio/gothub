@@ -328,6 +328,16 @@ CREATE TABLE IF NOT EXISTS hash_mapping (
 	UNIQUE (repo_id, got_hash)
 );
 
+CREATE TABLE IF NOT EXISTS commit_metadata (
+	repo_id BIGINT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+	commit_hash TEXT NOT NULL,
+	generation BIGINT NOT NULL,
+	parent_count INTEGER NOT NULL DEFAULT 0,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	PRIMARY KEY (repo_id, commit_hash)
+);
+
 CREATE TABLE IF NOT EXISTS merge_base_cache (
 	repo_id BIGINT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
 	left_hash TEXT NOT NULL,
@@ -461,6 +471,7 @@ CREATE TABLE IF NOT EXISTS xref_edges (
 
 CREATE INDEX IF NOT EXISTS idx_hash_mapping_git ON hash_mapping(repo_id, git_hash);
 CREATE INDEX IF NOT EXISTS idx_hash_mapping_got ON hash_mapping(repo_id, got_hash);
+CREATE INDEX IF NOT EXISTS idx_commit_metadata_repo_generation ON commit_metadata(repo_id, generation DESC);
 CREATE INDEX IF NOT EXISTS idx_merge_base_cache_repo ON merge_base_cache(repo_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_magic_link_tokens_hash ON magic_link_tokens(token_hash);
 CREATE INDEX IF NOT EXISTS idx_magic_link_tokens_user ON magic_link_tokens(user_id, created_at DESC);
@@ -755,6 +766,13 @@ func (p *PostgresDB) CloneRepoMetadata(ctx context.Context, sourceRepoID, target
 			query: `INSERT INTO hash_mapping (repo_id, git_hash, got_hash, object_type)
 					SELECT $1, git_hash, got_hash, object_type
 					FROM hash_mapping
+					WHERE repo_id = $2`,
+			args: []any{targetRepoID, sourceRepoID},
+		},
+		{
+			query: `INSERT INTO commit_metadata (repo_id, commit_hash, generation, parent_count, created_at, updated_at)
+					SELECT $1, commit_hash, generation, parent_count, created_at, updated_at
+					FROM commit_metadata
 					WHERE repo_id = $2`,
 			args: []any{targetRepoID, sourceRepoID},
 		},
@@ -1862,6 +1880,56 @@ func (p *PostgresDB) GetGitHash(ctx context.Context, repoID int64, gotHash strin
 	err := p.db.QueryRowContext(ctx,
 		`SELECT git_hash FROM hash_mapping WHERE repo_id = $1 AND got_hash = $2`, repoID, gotHash).Scan(&h)
 	return h, err
+}
+
+func (p *PostgresDB) UpsertCommitMetadata(ctx context.Context, metadata *models.CommitMetadata) error {
+	if metadata == nil {
+		return fmt.Errorf("commit metadata is nil")
+	}
+	commitHash := strings.TrimSpace(metadata.CommitHash)
+	if metadata.RepoID <= 0 || commitHash == "" {
+		return fmt.Errorf("commit metadata requires repo id and commit hash")
+	}
+	if metadata.Generation <= 0 {
+		return fmt.Errorf("commit metadata requires positive generation")
+	}
+	parentCount := metadata.ParentCount
+	if parentCount < 0 {
+		parentCount = 0
+	}
+
+	_, err := p.db.ExecContext(ctx,
+		`INSERT INTO commit_metadata (repo_id, commit_hash, generation, parent_count)
+		 VALUES ($1, $2, $3, $4)
+		 ON CONFLICT (repo_id, commit_hash) DO UPDATE SET
+			 generation = EXCLUDED.generation,
+			 parent_count = EXCLUDED.parent_count,
+			 updated_at = NOW()`,
+		metadata.RepoID, commitHash, metadata.Generation, parentCount,
+	)
+	return err
+}
+
+func (p *PostgresDB) GetCommitMetadata(ctx context.Context, repoID int64, commitHash string) (*models.CommitMetadata, bool, error) {
+	commitHash = strings.TrimSpace(commitHash)
+	if repoID <= 0 || commitHash == "" {
+		return nil, false, nil
+	}
+
+	meta := &models.CommitMetadata{}
+	err := p.db.QueryRowContext(ctx,
+		`SELECT repo_id, commit_hash, generation, parent_count, created_at, updated_at
+		 FROM commit_metadata
+		 WHERE repo_id = $1 AND commit_hash = $2`,
+		repoID, commitHash,
+	).Scan(&meta.RepoID, &meta.CommitHash, &meta.Generation, &meta.ParentCount, &meta.CreatedAt, &meta.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return meta, true, nil
 }
 
 func (p *PostgresDB) SetMergeBaseCache(ctx context.Context, repoID int64, leftHash, rightHash, baseHash string) error {

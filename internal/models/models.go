@@ -242,6 +242,15 @@ type HashMapping struct {
 	ObjectType string `json:"object_type"`
 }
 
+type CommitMetadata struct {
+	RepoID      int64     `json:"repo_id"`
+	CommitHash  string    `json:"commit_hash"`
+	Generation  int64     `json:"generation"`
+	ParentCount int       `json:"parent_count"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
 type IndexJobType string
 
 const (

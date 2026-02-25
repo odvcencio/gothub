@@ -579,7 +579,31 @@ func (s *PRService) findMergeBaseCached(ctx context.Context, repoID int64, store
 		}
 	}
 
-	baseHash, err := FindMergeBase(store, left, right)
+	var opts MergeBaseOptions
+	if repoID > 0 && s.db != nil {
+		type generationLookupResult struct {
+			generation uint64
+			ok         bool
+			err        error
+		}
+		lookupCache := make(map[object.Hash]generationLookupResult)
+		opts.GenerationLookup = func(hash object.Hash) (uint64, bool, error) {
+			if cached, ok := lookupCache[hash]; ok {
+				return cached.generation, cached.ok, cached.err
+			}
+			meta, ok, err := s.db.GetCommitMetadata(ctx, repoID, string(hash))
+			result := generationLookupResult{ok: ok, err: err}
+			if err == nil && ok && meta.Generation > 0 {
+				result.generation = uint64(meta.Generation)
+			} else {
+				result.ok = false
+			}
+			lookupCache[hash] = result
+			return result.generation, result.ok, result.err
+		}
+	}
+
+	baseHash, err := FindMergeBaseWithOptions(store, left, right, opts)
 	if err != nil {
 		return "", err
 	}

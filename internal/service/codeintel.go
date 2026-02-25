@@ -109,6 +109,9 @@ func (s *CodeIntelService) EnsureCommitIndexed(ctx context.Context, repoID int64
 	if strings.TrimSpace(string(commitHash)) == "" || store == nil {
 		return nil
 	}
+	if err := s.persistCommitMetadata(ctx, repoID, store, commitHash); err != nil {
+		return err
+	}
 
 	key := ""
 	if strings.TrimSpace(cacheKey) != "" {
@@ -143,6 +146,76 @@ func (s *CodeIntelService) EnsureCommitIndexed(ctx context.Context, repoID int64
 		s.setCachedIndex(key, idx)
 	}
 	return nil
+}
+
+func (s *CodeIntelService) persistCommitMetadata(ctx context.Context, repoID int64, store *gotstore.RepoStore, commitHash object.Hash) error {
+	if s.db == nil || repoID <= 0 || store == nil || strings.TrimSpace(string(commitHash)) == "" {
+		return nil
+	}
+	_, _, err := s.computeAndPersistCommitGeneration(ctx, repoID, store.Objects, commitHash, make(map[object.Hash]uint64), make(map[object.Hash]int), make(map[object.Hash]bool))
+	return err
+}
+
+func (s *CodeIntelService) computeAndPersistCommitGeneration(
+	ctx context.Context,
+	repoID int64,
+	objects *object.Store,
+	commitHash object.Hash,
+	generations map[object.Hash]uint64,
+	parentCounts map[object.Hash]int,
+	visiting map[object.Hash]bool,
+) (uint64, int, error) {
+	if g, ok := generations[commitHash]; ok {
+		return g, parentCounts[commitHash], nil
+	}
+	if visiting[commitHash] {
+		return 0, 0, fmt.Errorf("commit graph cycle detected at %s", commitHash)
+	}
+	visiting[commitHash] = true
+	defer delete(visiting, commitHash)
+
+	if meta, ok, err := s.db.GetCommitMetadata(ctx, repoID, string(commitHash)); err != nil {
+		return 0, 0, err
+	} else if ok && meta.Generation > 0 {
+		gen := uint64(meta.Generation)
+		generations[commitHash] = gen
+		parentCounts[commitHash] = meta.ParentCount
+		return gen, meta.ParentCount, nil
+	}
+
+	commit, err := objects.ReadCommit(commitHash)
+	if err != nil {
+		return 0, 0, fmt.Errorf("read commit %s: %w", commitHash, err)
+	}
+
+	maxParent := uint64(0)
+	parentCount := 0
+	for _, parent := range commit.Parents {
+		if parent == "" {
+			continue
+		}
+		parentCount++
+		parentGen, _, err := s.computeAndPersistCommitGeneration(ctx, repoID, objects, parent, generations, parentCounts, visiting)
+		if err != nil {
+			return 0, 0, err
+		}
+		if parentGen > maxParent {
+			maxParent = parentGen
+		}
+	}
+
+	gen := maxParent + 1
+	if err := s.db.UpsertCommitMetadata(ctx, &models.CommitMetadata{
+		RepoID:      repoID,
+		CommitHash:  string(commitHash),
+		Generation:  int64(gen),
+		ParentCount: parentCount,
+	}); err != nil {
+		return 0, 0, err
+	}
+	generations[commitHash] = gen
+	parentCounts[commitHash] = parentCount
+	return gen, parentCount, nil
 }
 
 func (s *CodeIntelService) buildIndexFromStore(store *gotstore.RepoStore, commitHash object.Hash, indexRoot string) (*model.Index, error) {

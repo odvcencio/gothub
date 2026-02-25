@@ -564,6 +564,39 @@ func TestFindMergeBaseCachedPersistsAndRecoversFromStaleEntry(t *testing.T) {
 	}
 }
 
+func TestFindMergeBaseCachedUsesPersistedGenerationMetadata(t *testing.T) {
+	ctx, prSvc, store, repo := setupPRMergeTestService(t)
+
+	root := writeMainCommit(t, store, "package main\n\nfunc V() int { return 0 }\n", nil, "root", 1700002000)
+	ghost := object.Hash(strings.Repeat("f", 64))
+	left := writeMainCommit(t, store, "package main\n\nfunc V() int { return 1 }\n", []object.Hash{root, ghost}, "left", 1700002010)
+	right := writeMainCommit(t, store, "package main\n\nfunc V() int { return 2 }\n", []object.Hash{root}, "right", 1700002020)
+
+	// Without persisted generations this fails because one parent hash does not exist.
+	if _, err := FindMergeBase(store.Objects, left, right); err == nil {
+		t.Fatal("expected merge-base lookup without generation metadata to fail")
+	}
+
+	for _, meta := range []*models.CommitMetadata{
+		{RepoID: repo.ID, CommitHash: string(root), Generation: 1, ParentCount: 0},
+		{RepoID: repo.ID, CommitHash: string(ghost), Generation: 1, ParentCount: 0},
+		{RepoID: repo.ID, CommitHash: string(right), Generation: 2, ParentCount: 1},
+		{RepoID: repo.ID, CommitHash: string(left), Generation: 3, ParentCount: 2},
+	} {
+		if err := prSvc.db.UpsertCommitMetadata(ctx, meta); err != nil {
+			t.Fatalf("UpsertCommitMetadata(%s): %v", meta.CommitHash, err)
+		}
+	}
+
+	base, err := prSvc.findMergeBaseCached(ctx, repo.ID, store.Objects, left, right)
+	if err != nil {
+		t.Fatalf("findMergeBaseCached: %v", err)
+	}
+	if base != root {
+		t.Fatalf("merge base = %s, want %s", base, root)
+	}
+}
+
 func setupPRMergeTestService(t *testing.T) (context.Context, *PRService, *gotstore.RepoStore, *models.Repository) {
 	t.Helper()
 
