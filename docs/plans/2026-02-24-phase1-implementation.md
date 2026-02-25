@@ -62,11 +62,16 @@ Task 47 (GotHub UI: structural blame panel)
   → Task 48 (GotHub UI: visual call graph)
     → Task 49 (GotHub UI: inline code intelligence hover/nav)
       → Task 50 (GotHub UX: demo onboarding repository flow)
+
+Task 51 (Docs: README correctness pass)
+  → Ensure cross-repo README claims/links reflect current architecture
+  → Prefer backlinking to gotreesitter where runtime/parser provenance is discussed
+  → Keep upstream C tree-sitter links only in gotreesitter docs where directly relevant
 ```
 
 ## Execution Tracker (Live)
 
-Updated: 2026-02-25 18:14 PST
+Updated: 2026-02-25 18:22 PST
 
 ### Completed
 
@@ -103,10 +108,11 @@ Updated: 2026-02-25 18:14 PST
 | 25 | partial | `FindMergeBase` now computes per-call generation numbers and ancestor fast-paths with traversal limits in `browse.go` |
 | 26 | partial | generation-pruned merge-base traversal landed with highest-generation common-ancestor selection |
 | 27 | partial | bounded in-memory merge-base pair cache added; DB-backed persistent cache still pending |
+| 51 | partial | cross-repo README correctness pass started; runtime/parser provenance links being normalized to gotreesitter backlinks |
 
 ### Remaining (Not Yet Implemented)
 
-- Open core gaps: 7, 8, 9, 10 (pack/gc hardening), 14 (full incremental extraction still pending), 24 (explicit commit generation persistence), 27 (persistent merge-base cache store/invalidation), 34 (GotHub benchmark breadth).
+- Open core gaps: 7, 8, 9, 10 (pack/gc hardening), 14 (full incremental extraction still pending), 24 (explicit commit generation persistence), 27 (persistent merge-base cache store/invalidation), 34 (GotHub benchmark breadth), 51 (final cross-repo README correctness sweep).
 - Tasks 35-39 are queued post-Phase-1 cloud multi-tenancy work.
 
 ---
