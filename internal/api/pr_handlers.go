@@ -54,6 +54,13 @@ func (s *Server) handleCreatePR(w http.ResponseWriter, r *http.Request) {
 	s.runAsync(r.Context(), "webhook pr opened", []any{"repo_id", repo.ID, "pr", pr.Number}, func(ctx context.Context) error {
 		return s.webhookSvc.EmitPullRequestEvent(ctx, repo.ID, "opened", pr)
 	})
+	s.publishRepoEvent(repo.ID, "pull_request.opened", map[string]any{
+		"number":        pr.Number,
+		"title":         pr.Title,
+		"state":         pr.State,
+		"source_branch": pr.SourceBranch,
+		"target_branch": pr.TargetBranch,
+	})
 
 	jsonResponse(w, http.StatusCreated, pr)
 }
@@ -225,6 +232,14 @@ func (s *Server) handleMergePR(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, map[string]string{
 		"merge_commit": string(mergeHash),
 		"status":       "merged",
+	})
+	s.publishRepoEvent(repo.ID, "pull_request.merged", map[string]any{
+		"number":        pr.Number,
+		"title":         pr.Title,
+		"state":         "merged",
+		"merge_commit":  string(mergeHash),
+		"source_branch": pr.SourceBranch,
+		"target_branch": pr.TargetBranch,
 	})
 
 	// Best-effort webhook emission after merge.

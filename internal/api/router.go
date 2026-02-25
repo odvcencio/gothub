@@ -42,6 +42,7 @@ type Server struct {
 	corsAllowedOrigins []string
 	clientIPResolver   clientIPResolver
 	adminRouteAccess   adminRouteAccess
+	realtime           *repoEventBroker
 	mux                *http.ServeMux
 	handler            http.Handler
 }
@@ -101,6 +102,7 @@ func NewServerWithOptions(db database.DB, authSvc *auth.Service, repoSvc *servic
 		corsAllowedOrigins: append([]string(nil), opts.CORSAllowedOrigins...),
 		clientIPResolver:   clientIPResolver,
 		adminRouteAccess:   newAdminRouteAccess(adminCIDRs, clientIPResolver.clientIPFromRequest),
+		realtime:           newRepoEventBroker(),
 		mux:                http.NewServeMux(),
 	}
 	s.routes()
@@ -173,6 +175,7 @@ func (s *Server) routes() {
 	// Repositories
 	s.mux.HandleFunc("POST /api/v1/repos", s.requireAuth(s.handleCreateRepo))
 	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}", s.handleGetRepo)
+	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/events", s.handleRepoEvents)
 	s.mux.HandleFunc("POST /api/v1/repos/{owner}/{repo}/forks", s.requireAuth(s.handleForkRepo))
 	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/forks", s.handleListRepoForks)
 	s.mux.HandleFunc("GET /api/v1/user/repos", s.requireAuth(s.handleListUserRepos))

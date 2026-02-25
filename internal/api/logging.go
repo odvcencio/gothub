@@ -150,6 +150,12 @@ func (s *statusRecorder) WriteHeader(code int) {
 	s.ResponseWriter.WriteHeader(code)
 }
 
+func (s *statusRecorder) Flush() {
+	if flusher, ok := s.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
 func generateRequestID() string {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {
