@@ -11,15 +11,72 @@ import {
   type TreeEntry,
 } from '../api/client';
 import { FileTree } from '../components/FileTree';
-import { CodeViewer } from '../components/CodeViewer';
+import { CodeViewer, type BlameEntry } from '../components/CodeViewer';
 import { MarkdownViewer } from '../components/MarkdownViewer';
 import { IndexStatusCard } from '../components/IndexStatusCard';
+
+/* Inject shimmer keyframe animation once */
+if (typeof document !== 'undefined' && !document.getElementById('gothub-shimmer')) {
+  const s = document.createElement('style');
+  s.id = 'gothub-shimmer';
+  s.textContent = '@keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }';
+  document.head.appendChild(s);
+}
 
 interface Props {
   owner?: string;
   repo?: string;
   ref?: string;
   path?: string;
+}
+
+function LoadingSkeleton({ lines = 8 }: { lines?: number }) {
+  return (
+    <div style={{ border: '1px solid #30363d', borderRadius: '6px', padding: '16px' }}>
+      {Array.from({ length: lines }).map((_, i) => (
+        <div key={i} style={{
+          height: '14px',
+          background: 'linear-gradient(90deg, #21262d 25%, #30363d 50%, #21262d 75%)',
+          backgroundSize: '200% 100%',
+          animation: 'shimmer 1.5s infinite',
+          borderRadius: '4px',
+          marginBottom: i < lines - 1 ? '8px' : 0,
+          width: `${60 + (i * 7) % 40}%`,
+        }} />
+      ))}
+    </div>
+  );
+}
+
+function ActionButton({ label, onClick }: { label: string; onClick: () => void }) {
+  return (
+    <button type="button" onClick={onClick} style={{
+      background: '#21262d', color: '#c9d1d9', border: '1px solid #30363d',
+      borderRadius: '6px', padding: '4px 10px', cursor: 'pointer', fontSize: '12px',
+    }}>
+      {label}
+    </button>
+  );
+}
+
+function copyToClipboard(text: string) {
+  navigator.clipboard.writeText(text).catch(() => {});
+}
+
+function downloadFile(filename: string, content: string) {
+  const b = new Blob([content], { type: 'text/plain' });
+  const url = URL.createObjectURL(b);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename.split('/').pop() || 'file';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 export function CodeView({ owner, repo, ref: gitRef, path }: Props) {
@@ -35,13 +92,25 @@ export function CodeView({ owner, repo, ref: gitRef, path }: Props) {
   const [indexStatusError, setIndexStatusError] = useState('');
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const [showRaw, setShowRaw] = useState(false);
+  const [showBlame, setShowBlame] = useState(false);
+
+  /* Task 8: responsive layout */
+  const [narrow, setNarrow] = useState(false);
+  useEffect(() => {
+    const check = () => setNarrow(window.innerWidth < 768);
+    check();
+    window.addEventListener('resize', check);
+    return () => window.removeEventListener('resize', check);
+  }, []);
+
   const appendNotice = (message: string) => {
     const next = message.trim();
     if (!next) return;
     setNotice((current) => {
       if (!current) return next;
       if (current.includes(next)) return current;
-      return `${current} • ${next}`;
+      return `${current} \u2022 ${next}`;
     });
   };
 
@@ -55,6 +124,8 @@ export function CodeView({ owner, repo, ref: gitRef, path }: Props) {
     setSelectedEntity(null);
     setBlame(null);
     setBlameLoading(false);
+    setShowRaw(false);
+    setShowBlame(false);
 
     // Determine if path is a blob or tree based on the URL
     const isBlobUrl = isBlobRoute();
@@ -143,6 +214,28 @@ export function CodeView({ owner, repo, ref: gitRef, path }: Props) {
   const showIndexStatus = indexStatusLoading || !!indexStatusError || !!indexStatus;
   const isMarkdown = isMarkdownPath(path || '');
 
+  /* Task 6: build blame data for CodeViewer from entities + per-entity blame */
+  const blameData: BlameEntry[] = [];
+  if (showBlame && entities && blame && selectedEntity) {
+    /* For V1, show blame annotation for the currently selected entity only */
+    const entry = entities.find((e) => e.key === selectedEntity.key);
+    if (entry && blame.commit_hash) {
+      blameData.push({
+        start_line: entry.start_line,
+        end_line: entry.end_line,
+        author: blame.author || 'unknown',
+        commit_hash: blame.commit_hash,
+      });
+    }
+  }
+
+  /* Task 5: permalink */
+  const handlePermalink = () => {
+    if (typeof window !== 'undefined') {
+      copyToClipboard(window.location.href);
+    }
+  };
+
   return (
     <div>
       {notice && (
@@ -150,19 +243,51 @@ export function CodeView({ owner, repo, ref: gitRef, path }: Props) {
           {notice}
         </div>
       )}
-      <div style={{ marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-        <a href={`/${owner}/${repo}`} style={{ color: '#58a6ff', fontWeight: 'bold' }}>{repo}</a>
-        {breadcrumbs.map((bc, i) => (
-          <span key={i}>
-            <span style={{ color: '#8b949e' }}>/</span>
-            {bc.href ? (
-              <a href={bc.href} style={{ color: '#58a6ff' }}>{bc.name}</a>
-            ) : (
-              <span style={{ color: '#f0f6fc' }}>{bc.name}</span>
-            )}
-          </span>
-        ))}
+
+      {/* Task 9: sticky file header */}
+      <div style={{
+        position: 'sticky', top: 0, zIndex: 10,
+        background: '#0d1117', paddingBottom: '8px',
+      }}>
+        <div style={{ marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+          <a href={`/${owner}/${repo}`} style={{ color: '#58a6ff', fontWeight: 'bold' }}>{repo}</a>
+          {breadcrumbs.map((bc, i) => (
+            <span key={i}>
+              <span style={{ color: '#8b949e' }}>/</span>
+              {bc.href ? (
+                <a href={bc.href} style={{ color: '#58a6ff' }}>{bc.name}</a>
+              ) : (
+                <span style={{ color: '#f0f6fc' }}>{bc.name}</span>
+              )}
+            </span>
+          ))}
+        </div>
+
+        {/* Task 5: file info bar + action buttons */}
+        {!isDir && blob && (
+          <div style={{
+            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+            padding: '8px 12px', background: '#161b22',
+            border: '1px solid #30363d', borderRadius: '6px 6px 0 0',
+            borderBottom: 'none', flexWrap: 'wrap', gap: '8px',
+          }}>
+            <div style={{ color: '#8b949e', fontSize: '12px', display: 'flex', gap: '12px' }}>
+              <span>{blob.content.split('\n').length} lines</span>
+              <span>{formatFileSize(new Blob([blob.content]).size)}</span>
+            </div>
+            <div style={{ display: 'flex', gap: '4px' }}>
+              <ActionButton label="Copy" onClick={() => copyToClipboard(blob.content)} />
+              <ActionButton label={showRaw ? 'Highlighted' : 'Raw'} onClick={() => setShowRaw(!showRaw)} />
+              <ActionButton label="Download" onClick={() => downloadFile(path || 'file', blob.content)} />
+              <ActionButton label="Permalink" onClick={handlePermalink} />
+              {!isMarkdown && (
+                <ActionButton label={showBlame ? 'Hide Blame' : 'Blame'} onClick={() => setShowBlame(!showBlame)} />
+              )}
+            </div>
+          </div>
+        )}
       </div>
+
       {showIndexStatus && (
         <div style={{ marginBottom: '16px', maxWidth: '420px' }}>
           <IndexStatusCard
@@ -178,13 +303,27 @@ export function CodeView({ owner, repo, ref: gitRef, path }: Props) {
         entries ? (
           <FileTree entries={entries} owner={owner} repo={repo} ref={gitRef} currentPath={path || ''} />
         ) : (
-          <div style={{ color: '#8b949e', padding: '20px' }}>Loading...</div>
+          <LoadingSkeleton lines={10} />
         )
       ) : (
         blob ? (
-          <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', gap: '16px' }}>
+          <div style={{ display: 'flex', flexDirection: narrow ? 'column' : 'row', flexWrap: 'wrap', alignItems: 'flex-start', gap: '16px' }}>
             <div style={{ flex: '1 1 640px', minWidth: 0 }}>
-              {isMarkdown ? (
+              {showRaw ? (
+                <pre style={{
+                  background: '#0d1117',
+                  border: '1px solid #30363d',
+                  borderRadius: !isDir && blob ? '0 0 6px 6px' : '6px',
+                  padding: '16px',
+                  fontSize: '13px',
+                  lineHeight: '1.5',
+                  overflowX: 'auto',
+                  color: '#c9d1d9',
+                  fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace',
+                }}>
+                  {blob.content}
+                </pre>
+              ) : isMarkdown ? (
                 <MarkdownViewer
                   filename={path || ''}
                   source={blob.content || ''}
@@ -201,6 +340,8 @@ export function CodeView({ owner, repo, ref: gitRef, path }: Props) {
                   repo={repo}
                   gitRef={gitRef}
                   path={path || ''}
+                  showBlame={showBlame}
+                  blameData={blameData.length > 0 ? blameData : undefined}
                 />
               )}
             </div>
@@ -210,10 +351,11 @@ export function CodeView({ owner, repo, ref: gitRef, path }: Props) {
               blame={blame}
               blameLoading={blameLoading}
               onSelect={(entity) => setSelectedEntity(entity)}
+              narrow={narrow}
             />
           </div>
         ) : (
-          <div style={{ color: '#8b949e', padding: '20px' }}>Loading...</div>
+          <LoadingSkeleton lines={16} />
         )
       )}
     </div>
@@ -269,15 +411,24 @@ function EntityBlamePanel({
   blame,
   blameLoading,
   onSelect,
+  narrow,
 }: {
   entities: FileEntity[] | null;
   selectedKey: string;
   blame: EntityBlameInfo | null;
   blameLoading: boolean;
   onSelect: (entity: FileEntity) => void;
+  narrow: boolean;
 }) {
   return (
-    <aside style={{ flex: '1 1 320px', width: '320px', maxWidth: '100%', border: '1px solid #30363d', borderRadius: '6px', overflow: 'hidden' }}>
+    <aside style={{
+      flex: '1 1 320px',
+      width: narrow ? '100%' : '320px',
+      maxWidth: '100%',
+      border: '1px solid #30363d',
+      borderRadius: '6px',
+      overflow: 'hidden',
+    }}>
       <div style={{ padding: '10px 12px', borderBottom: '1px solid #30363d', background: '#161b22' }}>
         <strong style={{ color: '#f0f6fc', fontSize: '13px' }}>Structural Blame</strong>
       </div>

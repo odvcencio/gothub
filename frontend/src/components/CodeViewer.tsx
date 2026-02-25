@@ -10,6 +10,13 @@ import {
 } from '../api/client';
 import { highlight, HighlightRange } from '../wasm/loader';
 
+export interface BlameEntry {
+  start_line: number;
+  end_line: number;
+  author: string;
+  commit_hash: string;
+}
+
 interface Props {
   filename: string;
   source: string;
@@ -17,6 +24,8 @@ interface Props {
   repo?: string;
   gitRef?: string;
   path?: string;
+  showBlame?: boolean;
+  blameData?: BlameEntry[];
 }
 
 interface SymbolToken {
@@ -56,15 +65,35 @@ const MAX_PANEL_DEFINITIONS = 8;
 const MAX_PANEL_REFERENCES = 16;
 const MAX_PANEL_HISTORY = 6;
 
-export function CodeViewer({ filename, source, owner, repo, gitRef, path }: Props) {
+export function CodeViewer({ filename, source, owner, repo, gitRef, path, showBlame, blameData }: Props) {
   const [ranges, setRanges] = useState<HighlightRange[]>([]);
   const [error, setError] = useState<string>('');
   const [activeToken, setActiveToken] = useState<SymbolToken | null>(null);
   const [pinned, setPinned] = useState(false);
   const [insights, setInsights] = useState<Record<string, SymbolInsight>>({});
 
+  const [highlightedLine, setHighlightedLine] = useState<number | null>(() => {
+    if (typeof window === 'undefined') return null;
+    const match = window.location.hash.match(/^#L(\d+)$/);
+    return match ? parseInt(match[1], 10) : null;
+  });
+
+  const [narrow, setNarrow] = useState(false);
+  useEffect(() => {
+    const check = () => setNarrow(window.innerWidth < 768);
+    check();
+    window.addEventListener('resize', check);
+    return () => window.removeEventListener('resize', check);
+  }, []);
+
+  const handleLineClick = (lineNum: number) => {
+    setHighlightedLine(lineNum);
+    window.history.replaceState(null, '', `${window.location.pathname}#L${lineNum}`);
+  };
+
   const currentPath = path || filename;
   const lineStarts = useMemo(() => buildLineStarts(source), [source]);
+  const lines = useMemo(() => source.split('\n'), [source]);
 
   useEffect(() => {
     let cancelled = false;
@@ -222,23 +251,115 @@ export function CodeViewer({ filename, source, owner, repo, gitRef, path }: Prop
     setActiveToken(null);
   };
 
+  /* Build per-line highlighted content */
+  const perLineContent = useMemo(() => {
+    if (error) {
+      return lines.map((line) => [line] as Array<string | JSX.Element>);
+    }
+    return buildPerLineContent(source, ranges, lineStarts, lines.length, { activeToken, intelligenceEnabled });
+  }, [source, ranges, lineStarts, lines.length, error, activeToken, intelligenceEnabled]);
+
   return (
-    <div style={{ display: 'flex', gap: '16px', alignItems: 'flex-start' }}>
+    <div style={{ display: 'flex', flexDirection: narrow ? 'column' : 'row', gap: '16px', alignItems: 'flex-start' }}>
       <div style={{ flex: 1, overflow: 'auto', minWidth: 0 }}>
-        <pre style={{ background: '#0d1117', border: '1px solid #30363d', borderRadius: '6px', padding: '16px', fontSize: '13px', lineHeight: '1.5', overflowX: 'auto' }}>
-          <code
-            onMouseOver={handleCodeMouseOver}
-            onClick={handleCodeClick}
-            onMouseLeave={() => {
-              if (!pinned) setActiveToken(null);
-            }}
-          >
-            {error ? source : renderHighlighted(source, ranges, { activeToken, intelligenceEnabled })}
-          </code>
-        </pre>
+        <div style={{
+          background: '#0d1117',
+          border: '1px solid #30363d',
+          borderRadius: '6px',
+          fontSize: '13px',
+          lineHeight: '1.5',
+          overflowX: 'auto',
+        }}>
+          <table style={{
+            borderCollapse: 'collapse',
+            borderSpacing: 0,
+            width: '100%',
+            fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace',
+            fontSize: '13px',
+            lineHeight: '1.5',
+          }}>
+            <tbody>
+              {lines.map((_, lineIdx) => {
+                const lineNum = lineIdx + 1;
+                const isHighlighted = highlightedLine === lineNum;
+                const rowBg = isHighlighted ? 'rgba(31, 111, 235, 0.15)' : undefined;
+
+                const blameEntry = showBlame && blameData
+                  ? blameData.find((b) => lineNum >= b.start_line && lineNum <= b.end_line)
+                  : null;
+                const isBlameGroupStart = blameEntry ? lineNum === blameEntry.start_line : false;
+
+                return (
+                  <tr key={lineNum} style={{ background: rowBg }} id={`L${lineNum}`}>
+                    {showBlame && (
+                      <td style={{
+                        userSelect: 'none',
+                        whiteSpace: 'nowrap',
+                        paddingLeft: '8px',
+                        paddingRight: '8px',
+                        fontSize: '11px',
+                        color: '#484f58',
+                        borderRight: '1px solid #21262d',
+                        verticalAlign: 'top',
+                        width: '1px',
+                        maxWidth: '140px',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                      }}>
+                        {isBlameGroupStart && blameEntry ? (
+                          <span title={`${blameEntry.author} ${blameEntry.commit_hash}`}>
+                            {blameEntry.author.split(' ')[0]} {blameEntry.commit_hash.slice(0, 7)}
+                          </span>
+                        ) : null}
+                      </td>
+                    )}
+                    <td
+                      onClick={() => handleLineClick(lineNum)}
+                      style={{
+                        userSelect: 'none',
+                        textAlign: 'right',
+                        paddingLeft: '12px',
+                        paddingRight: '12px',
+                        color: isHighlighted ? '#58a6ff' : '#484f58',
+                        cursor: 'pointer',
+                        verticalAlign: 'top',
+                        width: '1px',
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      {lineNum}
+                    </td>
+                    <td
+                      onMouseOver={handleCodeMouseOver}
+                      onClick={handleCodeClick}
+                      onMouseLeave={() => {
+                        if (!pinned) setActiveToken(null);
+                      }}
+                      style={{
+                        paddingLeft: '12px',
+                        paddingRight: '16px',
+                        whiteSpace: 'pre',
+                        color: '#c9d1d9',
+                      }}
+                    >
+                      {perLineContent[lineIdx]}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
       </div>
 
-      <aside style={{ width: '320px', maxWidth: '100%', flexShrink: 0, border: '1px solid #30363d', borderRadius: '6px', overflow: 'hidden' }}>
+      <aside style={{
+        width: narrow ? '100%' : '320px',
+        maxWidth: '100%',
+        flexShrink: 0,
+        border: '1px solid #30363d',
+        borderRadius: '6px',
+        overflow: 'hidden',
+      }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 12px', borderBottom: '1px solid #30363d', background: '#161b22' }}>
           <strong style={{ color: '#f0f6fc', fontSize: '13px' }}>Inline Intelligence</strong>
           {(activeToken || pinned) && (
@@ -415,22 +536,59 @@ const captureColors: Record<string, string> = {
   attribute: '#79c0ff',
 };
 
-function renderHighlighted(
+/**
+ * Build highlighted content split by line. Each element in the returned array
+ * is an array of string/JSX.Element fragments for that line.
+ */
+function buildPerLineContent(
   source: string,
   ranges: HighlightRange[],
-  options: {
-    activeToken: SymbolToken | null;
-    intelligenceEnabled: boolean;
-  },
-): Array<string | JSX.Element> {
-  if (ranges.length === 0) return [source];
+  lineStarts: number[],
+  lineCount: number,
+  options: { activeToken: SymbolToken | null; intelligenceEnabled: boolean },
+): Array<Array<string | JSX.Element>> {
+  const result: Array<Array<string | JSX.Element>> = Array.from({ length: lineCount }, () => []);
 
-  const result: Array<string | JSX.Element> = [];
+  if (ranges.length === 0) {
+    /* No highlight ranges -- just split source by newline */
+    const rawLines = source.split('\n');
+    for (let i = 0; i < rawLines.length; i++) {
+      result[i] = [rawLines[i]];
+    }
+    return result;
+  }
+
+  /* Walk through all ranges, emitting gap text and highlighted spans,
+     splitting at newline boundaries to fill the per-line buckets. */
   let pos = 0;
 
+  const pushText = (text: string, startLine: number) => {
+    let lineIdx = startLine;
+    const parts = text.split('\n');
+    for (let p = 0; p < parts.length; p++) {
+      if (p > 0) lineIdx++;
+      if (lineIdx < lineCount && parts[p].length > 0) {
+        result[lineIdx].push(parts[p]);
+      }
+    }
+  };
+
+  const lineAtOffset = (offset: number): number => {
+    let low = 0;
+    let high = lineStarts.length - 1;
+    while (low <= high) {
+      const mid = (low + high) >> 1;
+      if (lineStarts[mid] <= offset) low = mid + 1;
+      else high = mid - 1;
+    }
+    return Math.max(0, high);
+  };
+
   for (const r of ranges) {
+    /* Gap text before this range */
     if (r.start_byte > pos) {
-      result.push(source.slice(pos, r.start_byte));
+      const gapText = source.slice(pos, r.start_byte);
+      pushText(gapText, lineAtOffset(pos));
     }
 
     const token = source.slice(r.start_byte, r.end_byte);
@@ -440,28 +598,39 @@ function renderHighlighted(
       && options.activeToken.start === r.start_byte
       && options.activeToken.end === r.end_byte;
 
-    result.push(
-      <span
-        data-symbol={interactive ? token : undefined}
-        data-start={interactive ? String(r.start_byte) : undefined}
-        data-end={interactive ? String(r.end_byte) : undefined}
-        style={{
-          color,
-          cursor: interactive ? 'pointer' : 'text',
-          borderRadius: interactive ? '3px' : undefined,
-          background: isActive ? 'rgba(31, 111, 235, 0.18)' : undefined,
-          outline: isActive ? '1px solid rgba(31, 111, 235, 0.45)' : undefined,
-        }}
-      >
-        {token}
-      </span>,
-    );
+    /* If the token spans multiple lines, split it */
+    const tokenLines = token.split('\n');
+    let tokenLineIdx = lineAtOffset(r.start_byte);
+    for (let t = 0; t < tokenLines.length; t++) {
+      if (t > 0) tokenLineIdx++;
+      const part = tokenLines[t];
+      if (tokenLineIdx < lineCount && part.length > 0) {
+        result[tokenLineIdx].push(
+          <span
+            data-symbol={interactive ? token : undefined}
+            data-start={interactive ? String(r.start_byte) : undefined}
+            data-end={interactive ? String(r.end_byte) : undefined}
+            style={{
+              color,
+              cursor: interactive ? 'pointer' : 'text',
+              borderRadius: interactive ? '3px' : undefined,
+              background: isActive ? 'rgba(31, 111, 235, 0.18)' : undefined,
+              outline: isActive ? '1px solid rgba(31, 111, 235, 0.45)' : undefined,
+            }}
+          >
+            {part}
+          </span>,
+        );
+      }
+    }
 
     pos = r.end_byte;
   }
 
+  /* Trailing text after last range */
   if (pos < source.length) {
-    result.push(source.slice(pos));
+    const trailing = source.slice(pos);
+    pushText(trailing, lineAtOffset(pos));
   }
 
   return result;
