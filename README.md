@@ -34,6 +34,14 @@ cd frontend && npm ci && npm run build && cd ..
 go run ./cmd/gothub serve
 ```
 
+## WASM build size modes
+
+- `make wasm` stays backward compatible and uses `WASM_GO_TAGS=grammar_set_core`, `WASM_LDFLAGS="-s -w"`, and `-trimpath`.
+- Smaller production-targeted build (explicit core grammar mode): `make wasm-core`
+- Equivalent explicit form: `make wasm WASM_GRAMMAR_MODE=core`
+- Full grammar set (larger artifact): `make wasm-full` or `make wasm WASM_GRAMMAR_MODE=full`
+- Legacy tag override still works in default mode: `make wasm WASM_GO_TAGS="grammar_set_core some_other_tag"`
+
 ## Environment variables
 
 ### Core
