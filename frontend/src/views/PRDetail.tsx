@@ -13,6 +13,7 @@ import {
   listPRComments,
   listPRReviews,
   mergePR,
+  streamRepoEvents,
   type CheckRun,
   type DiffFile,
   type MergeGate,
@@ -21,6 +22,7 @@ import {
   type PRReview,
   type PullRequest,
   type RepoIndexStatus,
+  type RepoStreamEvent,
   type SemverRecommendation,
 } from '../api/client';
 import { EntityDiff } from '../components/EntityDiff';
@@ -91,6 +93,35 @@ export function PRDetailView({ owner, repo, number }: Props) {
     listPRComments(owner, repo, prNum).then(setComments).catch(e => appendNotice(e.message || 'failed to load comments'));
     listPRReviews(owner, repo, prNum).then(setReviews).catch(e => appendNotice(e.message || 'failed to load reviews'));
   }, [owner, repo, prNum]);
+
+  useEffect(() => {
+    if (!owner || !repo || !prNum) return;
+
+    const stream = streamRepoEvents(owner, repo, {
+      onEvent: (event: RepoStreamEvent) => {
+        const eventPRNumber = payloadNumber(event, 'number');
+        if (eventPRNumber == null || eventPRNumber !== prNum) return;
+
+        appendNotice(`Live update: ${event.type}`);
+        getPR(owner, repo, prNum).then(setPr).catch(e => appendNotice(e.message || 'failed to refresh pull request'));
+        if (event.type === 'pull_request.merged' || tab === 'merge') {
+          getMergeGate(owner, repo, prNum).then(setMergeGate).catch(e => appendNotice(e.message || 'failed to refresh merge gate'));
+          listPRChecks(owner, repo, prNum).then(setChecks).catch(e => appendNotice(e.message || 'failed to refresh checks'));
+          setMergePreview(null);
+          setMergePreviewError('');
+          setSemver(null);
+          setSemverError('');
+        }
+      },
+      onError: (streamErr: Error) => {
+        appendNotice(streamErr.message || 'repository event stream disconnected');
+      },
+    });
+
+    return () => {
+      stream.close();
+    };
+  }, [owner, repo, prNum, tab]);
 
   useEffect(() => {
     if (!owner || !repo || !prNum) return;
@@ -486,6 +517,18 @@ function summarizeDiff(files: DiffFile[]): ImpactSummary {
 function formatMentions(users: string[] | undefined): string {
   if (!users || users.length === 0) return '';
   return users.map(user => `@${user}`).join(', ');
+}
+
+function payloadNumber(event: RepoStreamEvent, key: string): number | null {
+  const value = event.payload?.[key];
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
 }
 
 function ConversationTab({ pr, comments, reviews, owner, repo, prNum, onCommentAdded, onReviewAdded, onError }: {

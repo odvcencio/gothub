@@ -392,6 +392,23 @@ export interface IssueComment {
   [key: string]: unknown;
 }
 
+export interface RepoStreamEvent {
+  type: string;
+  repo_id: number;
+  occurred_at?: string;
+  payload?: Record<string, unknown>;
+}
+
+export interface RepoEventStreamSubscription {
+  close: () => void;
+}
+
+interface RepoEventStreamHandlers {
+  onEvent: (event: RepoStreamEvent) => void;
+  onError?: (error: Error) => void;
+  onOpen?: () => void;
+}
+
 // Auth
 export const register = (username: string, email: string, password: string) =>
   request<AuthResponse>('POST', '/auth/register', { username, email, password });
@@ -638,3 +655,107 @@ export const listIssueComments = (owner: string, repo: string, number: number) =
   request<IssueComment[]>('GET', `/repos/${owner}/${repo}/issues/${number}/comments`);
 export const deleteIssueComment = (owner: string, repo: string, number: number, commentId: number) =>
   request<void>('DELETE', `/repos/${owner}/${repo}/issues/${number}/comments/${commentId}`);
+
+export function streamRepoEvents(owner: string, repo: string, handlers: RepoEventStreamHandlers): RepoEventStreamSubscription {
+  const controller = new AbortController();
+  const path = `/repos/${owner}/${repo}/events`;
+  const headers: Record<string, string> = { Accept: 'text/event-stream' };
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+
+  const emitError = (error: Error) => {
+    if (!controller.signal.aborted) {
+      handlers.onError?.(error);
+    }
+  };
+
+  const emitEvent = (eventName: string, dataLines: string[]) => {
+    if (dataLines.length === 0) return;
+    const raw = dataLines.join('\n');
+    try {
+      const parsed = JSON.parse(raw) as RepoStreamEvent;
+      const type = eventName || parsed.type || 'message';
+      handlers.onEvent({ ...parsed, type });
+    } catch {
+      emitError(new Error('failed to parse repository event stream payload'));
+    }
+  };
+
+  (async () => {
+    try {
+      const resp = await fetch(`${BASE}${path}`, {
+        method: 'GET',
+        headers,
+        signal: controller.signal,
+      });
+
+      if (resp.status === 401) {
+        setToken(null);
+        if (typeof window !== 'undefined' && !redirectingToLogin && !window.location.pathname.startsWith('/login')) {
+          redirectingToLogin = true;
+          window.location.assign(buildLoginRedirectPath());
+        }
+        throw new Error('authentication required');
+      }
+
+      if (!resp.ok) {
+        let message = resp.statusText;
+        try {
+          const payload = await resp.json() as { error?: string };
+          if (payload?.error) message = payload.error;
+        } catch {
+          // Keep status text fallback.
+        }
+        throw new Error(message || 'failed to open event stream');
+      }
+
+      if (!resp.body) {
+        throw new Error('event stream body missing');
+      }
+
+      handlers.onOpen?.();
+
+      const decoder = new TextDecoder();
+      const reader = resp.body.getReader();
+      let buffer = '';
+      let eventName = '';
+      let dataLines: string[] = [];
+
+      while (!controller.signal.aborted) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        while (true) {
+          const newline = buffer.indexOf('\n');
+          if (newline < 0) break;
+
+          let line = buffer.slice(0, newline);
+          buffer = buffer.slice(newline + 1);
+          if (line.endsWith('\r')) line = line.slice(0, -1);
+
+          if (line === '') {
+            emitEvent(eventName, dataLines);
+            eventName = '';
+            dataLines = [];
+            continue;
+          }
+          if (line.startsWith(':')) continue;
+          if (line.startsWith('event:')) {
+            eventName = line.slice('event:'.length).trim();
+            continue;
+          }
+          if (line.startsWith('data:')) {
+            dataLines.push(line.slice('data:'.length).trimStart());
+          }
+        }
+      }
+    } catch (err: any) {
+      if (controller.signal.aborted) return;
+      emitError(err instanceof Error ? err : new Error(err?.message || 'event stream failed'));
+    }
+  })();
+
+  return {
+    close: () => controller.abort(),
+  };
+}
