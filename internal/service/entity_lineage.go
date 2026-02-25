@@ -67,6 +67,13 @@ func (s *EntityLineageService) indexCommitEntities(ctx context.Context, repoID i
 	if err == nil && done {
 		return nil
 	}
+	copied, err := s.copyParentVersionsIfTreeUnchanged(ctx, repoID, store, commitHash, commit)
+	if err != nil {
+		return err
+	}
+	if copied {
+		return nil
+	}
 
 	snapshots, err := collectEntitySnapshots(store.Objects, commit.TreeHash, "")
 	if err != nil {
@@ -126,6 +133,68 @@ func (s *EntityLineageService) indexCommitEntities(ctx context.Context, repoID i
 		}
 	}
 	return nil
+}
+
+func (s *EntityLineageService) copyParentVersionsIfTreeUnchanged(ctx context.Context, repoID int64, store *gotstore.RepoStore, commitHash object.Hash, commit *object.CommitObj) (bool, error) {
+	if commit == nil || len(commit.Parents) != 1 {
+		return false, nil
+	}
+	parentHash := commit.Parents[0]
+	if parentHash == "" {
+		return false, nil
+	}
+
+	parentCommit, err := store.Objects.ReadCommit(parentHash)
+	if err != nil {
+		return false, err
+	}
+	if parentCommit.TreeHash != commit.TreeHash {
+		return false, nil
+	}
+
+	parentVersions, err := s.db.ListEntityVersionsByCommit(ctx, repoID, string(parentHash))
+	if err != nil {
+		return false, err
+	}
+	if len(parentVersions) == 0 {
+		return false, nil
+	}
+
+	currentCommit := string(commitHash)
+	for i := range parentVersions {
+		parentVersion := parentVersions[i]
+		if strings.TrimSpace(parentVersion.StableID) == "" {
+			continue
+		}
+
+		if err := s.db.SetEntityVersion(ctx, &models.EntityVersion{
+			RepoID:     repoID,
+			StableID:   parentVersion.StableID,
+			CommitHash: currentCommit,
+			Path:       parentVersion.Path,
+			EntityHash: parentVersion.EntityHash,
+			BodyHash:   parentVersion.BodyHash,
+			Name:       parentVersion.Name,
+			DeclKind:   parentVersion.DeclKind,
+			Receiver:   parentVersion.Receiver,
+		}); err != nil {
+			return false, err
+		}
+
+		if err := s.db.UpsertEntityIdentity(ctx, &models.EntityIdentity{
+			RepoID:          repoID,
+			StableID:        parentVersion.StableID,
+			Name:            parentVersion.Name,
+			DeclKind:        parentVersion.DeclKind,
+			Receiver:        parentVersion.Receiver,
+			FirstSeenCommit: parentVersion.CommitHash,
+			LastSeenCommit:  currentCommit,
+		}); err != nil {
+			return false, err
+		}
+	}
+
+	return true, nil
 }
 
 func collectEntitySnapshots(store *object.Store, treeHash object.Hash, prefix string) ([]entitySnapshot, error) {

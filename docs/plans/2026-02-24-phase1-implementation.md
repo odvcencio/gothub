@@ -66,7 +66,7 @@ Task 47 (GotHub UI: structural blame panel)
 
 ## Execution Tracker (Live)
 
-Updated: 2026-02-25 17:38 PST
+Updated: 2026-02-25 17:45 PST
 
 ### Completed
 
@@ -97,10 +97,11 @@ Updated: 2026-02-25 17:38 PST
 | Task | Status | Notes |
 |------|--------|-------|
 | 7 | next | implement pack reader delta resolution (`OFS_DELTA` / `REF_DELTA`) |
+| 14 | partial | unchanged-tree fast-path landed (`entity_versions` copied from parent commit instead of full extraction) |
 
 ### Remaining (Not Yet Implemented)
 
-- Open core gaps: 7, 8, 9, 10 (pack/gc hardening), 14 (incremental extraction), 24, 25, 26, 27 (merge-base perf/cache), 33, 34 (bench suites).
+- Open core gaps: 7, 8, 9, 10 (pack/gc hardening), 14 (full incremental extraction still pending), 24, 25, 26, 27 (merge-base perf/cache), 33, 34 (bench suites).
 - Tasks 35-39 are queued post-Phase-1 cloud multi-tenancy work.
 
 ---

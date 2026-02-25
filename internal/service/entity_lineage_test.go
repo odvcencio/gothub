@@ -138,6 +138,107 @@ func TestEntityLineageIndexCommitKeepsStableIDAcrossMoveAndEdit(t *testing.T) {
 	}
 }
 
+func TestEntityLineageIndexCommitCopiesParentVersionsWhenTreeUnchanged(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	db, err := database.OpenSQLite(filepath.Join(tmpDir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	user := &models.User{Username: "alice", Email: "alice@example.com", PasswordHash: "x"}
+	if err := db.CreateUser(ctx, user); err != nil {
+		t.Fatal(err)
+	}
+	repo := &models.Repository{
+		OwnerUserID:   &user.ID,
+		Name:          "repo",
+		DefaultBranch: "main",
+		StoragePath:   filepath.Join(tmpDir, "repo"),
+	}
+	if err := db.CreateRepository(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := gotstore.Open(repo.StoragePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	blobHash, err := store.Objects.WriteBlob(&object.Blob{
+		Data: []byte("package main\n\nfunc ProcessOrder() int { return 1 }\n"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	treeHash, err := store.Objects.WriteTree(&object.TreeObj{
+		Entries: []object.TreeEntry{{Name: "main.go", BlobHash: blobHash}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit1Hash, err := store.Objects.WriteCommit(&object.CommitObj{
+		TreeHash:  treeHash,
+		Author:    "Alice <alice@example.com>",
+		Timestamp: 1700000000,
+		Message:   "initial",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit2Hash, err := store.Objects.WriteCommit(&object.CommitObj{
+		TreeHash:  treeHash,
+		Parents:   []object.Hash{commit1Hash},
+		Author:    "Alice <alice@example.com>",
+		Timestamp: 1700000100,
+		Message:   "no code changes",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	lineage := NewEntityLineageService(db)
+	if err := lineage.IndexCommit(ctx, repo.ID, store, commit2Hash); err != nil {
+		t.Fatalf("index lineage: %v", err)
+	}
+
+	versions1, err := db.ListEntityVersionsByCommit(ctx, repo.ID, string(commit1Hash))
+	if err != nil {
+		t.Fatal(err)
+	}
+	versions2, err := db.ListEntityVersionsByCommit(ctx, repo.ID, string(commit2Hash))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(versions1) == 0 {
+		t.Fatal("expected parent commit to have entity versions")
+	}
+	if len(versions2) != len(versions1) {
+		t.Fatalf("expected copied versions count %d, got %d", len(versions1), len(versions2))
+	}
+
+	stable1, err := processOrderStableID(ctx, db, repo.ID, string(commit1Hash))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stable2, err := processOrderStableID(ctx, db, repo.ID, string(commit2Hash))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(stable1) == "" || strings.TrimSpace(stable2) == "" {
+		t.Fatalf("expected non-empty stable IDs, got %q and %q", stable1, stable2)
+	}
+	if stable1 != stable2 {
+		t.Fatalf("expected unchanged-tree commit to keep stable id, got %q vs %q", stable1, stable2)
+	}
+}
+
 func processOrderStableID(ctx context.Context, db database.DB, repoID int64, commitHash string) (string, error) {
 	versions, err := db.ListEntityVersionsByCommit(ctx, repoID, commitHash)
 	if err != nil {
