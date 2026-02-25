@@ -7,7 +7,9 @@ services:
       GOTHUB_DB_DRIVER: postgres
       GOTHUB_DB_DSN: postgres://gothub:gothub@postgres:5432/gothub?sslmode=disable
       GOTHUB_STORAGE_PATH: /data/repos
+      # Local/dev fallback secret satisfies startup validation.
       GOTHUB_JWT_SECRET: ${GOTHUB_JWT_SECRET:-dev-jwt-secret-change-this}
+      # Keep password auth enabled for first-run local onboarding.
       GOTHUB_ENABLE_PASSWORD_AUTH: ${GOTHUB_ENABLE_PASSWORD_AUTH:-true}
     volumes:
       - repo-data:/data/repos

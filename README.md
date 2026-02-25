@@ -19,7 +19,7 @@ docker compose up --build
 
 Open `http://localhost:3000`.
 
-Default compose settings enable password auth for local development and set a non-empty dev JWT secret. Change these values before any shared deployment.
+Default compose settings enable password auth for local development and set a dev JWT secret that passes boot validation (`>=16` chars and not `change-me-in-production`). Change these values before any shared deployment.
 
 ## Requirements
 
@@ -31,8 +31,10 @@ Default compose settings enable password auth for local development and set a no
 ```bash
 go test ./...
 cd frontend && npm ci && npm run build && cd ..
-go run ./cmd/gothub serve
+GOTHUB_JWT_SECRET=dev-jwt-secret-change-this GOTHUB_ENABLE_PASSWORD_AUTH=true go run ./cmd/gothub serve
 ```
+
+Set `GOTHUB_ENABLE_PASSWORD_AUTH=false` to test passwordless first-run auth paths (magic link, passkey, SSH).
 
 ## WASM build size modes
 
@@ -52,12 +54,13 @@ go run ./cmd/gothub serve
 - `GOTHUB_DB_DSN`: DB DSN/file path
 - `GOTHUB_STORAGE_PATH`: repository storage root
 - `GOTHUB_JWT_SECRET`: JWT signing secret (required; at least 16 chars)
-- `GOTHUB_ENABLE_PASSWORD_AUTH`: enable password login (`true`/`false`)
+- `GOTHUB_ENABLE_PASSWORD_AUTH`: enable password registration/login/change-password endpoints (`true`/`false`)
 
 ### Auth/WebAuthn
 
 - `GOTHUB_WEBAUTHN_ORIGIN`: RP origin (for passkeys)
 - `GOTHUB_WEBAUTHN_RPID`: RP ID (for passkeys)
+- Magic-link and SSH auth do not require extra environment variables in local/dev mode.
 
 ### Ops/observability
 
