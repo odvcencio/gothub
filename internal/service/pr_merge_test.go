@@ -99,6 +99,200 @@ func TestUpdateTargetBranchRefReportsCASMismatch(t *testing.T) {
 	}
 }
 
+func TestPRMergeStateSyncErrorRollsBackTargetRefOnDBFailure(t *testing.T) {
+	ctx, prSvc, store, repo := setupPRMergeTestService(t)
+
+	base := writeMainCommit(t, store, "package main\n\nfunc A() int { return 0 }\n", nil, "base", 1700002000)
+	mainHead := writeMainCommit(t, store, "package main\n\nfunc A() int { return 1 }\n", []object.Hash{base}, "main", 1700002010)
+	featureHead := base
+
+	if err := store.Refs.Set("heads/main", mainHead); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Refs.Set("heads/feature", featureHead); err != nil {
+		t.Fatal(err)
+	}
+
+	pr := &models.PullRequest{
+		RepoID:       repo.ID,
+		Title:        "merge db failure",
+		Body:         "",
+		State:        "open",
+		AuthorID:     1,
+		SourceBranch: "feature",
+		TargetBranch: "main",
+	}
+	if err := prSvc.db.CreatePullRequest(ctx, pr); err != nil {
+		t.Fatal(err)
+	}
+
+	dbErr := errors.New("update failed")
+	prSvc.db = &updatePullRequestHookDB{
+		DB:        prSvc.db,
+		updateErr: dbErr,
+	}
+
+	mergeHash, err := prSvc.Merge(ctx, "alice", "repo", pr, "alice")
+	if err == nil {
+		t.Fatal("expected merge to fail when UpdatePullRequest fails")
+	}
+	if mergeHash != "" {
+		t.Fatalf("expected empty merge hash on failure, got %s", mergeHash)
+	}
+	if !errors.Is(err, dbErr) {
+		t.Fatalf("expected wrapped db error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "status=rolled_back") {
+		t.Fatalf("expected rolled_back status in error, got %q", err)
+	}
+
+	var syncErr *PRMergeStateSyncError
+	if !errors.As(err, &syncErr) {
+		t.Fatalf("expected PRMergeStateSyncError, got %T: %v", err, err)
+	}
+	if syncErr.Status != PRMergeStateSyncRolledBack {
+		t.Fatalf("expected status %q, got %q", PRMergeStateSyncRolledBack, syncErr.Status)
+	}
+	if syncErr.RollbackErr != nil {
+		t.Fatalf("expected rollback to succeed, got rollback error: %v", syncErr.RollbackErr)
+	}
+
+	headAfter, err := store.Refs.Get("heads/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if headAfter != mainHead {
+		t.Fatalf("target branch should roll back to original head: got %s want %s", headAfter, mainHead)
+	}
+
+	persisted, err := prSvc.db.GetPullRequest(ctx, repo.ID, pr.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.State != "open" {
+		t.Fatalf("db PR state should remain open, got %q", persisted.State)
+	}
+	if persisted.MergeCommit != "" {
+		t.Fatalf("db PR merge_commit should remain empty, got %q", persisted.MergeCommit)
+	}
+
+	if pr.State != "open" {
+		t.Fatalf("input PR state should remain open on failed state sync, got %q", pr.State)
+	}
+	if pr.MergeCommit != "" {
+		t.Fatalf("input PR merge_commit should remain empty on failed state sync, got %q", pr.MergeCommit)
+	}
+}
+
+func TestPRMergeStateSyncErrorSurfacesDesyncWhenRollbackFails(t *testing.T) {
+	ctx, prSvc, store, repo := setupPRMergeTestService(t)
+
+	base := writeMainCommit(t, store, "package main\n\nfunc A() int { return 0 }\n", nil, "base", 1700003000)
+	mainHead := writeMainCommit(t, store, "package main\n\nfunc A() int { return 1 }\n", []object.Hash{base}, "main", 1700003010)
+	featureHead := base
+
+	if err := store.Refs.Set("heads/main", mainHead); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Refs.Set("heads/feature", featureHead); err != nil {
+		t.Fatal(err)
+	}
+
+	pr := &models.PullRequest{
+		RepoID:       repo.ID,
+		Title:        "merge db failure rollback failure",
+		Body:         "",
+		State:        "open",
+		AuthorID:     1,
+		SourceBranch: "feature",
+		TargetBranch: "main",
+	}
+	if err := prSvc.db.CreatePullRequest(ctx, pr); err != nil {
+		t.Fatal(err)
+	}
+
+	dbErr := errors.New("update failed")
+	var concurrentHead object.Hash
+	prSvc.db = &updatePullRequestHookDB{
+		DB:        prSvc.db,
+		updateErr: dbErr,
+		onUpdate: func(pr *models.PullRequest) error {
+			mergeHead := object.Hash(pr.MergeCommit)
+			if mergeHead == "" {
+				return fmt.Errorf("missing merge commit in update payload")
+			}
+			concurrentHead = writeMainCommit(
+				t,
+				store,
+				"package main\n\nfunc A() int { return 3 }\n",
+				[]object.Hash{mergeHead},
+				"concurrent push",
+				1700003030,
+			)
+			if err := store.Refs.Update("heads/main", &mergeHead, &concurrentHead); err != nil {
+				return fmt.Errorf("move target ref: %w", err)
+			}
+			return nil
+		},
+	}
+
+	_, err := prSvc.Merge(ctx, "alice", "repo", pr, "alice")
+	if err == nil {
+		t.Fatal("expected merge to fail when UpdatePullRequest fails")
+	}
+	if !errors.Is(err, dbErr) {
+		t.Fatalf("expected wrapped db error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "status=desynced") {
+		t.Fatalf("expected desynced status in error, got %q", err)
+	}
+
+	var syncErr *PRMergeStateSyncError
+	if !errors.As(err, &syncErr) {
+		t.Fatalf("expected PRMergeStateSyncError, got %T: %v", err, err)
+	}
+	if syncErr.Status != PRMergeStateSyncDesynced {
+		t.Fatalf("expected status %q, got %q", PRMergeStateSyncDesynced, syncErr.Status)
+	}
+	if syncErr.RollbackErr == nil {
+		t.Fatal("expected rollback error when target ref moves before rollback")
+	}
+
+	var moved *TargetBranchMovedError
+	if !errors.As(syncErr.RollbackErr, &moved) {
+		t.Fatalf("expected rollback error to be TargetBranchMovedError, got %T: %v", syncErr.RollbackErr, syncErr.RollbackErr)
+	}
+	if moved.Branch != "main" {
+		t.Fatalf("unexpected moved branch %q", moved.Branch)
+	}
+
+	headAfter, err := store.Refs.Get("heads/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if headAfter != concurrentHead {
+		t.Fatalf("target branch should remain at concurrent head after rollback failure: got %s want %s", headAfter, concurrentHead)
+	}
+
+	persisted, err := prSvc.db.GetPullRequest(ctx, repo.ID, pr.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.State != "open" {
+		t.Fatalf("db PR state should remain open, got %q", persisted.State)
+	}
+	if persisted.MergeCommit != "" {
+		t.Fatalf("db PR merge_commit should remain empty, got %q", persisted.MergeCommit)
+	}
+
+	if pr.State != "open" {
+		t.Fatalf("input PR state should remain open on failed state sync, got %q", pr.State)
+	}
+	if pr.MergeCommit != "" {
+		t.Fatalf("input PR merge_commit should remain empty on failed state sync, got %q", pr.MergeCommit)
+	}
+}
+
 func TestMergePreviewCacheClonesResponses(t *testing.T) {
 	svc := &PRService{mergePreviewCache: make(map[string]mergePreviewCacheEntry)}
 	original := &MergePreviewResponse{
@@ -319,4 +513,22 @@ func writeMainCommit(t *testing.T, store *gotstore.RepoStore, content string, pa
 		t.Fatal(err)
 	}
 	return commitHash
+}
+
+type updatePullRequestHookDB struct {
+	database.DB
+	onUpdate  func(pr *models.PullRequest) error
+	updateErr error
+}
+
+func (d *updatePullRequestHookDB) UpdatePullRequest(ctx context.Context, pr *models.PullRequest) error {
+	if d.onUpdate != nil {
+		if err := d.onUpdate(pr); err != nil {
+			return err
+		}
+	}
+	if d.updateErr != nil {
+		return d.updateErr
+	}
+	return d.DB.UpdatePullRequest(ctx, pr)
 }

@@ -75,6 +75,47 @@ func (e *TargetBranchMovedError) Error() string {
 	)
 }
 
+// PRMergeStateSyncStatus reports the durable outcome when PR state persistence fails.
+type PRMergeStateSyncStatus string
+
+const (
+	PRMergeStateSyncRolledBack PRMergeStateSyncStatus = "rolled_back"
+	PRMergeStateSyncDesynced   PRMergeStateSyncStatus = "desynced"
+)
+
+// PRMergeStateSyncError indicates merge ref updates and PR-state persistence diverged.
+type PRMergeStateSyncError struct {
+	Status       PRMergeStateSyncStatus
+	Branch       string
+	MergeCommit  object.Hash
+	TargetBefore object.Hash
+	Cause        error
+	RollbackErr  error
+}
+
+func (e *PRMergeStateSyncError) Error() string {
+	if e == nil {
+		return "merge state sync failed"
+	}
+	if e.RollbackErr != nil {
+		return fmt.Sprintf(
+			"merge state sync failed (status=%s): updated %s to %s but failed to persist PR state and rollback to %s failed: %v (rollback error: %v)",
+			e.Status, e.Branch, e.MergeCommit, e.TargetBefore, e.Cause, e.RollbackErr,
+		)
+	}
+	return fmt.Sprintf(
+		"merge state sync failed (status=%s): updated %s to %s but failed to persist PR state; rolled back to %s: %v",
+		e.Status, e.Branch, e.MergeCommit, e.TargetBefore, e.Cause,
+	)
+}
+
+func (e *PRMergeStateSyncError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Cause
+}
+
 const (
 	mergePreviewCacheTTL        = 30 * time.Second
 	mergePreviewCacheMaxEntries = 256
@@ -470,19 +511,29 @@ func (s *PRService) Merge(ctx context.Context, owner, repo string, pr *models.Pu
 	}
 
 	// Update PR state
+	mergedPR := *pr
 	now := time.Now()
-	pr.State = "merged"
-	pr.MergeCommit = string(mergeCommitHash)
-	pr.MergeMethod = "structural"
-	pr.MergedAt = &now
-	pr.SourceCommit = string(srcHash)
-	pr.TargetCommit = string(tgtHash)
-	if err := s.db.UpdatePullRequest(ctx, pr); err != nil {
-		if rollbackErr := updateTargetBranchRef(store, pr.TargetBranch, mergeCommitHash, tgtHash); rollbackErr != nil {
-			return "", fmt.Errorf("update pull request: %w (also failed to roll back target branch: %v)", err, rollbackErr)
+	mergedPR.State = "merged"
+	mergedPR.MergeCommit = string(mergeCommitHash)
+	mergedPR.MergeMethod = "structural"
+	mergedPR.MergedAt = &now
+	mergedPR.SourceCommit = string(srcHash)
+	mergedPR.TargetCommit = string(tgtHash)
+	if err := s.db.UpdatePullRequest(ctx, &mergedPR); err != nil {
+		syncErr := &PRMergeStateSyncError{
+			Status:       PRMergeStateSyncRolledBack,
+			Branch:       pr.TargetBranch,
+			MergeCommit:  mergeCommitHash,
+			TargetBefore: tgtHash,
+			Cause:        err,
 		}
-		return "", fmt.Errorf("update pull request: %w", err)
+		if rollbackErr := updateTargetBranchRef(store, pr.TargetBranch, mergeCommitHash, tgtHash); rollbackErr != nil {
+			syncErr.Status = PRMergeStateSyncDesynced
+			syncErr.RollbackErr = rollbackErr
+		}
+		return "", syncErr
 	}
+	*pr = mergedPR
 
 	// Keep merge commits aligned with push paths by indexing lineage and code intel.
 	if s.lineageSvc != nil {
