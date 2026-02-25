@@ -71,6 +71,7 @@ Four repos work together (all under active development):
 - Merge gates: required approvals, entity owner approval (.gotowners), lint pass, dead code detection, status checks
 - Semantic versioning recommendations from structural diff analysis
 - Webhook delivery with entity change tracking in payloads
+- Real-time repository events over SSE (`GET /api/v1/repos/{owner}/{repo}/events`) for issue/PR lifecycle updates
 - Dual database: SQLite (WAL mode) + PostgreSQL, full schema with migrations
 - JWT auth with bcrypt passwords, SSH key management
 - SSH commit signature verification: parses sshsig-v1 format, verifies signature against SSH keys in DB, resolves signer to username. `CommitInfo` includes `Verified` and `Signer` fields. Both `GetCommit` and `ListCommits` verify signatures.

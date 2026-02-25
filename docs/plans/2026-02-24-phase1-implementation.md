@@ -66,7 +66,7 @@ Task 47 (GotHub UI: structural blame panel)
 
 ## Execution Tracker (Live)
 
-Updated: 2026-02-24 15:37 PST
+Updated: 2026-02-25 17:10 PST
 
 ### Completed
 
@@ -83,6 +83,8 @@ Updated: 2026-02-24 15:37 PST
 | 42 | complete | gothub | `2930c83` | `frontend/src/views/PRDetail.tsx` (`MergeGatePanel`), `internal/service/policy.go` (`entity_owner_approvals`) |
 | 43 | complete | got | `5178221` | `go test ./cmd/got ./pkg/repo` |
 | 44 | complete | got | `b655d12` | `go test ./cmd/got ./pkg/repo` |
+| 45 | complete | got | `fad365d` | `go test ./pkg/repo -run 'TestBlame|TestLogEntity'` |
+| 46 | complete | got | `b7302c5` | `go test ./cmd/got -run TestCherryPickEntity` |
 | 47 | complete | gothub | `2614e72` | `frontend/src/views/Code.tsx`, `internal/api/browse_handlers.go`, `internal/api/router.go` |
 | 48 | complete | gothub | `a4a6969` | `frontend/src/views/CallGraph.tsx` |
 | 49 | complete | gothub | `5d2e39c` | `frontend/src/components/CodeViewer.tsx`, `frontend/src/api/client.ts` |
@@ -97,7 +99,6 @@ Updated: 2026-02-24 15:37 PST
 ### Remaining (Not Yet Implemented)
 
 - Tasks 8-34 are pending.
-- Tasks 45-46 are queued structural-differentiation work.
 - Tasks 35-39 are queued post-Phase-1 cloud multi-tenancy work.
 
 ---
@@ -2241,13 +2242,13 @@ These items come from the latest capability audit and are being executed as post
 
 ### Task 45: Rename-Aware Entity Tracking
 
-**Status:** Queued
+**Status:** Complete (`fad365d`)
 
 **Goal:** connect entity identity across rename/move operations so blame/log history survives refactors.
 
 ### Task 46: Entity Cherry-Pick (`got cherry-pick --entity`)
 
-**Status:** Queued
+**Status:** Complete (`b7302c5`)
 
 **Goal:** apply a single entity delta from another commit/branch without cherry-picking whole commits.
 
