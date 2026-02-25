@@ -85,6 +85,7 @@ type Repository struct {
 	IsPrivate     bool      `json:"is_private"`
 	StoragePath   string    `json:"-"`
 	CreatedAt     time.Time `json:"created_at"`
+	StarCount     int       `json:"star_count,omitempty"`
 }
 
 type Collaborator struct {
@@ -308,6 +309,21 @@ type InterestSignup struct {
 	Message   string    `json:"message,omitempty"`
 	Source    string    `json:"source,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
+}
+
+const EntitlementFeaturePrivateRepos = "private_repos"
+
+type UserEntitlement struct {
+	ID                 int64      `json:"id"`
+	UserID             int64      `json:"user_id"`
+	Feature            string     `json:"feature"`
+	Source             string     `json:"source"`
+	ExternalCustomerID string     `json:"external_customer_id,omitempty"`
+	Active             bool       `json:"active"`
+	ExpiresAt          *time.Time `json:"expires_at,omitempty"`
+	MetadataJSON       string     `json:"metadata_json,omitempty"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
 }
 
 type HashMapping struct {

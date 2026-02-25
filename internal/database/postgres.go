@@ -104,6 +104,7 @@ func (p *PostgresDB) migrateTenancySchema(ctx context.Context) error {
 		`ALTER TABLE webhook_deliveries ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT COALESCE(NULLIF(current_setting('app.tenant_id', true), ''), 'default')`,
 		`ALTER TABLE repo_runner_tokens ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT COALESCE(NULLIF(current_setting('app.tenant_id', true), ''), 'default')`,
 		`ALTER TABLE interest_signups ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT COALESCE(NULLIF(current_setting('app.tenant_id', true), ''), 'default')`,
+		`ALTER TABLE user_entitlements ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT COALESCE(NULLIF(current_setting('app.tenant_id', true), ''), 'default')`,
 		`CREATE INDEX IF NOT EXISTS idx_users_tenant_username ON users(tenant_id, username)`,
 		`CREATE INDEX IF NOT EXISTS idx_users_tenant_email ON users(tenant_id, email)`,
 		`CREATE INDEX IF NOT EXISTS idx_orgs_tenant_name ON orgs(tenant_id, name)`,
@@ -118,6 +119,8 @@ func (p *PostgresDB) migrateTenancySchema(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_repo_runner_tokens_tenant_repo_active ON repo_runner_tokens(tenant_id, repo_id, revoked_at, created_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_repo_runner_tokens_tenant_hash ON repo_runner_tokens(tenant_id, token_hash)`,
 		`CREATE INDEX IF NOT EXISTS idx_interest_signups_tenant_created ON interest_signups(tenant_id, created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_user_entitlements_tenant_user_feature ON user_entitlements(tenant_id, user_id, feature)`,
+		`CREATE INDEX IF NOT EXISTS idx_user_entitlements_tenant_feature_active ON user_entitlements(tenant_id, feature, active, expires_at)`,
 	}
 	for _, stmt := range statements {
 		if _, err := p.db.ExecContext(ctx, stmt); err != nil {
@@ -403,6 +406,21 @@ CREATE TABLE IF NOT EXISTS interest_signups (
 	tenant_id TEXT NOT NULL DEFAULT COALESCE(NULLIF(current_setting('app.tenant_id', true), ''), 'default')
 );
 
+CREATE TABLE IF NOT EXISTS user_entitlements (
+	id BIGSERIAL PRIMARY KEY,
+	user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	feature TEXT NOT NULL,
+	source TEXT NOT NULL DEFAULT '',
+	external_customer_id TEXT NOT NULL DEFAULT '',
+	active BOOLEAN NOT NULL DEFAULT FALSE,
+	expires_at TIMESTAMPTZ,
+	metadata_json TEXT NOT NULL DEFAULT '',
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	tenant_id TEXT NOT NULL DEFAULT COALESCE(NULLIF(current_setting('app.tenant_id', true), ''), 'default'),
+	UNIQUE (tenant_id, user_id, feature)
+);
+
 CREATE TABLE IF NOT EXISTS hash_mapping (
 	repo_id BIGINT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
 	git_hash TEXT NOT NULL,
@@ -594,6 +612,8 @@ CREATE INDEX IF NOT EXISTS idx_notifications_user_unread ON notifications(user_i
 CREATE INDEX IF NOT EXISTS idx_repo_webhooks_repo ON repo_webhooks(repo_id);
 CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_webhook_time ON webhook_deliveries(webhook_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_interest_signups_created ON interest_signups(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_user_entitlements_user_feature ON user_entitlements(user_id, feature);
+CREATE INDEX IF NOT EXISTS idx_user_entitlements_feature_active ON user_entitlements(feature, active, expires_at);
 CREATE INDEX IF NOT EXISTS idx_repo_stars_repo ON repo_stars(repo_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_repo_stars_user ON repo_stars(user_id, created_at DESC);
 `
@@ -800,6 +820,22 @@ BEGIN
 		WITH CHECK (gothub_tenant_rls_match(tenant_id));
 	END IF;
 END $$;
+
+ALTER TABLE user_entitlements ENABLE ROW LEVEL SECURITY;
+ALTER TABLE user_entitlements FORCE ROW LEVEL SECURITY;
+DO $$
+BEGIN
+	IF NOT EXISTS (
+		SELECT 1 FROM pg_policies
+		WHERE schemaname = current_schema()
+			AND tablename = 'user_entitlements'
+			AND policyname = 'user_entitlements_tenant_rls'
+	) THEN
+		CREATE POLICY user_entitlements_tenant_rls ON user_entitlements
+		USING (gothub_tenant_rls_match(tenant_id))
+		WITH CHECK (gothub_tenant_rls_match(tenant_id));
+	END IF;
+END $$;
 `
 
 // --- Users ---
@@ -841,6 +877,60 @@ func (p *PostgresDB) UpdateUserPassword(ctx context.Context, userID int64, passw
 	tenantID := tenantIDForContext(ctx)
 	_, err := p.db.ExecContext(ctx, `UPDATE users SET password_hash = $1 WHERE id = $2 AND tenant_id = $3`, passwordHash, userID, tenantID)
 	return err
+}
+
+func (p *PostgresDB) UpsertUserEntitlement(ctx context.Context, entitlement *models.UserEntitlement) error {
+	if entitlement == nil {
+		return fmt.Errorf("entitlement is required")
+	}
+	tenantID := tenantIDForContext(ctx)
+	_, err := p.db.ExecContext(ctx,
+		`INSERT INTO user_entitlements (
+			user_id, feature, source, external_customer_id, active, expires_at, metadata_json, tenant_id
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		ON CONFLICT (tenant_id, user_id, feature) DO UPDATE SET
+			source = EXCLUDED.source,
+			external_customer_id = EXCLUDED.external_customer_id,
+			active = EXCLUDED.active,
+			expires_at = EXCLUDED.expires_at,
+			metadata_json = EXCLUDED.metadata_json,
+			updated_at = NOW()`,
+		entitlement.UserID,
+		entitlement.Feature,
+		entitlement.Source,
+		entitlement.ExternalCustomerID,
+		entitlement.Active,
+		entitlement.ExpiresAt,
+		entitlement.MetadataJSON,
+		tenantID,
+	)
+	return err
+}
+
+func (p *PostgresDB) HasUserEntitlement(ctx context.Context, userID int64, feature string, at time.Time) (bool, error) {
+	tenantID := tenantIDForContext(ctx)
+	var exists int
+	err := p.db.QueryRowContext(ctx,
+		`SELECT 1
+		 FROM user_entitlements
+		 WHERE user_id = $1
+		   AND feature = $2
+		   AND active = TRUE
+		   AND (expires_at IS NULL OR expires_at > $3)
+		   AND tenant_id = $4
+		 LIMIT 1`,
+		userID,
+		feature,
+		at,
+		tenantID,
+	).Scan(&exists)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		return false, err
+	}
+	return exists == 1, nil
 }
 
 func (p *PostgresDB) CreateMagicLinkToken(ctx context.Context, token *models.MagicLinkToken) error {
@@ -1321,6 +1411,57 @@ func (p *PostgresDB) ListRepositoryForksPage(ctx context.Context, parentRepoID i
 		); err != nil {
 			return nil, err
 		}
+		repos = append(repos, r)
+	}
+	return repos, rows.Err()
+}
+
+func (p *PostgresDB) ListPublicRepositoriesPage(ctx context.Context, sortBy string, limit, offset int) ([]models.Repository, error) {
+	tenantID := tenantIDForContext(ctx)
+	if limit <= 0 {
+		limit = 10
+	}
+	if limit > 50 {
+		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	orderClause := "r.created_at DESC, r.id DESC"
+	switch sortBy {
+	case "stars":
+		orderClause = "star_count DESC, r.id DESC"
+	case "created":
+		orderClause = "r.created_at DESC, r.id DESC"
+	}
+	query := `SELECT r.id, r.owner_user_id, r.owner_org_id, r.parent_repo_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at,
+		COALESCE(u.username, o.name, ''), COALESCE(pu.username, po.name, ''), COALESCE(pr.name, ''),
+		(SELECT COUNT(*) FROM repo_stars WHERE repo_id = r.id) AS star_count
+		FROM repositories r
+		LEFT JOIN users u ON u.id = r.owner_user_id AND u.tenant_id = r.tenant_id
+		LEFT JOIN orgs o ON o.id = r.owner_org_id AND o.tenant_id = r.tenant_id
+		LEFT JOIN repositories pr ON pr.id = r.parent_repo_id
+		LEFT JOIN users pu ON pu.id = pr.owner_user_id
+		LEFT JOIN orgs po ON po.id = pr.owner_org_id
+		WHERE r.is_private = false AND r.tenant_id = $1
+		ORDER BY ` + orderClause + `
+		LIMIT $2 OFFSET $3`
+	rows, err := p.db.QueryContext(ctx, query, tenantID, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var repos []models.Repository
+	for rows.Next() {
+		var r models.Repository
+		var starCount int
+		if err := rows.Scan(
+			&r.ID, &r.OwnerUserID, &r.OwnerOrgID, &r.ParentRepoID, &r.Name, &r.Description, &r.DefaultBranch, &r.IsPrivate, &r.StoragePath, &r.CreatedAt,
+			&r.OwnerName, &r.ParentOwner, &r.ParentName, &starCount,
+		); err != nil {
+			return nil, err
+		}
+		r.StarCount = starCount
 		repos = append(repos, r)
 	}
 	return repos, rows.Err()

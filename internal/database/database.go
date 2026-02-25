@@ -18,6 +18,8 @@ type DB interface {
 	GetUserByUsername(ctx context.Context, username string) (*models.User, error)
 	GetUserByEmail(ctx context.Context, email string) (*models.User, error)
 	UpdateUserPassword(ctx context.Context, userID int64, passwordHash string) error
+	UpsertUserEntitlement(ctx context.Context, entitlement *models.UserEntitlement) error
+	HasUserEntitlement(ctx context.Context, userID int64, feature string, at time.Time) (bool, error)
 	CreateMagicLinkToken(ctx context.Context, token *models.MagicLinkToken) error
 	ConsumeMagicLinkToken(ctx context.Context, tokenHash string, now time.Time) (*models.User, error)
 	CreateSSHAuthChallenge(ctx context.Context, challenge *models.SSHAuthChallenge) error
@@ -45,6 +47,7 @@ type DB interface {
 	CountUserOwnedRepositoriesByVisibility(ctx context.Context, userID int64, isPrivate bool) (int, error)
 	ListRepositoryForks(ctx context.Context, parentRepoID int64) ([]models.Repository, error)
 	ListRepositoryForksPage(ctx context.Context, parentRepoID int64, limit, offset int) ([]models.Repository, error)
+	ListPublicRepositoriesPage(ctx context.Context, sort string, limit, offset int) ([]models.Repository, error)
 	DeleteRepository(ctx context.Context, id int64) error
 
 	// Stars

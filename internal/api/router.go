@@ -44,6 +44,11 @@ type Server struct {
 	corsAllowedOrigins []string
 	restrictPublicOnly bool
 	maxPublicRepos     int
+	requirePrivatePlan bool
+	maxPrivateRepos    int
+	privateRepoAllowed map[string]struct{}
+	polarWebhookSecret string
+	polarProductIDs    map[string]struct{}
 	clientIPResolver   clientIPResolver
 	tenantContext      tenantContextOptions
 	adminRouteAccess   adminRouteAccess
@@ -67,6 +72,11 @@ type ServerOptions struct {
 	DefaultTenantID     string
 	RestrictToPublic    bool
 	MaxPublicRepos      int
+	RequirePrivatePlan  bool
+	MaxPrivateRepos     int
+	PrivateRepoAllowed  []string
+	PolarWebhookSecret  string
+	PolarProductIDs     []string
 }
 
 type middlewareFunc func(http.Handler) http.Handler
@@ -93,6 +103,21 @@ func NewServerWithOptions(db database.DB, authSvc *auth.Service, repoSvc *servic
 		adminCIDRs = defaultAdminRouteCIDRs
 	}
 	clientIPResolver := newClientIPResolver(opts.TrustedProxyCIDRs)
+	privateRepoAllowed := make(map[string]struct{}, len(opts.PrivateRepoAllowed))
+	for _, username := range opts.PrivateRepoAllowed {
+		if username == "" {
+			continue
+		}
+		privateRepoAllowed[username] = struct{}{}
+	}
+	polarProductIDs := make(map[string]struct{}, len(opts.PolarProductIDs))
+	for _, id := range opts.PolarProductIDs {
+		id = strings.TrimSpace(strings.ToLower(id))
+		if id == "" {
+			continue
+		}
+		polarProductIDs[id] = struct{}{}
+	}
 	s := &Server{
 		db:                 db,
 		authSvc:            authSvc,
@@ -116,6 +141,11 @@ func NewServerWithOptions(db database.DB, authSvc *auth.Service, repoSvc *servic
 		corsAllowedOrigins: append([]string(nil), opts.CORSAllowedOrigins...),
 		restrictPublicOnly: opts.RestrictToPublic,
 		maxPublicRepos:     opts.MaxPublicRepos,
+		requirePrivatePlan: opts.RequirePrivatePlan,
+		maxPrivateRepos:    opts.MaxPrivateRepos,
+		privateRepoAllowed: privateRepoAllowed,
+		polarWebhookSecret: strings.TrimSpace(opts.PolarWebhookSecret),
+		polarProductIDs:    polarProductIDs,
 		clientIPResolver:   clientIPResolver,
 		tenantContext:      newTenantContextOptions(opts.EnableTenantContext, opts.TenantHeader, opts.DefaultTenantID),
 		adminRouteAccess:   newAdminRouteAccess(adminCIDRs, clientIPResolver.clientIPFromRequest),
@@ -203,14 +233,19 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/auth/capabilities", s.handleAuthCapabilities)
 	s.mux.HandleFunc("POST /api/v1/auth/refresh", s.requireAuth(s.handleRefreshToken))
 	s.mux.HandleFunc("POST /api/v1/auth/change-password", s.requireAuth(s.handleChangePassword))
+	s.mux.HandleFunc("POST /api/v1/billing/polar/webhook", s.handlePolarWebhook)
 	s.mux.HandleFunc("POST /api/v1/interest-signups", s.handleCreateInterestSignup)
 	s.mux.HandleFunc("GET /api/v1/admin/interest-signups", s.requireAuth(s.handleListInterestSignups))
+
+	// Explore
+	s.mux.HandleFunc("GET /api/v1/explore/repos", s.handleExploreRepos)
 
 	// User
 	s.mux.HandleFunc("GET /api/v1/user", s.requireAuth(s.handleGetCurrentUser))
 	s.mux.HandleFunc("GET /api/v1/user/ssh-keys", s.requireAuth(s.handleListSSHKeys))
 	s.mux.HandleFunc("POST /api/v1/user/ssh-keys", s.requireAuth(s.handleCreateSSHKey))
 	s.mux.HandleFunc("DELETE /api/v1/user/ssh-keys/{id}", s.requireAuth(s.handleDeleteSSHKey))
+	s.mux.HandleFunc("GET /api/v1/user/repo-policy", s.requireAuth(s.handleGetRepoCreationPolicy))
 	s.mux.HandleFunc("GET /api/v1/user/starred", s.requireAuth(s.handleListUserStarredRepos))
 	s.mux.HandleFunc("GET /api/v1/notifications", s.requireAuth(s.handleListNotifications))
 	s.mux.HandleFunc("GET /api/v1/notifications/unread-count", s.requireAuth(s.handleUnreadNotificationsCount))

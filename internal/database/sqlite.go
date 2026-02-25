@@ -345,6 +345,20 @@ CREATE TABLE IF NOT EXISTS interest_signups (
 	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS user_entitlements (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	feature TEXT NOT NULL,
+	source TEXT NOT NULL DEFAULT '',
+	external_customer_id TEXT NOT NULL DEFAULT '',
+	active BOOLEAN NOT NULL DEFAULT FALSE,
+	expires_at DATETIME,
+	metadata_json TEXT NOT NULL DEFAULT '',
+	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	UNIQUE(user_id, feature)
+);
+
 CREATE TABLE IF NOT EXISTS hash_mapping (
 	repo_id INTEGER NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
 	git_hash TEXT NOT NULL,
@@ -555,6 +569,8 @@ CREATE INDEX IF NOT EXISTS idx_notifications_user_unread ON notifications(user_i
 CREATE INDEX IF NOT EXISTS idx_repo_webhooks_repo ON repo_webhooks(repo_id);
 CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_webhook_time ON webhook_deliveries(webhook_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_interest_signups_created ON interest_signups(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_user_entitlements_user_feature ON user_entitlements(user_id, feature);
+CREATE INDEX IF NOT EXISTS idx_user_entitlements_feature_active ON user_entitlements(feature, active, expires_at);
 CREATE INDEX IF NOT EXISTS idx_repo_stars_repo ON repo_stars(repo_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_repo_stars_user ON repo_stars(user_id, created_at DESC);
 `
@@ -598,6 +614,55 @@ func (s *SQLiteDB) scanUser(row *sql.Row) (*models.User, error) {
 func (s *SQLiteDB) UpdateUserPassword(ctx context.Context, userID int64, passwordHash string) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE users SET password_hash = ? WHERE id = ?`, passwordHash, userID)
 	return err
+}
+
+func (s *SQLiteDB) UpsertUserEntitlement(ctx context.Context, entitlement *models.UserEntitlement) error {
+	if entitlement == nil {
+		return fmt.Errorf("entitlement is required")
+	}
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO user_entitlements (
+			user_id, feature, source, external_customer_id, active, expires_at, metadata_json, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		ON CONFLICT(user_id, feature) DO UPDATE SET
+			source = excluded.source,
+			external_customer_id = excluded.external_customer_id,
+			active = excluded.active,
+			expires_at = excluded.expires_at,
+			metadata_json = excluded.metadata_json,
+			updated_at = CURRENT_TIMESTAMP`,
+		entitlement.UserID,
+		entitlement.Feature,
+		entitlement.Source,
+		entitlement.ExternalCustomerID,
+		entitlement.Active,
+		entitlement.ExpiresAt,
+		entitlement.MetadataJSON,
+	)
+	return err
+}
+
+func (s *SQLiteDB) HasUserEntitlement(ctx context.Context, userID int64, feature string, at time.Time) (bool, error) {
+	var exists int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT 1
+		 FROM user_entitlements
+		 WHERE user_id = ?
+		   AND feature = ?
+		   AND active = TRUE
+		   AND (expires_at IS NULL OR expires_at > ?)
+		 LIMIT 1`,
+		userID,
+		feature,
+		at,
+	).Scan(&exists)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		return false, err
+	}
+	return exists == 1, nil
 }
 
 func (s *SQLiteDB) CreateMagicLinkToken(ctx context.Context, token *models.MagicLinkToken) error {
@@ -1074,6 +1139,56 @@ func (s *SQLiteDB) ListRepositoryForksPage(ctx context.Context, parentRepoID int
 		); err != nil {
 			return nil, err
 		}
+		repos = append(repos, r)
+	}
+	return repos, rows.Err()
+}
+
+func (s *SQLiteDB) ListPublicRepositoriesPage(ctx context.Context, sortBy string, limit, offset int) ([]models.Repository, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	if limit > 50 {
+		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	orderClause := "r.created_at DESC, r.id DESC"
+	switch sortBy {
+	case "stars":
+		orderClause = "star_count DESC, r.id DESC"
+	case "created":
+		orderClause = "r.created_at DESC, r.id DESC"
+	}
+	query := `SELECT r.id, r.owner_user_id, r.owner_org_id, r.parent_repo_id, r.name, r.description, r.default_branch, r.is_private, r.storage_path, r.created_at,
+		COALESCE(u.username, o.name, ''), COALESCE(pu.username, po.name, ''), COALESCE(pr.name, ''),
+		(SELECT COUNT(*) FROM repo_stars WHERE repo_id = r.id) AS star_count
+		FROM repositories r
+		LEFT JOIN users u ON u.id = r.owner_user_id
+		LEFT JOIN orgs o ON o.id = r.owner_org_id
+		LEFT JOIN repositories pr ON pr.id = r.parent_repo_id
+		LEFT JOIN users pu ON pu.id = pr.owner_user_id
+		LEFT JOIN orgs po ON po.id = pr.owner_org_id
+		WHERE r.is_private = 0
+		ORDER BY ` + orderClause + `
+		LIMIT ? OFFSET ?`
+	rows, err := s.db.QueryContext(ctx, query, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var repos []models.Repository
+	for rows.Next() {
+		var r models.Repository
+		var starCount int
+		if err := rows.Scan(
+			&r.ID, &r.OwnerUserID, &r.OwnerOrgID, &r.ParentRepoID, &r.Name, &r.Description, &r.DefaultBranch, &r.IsPrivate, &r.StoragePath, &r.CreatedAt,
+			&r.OwnerName, &r.ParentOwner, &r.ParentName, &starCount,
+		); err != nil {
+			return nil, err
+		}
+		r.StarCount = starCount
 		repos = append(repos, r)
 	}
 	return repos, rows.Err()
