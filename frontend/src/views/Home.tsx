@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'preact/hooks';
 import {
   getToken,
+  subscribeAuthTokenChange,
   listUserRepos,
   getRepoCreationPolicy,
   createRepo,
@@ -16,7 +17,11 @@ import {
 import { Landing } from './Landing';
 
 export function Home() {
-  const loggedIn = !!getToken();
+  const [authToken, setAuthToken] = useState<string | null>(() => getToken());
+
+  useEffect(() => subscribeAuthTokenChange(() => setAuthToken(getToken())), []);
+
+  const loggedIn = !!authToken;
 
   if (loggedIn) return <Dashboard />;
   return <Landing />;
@@ -54,7 +59,7 @@ function Dashboard() {
           listUserRepos(),
           getRepoCreationPolicy(),
         ]);
-        setRepos(items);
+        setRepos(Array.isArray(items) ? items : []);
         setRepoPolicy(policy);
         setError('');
       } catch (e: any) {
@@ -113,7 +118,7 @@ function Dashboard() {
         listUserRepos(),
         getRepoCreationPolicy(),
       ]);
-      setRepos(items);
+      setRepos(Array.isArray(items) ? items : []);
       setRepoPolicy(policy);
       setError('');
     } catch (err: any) {
@@ -135,12 +140,7 @@ function Dashboard() {
           >
             {demoLoading ? 'Preparing demo...' : 'Try Demo'}
           </button>
-          <button
-            onClick={() => setShowCreate(!showCreate)}
-            style={{ background: '#238636', color: '#fff', border: 'none', padding: '8px 16px', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold' }}
-          >
-            New
-          </button>
+          <a href="/new" style={{ background: '#238636', color: '#fff', border: 'none', padding: '8px 16px', borderRadius: '6px', fontWeight: 'bold', textDecoration: 'none', display: 'inline-block' }}>New</a>
         </div>
       </div>
       {error && (

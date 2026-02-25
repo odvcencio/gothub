@@ -13,7 +13,6 @@ import { IssueDetailView } from './views/IssueDetail';
 import { NotificationsView } from './views/Notifications';
 import { SettingsView } from './views/Settings';
 import { RepoSettingsView } from './views/RepoSettings';
-import { OrgDetailView } from './views/OrgView';
 import { SymbolSearchView } from './views/SymbolSearch';
 import { ReferencesView } from './views/References';
 import { CallGraphView } from './views/CallGraph';
@@ -21,6 +20,7 @@ import { EntityHistoryView } from './views/EntityHistory';
 import { NotFoundView } from './views/NotFound';
 import { LoginView } from './views/Login';
 import { SignupView } from './views/Signup';
+import { NewRepoView } from './views/NewRepo';
 
 export function App() {
   return (
@@ -33,7 +33,7 @@ export function App() {
           <SignupView path="/signup" />
           <NotificationsView path="/notifications" />
           <SettingsView path="/settings" />
-          <OrgDetailView path="/orgs/:org" />
+          <NewRepoView path="/new" />
           <RepoSettingsView path="/:owner/:repo/settings" />
           <CodeView path="/:owner/:repo/tree/:ref/:path*" />
           <CodeView path="/:owner/:repo/blob/:ref/:path*" />
