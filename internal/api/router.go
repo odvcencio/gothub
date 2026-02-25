@@ -61,6 +61,8 @@ type ServerOptions struct {
 	TrustedProxyCIDRs   []string
 }
 
+type middlewareFunc func(http.Handler) http.Handler
+
 func NewServer(db database.DB, authSvc *auth.Service, repoSvc *service.RepoService) *Server {
 	return NewServerWithOptions(db, authSvc, repoSvc, ServerOptions{})
 }
@@ -113,26 +115,46 @@ func NewServerWithOptions(db database.DB, authSvc *auth.Service, repoSvc *servic
 		s.indexWorker = s.newIndexWorker(opts.IndexWorkerCount, opts.IndexWorkerPoll)
 	}
 	s.routes()
-	s.handler = requestTracingMiddleware(
-		requestMetricsMiddleware(
-			s.httpMetrics,
-			requestLoggingMiddleware(
-				s.clientIPResolver,
-				corsMiddleware(s.corsAllowedOrigins,
-					requestRateLimitMiddleware(
-						s.clientIPResolver,
-						s.rateLimiter,
-						requestBodyLimitMiddleware(auth.Middleware(s.authSvc)(s.mux)),
-					),
-				),
-			),
-		),
-	)
+	s.handler = s.buildHandler()
 	return s
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.handler.ServeHTTP(w, r)
+}
+
+func (s *Server) buildHandler() http.Handler {
+	// Build the full middleware chain once during server initialization.
+	return chainMiddleware(
+		s.mux,
+		requestTracingMiddleware,
+		func(next http.Handler) http.Handler {
+			return requestMetricsMiddleware(s.httpMetrics, next)
+		},
+		func(next http.Handler) http.Handler {
+			return requestLoggingMiddleware(s.clientIPResolver, next)
+		},
+		func(next http.Handler) http.Handler {
+			return corsMiddleware(s.corsAllowedOrigins, next)
+		},
+		func(next http.Handler) http.Handler {
+			return requestRateLimitMiddleware(s.clientIPResolver, s.rateLimiter, next)
+		},
+		requestBodyLimitMiddleware,
+		auth.Middleware(s.authSvc),
+	)
+}
+
+func chainMiddleware(base http.Handler, stack ...middlewareFunc) http.Handler {
+	wrapped := base
+	for i := len(stack) - 1; i >= 0; i-- {
+		middleware := stack[i]
+		if middleware == nil {
+			continue
+		}
+		wrapped = middleware(wrapped)
+	}
+	return wrapped
 }
 
 func (s *Server) routes() {
