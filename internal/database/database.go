@@ -17,9 +17,12 @@ type DB interface {
 	GetUserByID(ctx context.Context, id int64) (*models.User, error)
 	GetUserByUsername(ctx context.Context, username string) (*models.User, error)
 	GetUserByEmail(ctx context.Context, email string) (*models.User, error)
+	HasVerifiedEmail(ctx context.Context, userID int64) (bool, error)
+	HasWebAuthnCredential(ctx context.Context, userID int64) (bool, error)
 	UpdateUserPassword(ctx context.Context, userID int64, passwordHash string) error
 	UpsertUserEntitlement(ctx context.Context, entitlement *models.UserEntitlement) error
 	HasUserEntitlement(ctx context.Context, userID int64, feature string, at time.Time) (bool, error)
+	GetUserEntitlements(ctx context.Context, userID int64) ([]*models.UserEntitlement, error)
 	CreateMagicLinkToken(ctx context.Context, token *models.MagicLinkToken) error
 	ConsumeMagicLinkToken(ctx context.Context, tokenHash string, now time.Time) (*models.User, error)
 	CreateSSHAuthChallenge(ctx context.Context, challenge *models.SSHAuthChallenge) error

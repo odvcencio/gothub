@@ -21,60 +21,66 @@ import (
 )
 
 type Server struct {
-	db                 database.DB
-	authSvc            *auth.Service
-	repoSvc            *service.RepoService
-	browseSvc          *service.BrowseService
-	diffSvc            *service.DiffService
-	prSvc              *service.PRService
-	issueSvc           *service.IssueService
-	webhookSvc         *service.WebhookService
-	notifySvc          *service.NotificationService
-	codeIntelSvc       *service.CodeIntelService
-	lineageSvc         *service.EntityLineageService
-	indexQueue         *jobs.Queue
-	indexWorker        *jobs.WorkerPool
-	asyncIndex         bool
-	rateLimiter        *requestRateLimiter
-	httpMetrics        *httpMetrics
-	passkey           *webauthn.WebAuthn
-	enableAdminHealth bool
-	enablePprof        bool
-	corsAllowedOrigins []string
-	restrictPublicOnly bool
-	maxPublicRepos     int
-	requirePrivatePlan bool
-	maxPrivateRepos    int
-	privateRepoAllowed map[string]struct{}
-	polarWebhookSecret string
-	polarProductIDs    map[string]struct{}
-	clientIPResolver   clientIPResolver
-	tenantContext      tenantContextOptions
-	adminRouteAccess   adminRouteAccess
-	realtime           *repoEventBroker
-	mux                *http.ServeMux
-	handler            http.Handler
+	db                       database.DB
+	authSvc                  *auth.Service
+	repoSvc                  *service.RepoService
+	browseSvc                *service.BrowseService
+	diffSvc                  *service.DiffService
+	prSvc                    *service.PRService
+	issueSvc                 *service.IssueService
+	webhookSvc               *service.WebhookService
+	notifySvc                *service.NotificationService
+	codeIntelSvc             *service.CodeIntelService
+	lineageSvc               *service.EntityLineageService
+	indexQueue               *jobs.Queue
+	indexWorker              *jobs.WorkerPool
+	asyncIndex               bool
+	rateLimiter              *requestRateLimiter
+	httpMetrics              *httpMetrics
+	passkey                  *webauthn.WebAuthn
+	enableAdminHealth        bool
+	enablePprof              bool
+	corsAllowedOrigins       []string
+	restrictPublicOnly       bool
+	maxPublicRepos           int
+	requirePrivatePlan       bool
+	maxPrivateRepos          int
+	privateRepoAllowed       map[string]struct{}
+	requireVerifiedEmail     bool
+	requirePasskeyEnrollment bool
+	enableOrganizations      bool
+	polarWebhookSecret       string
+	polarProductIDs          map[string]struct{}
+	clientIPResolver         clientIPResolver
+	tenantContext            tenantContextOptions
+	adminRouteAccess         adminRouteAccess
+	realtime                 *repoEventBroker
+	mux                      *http.ServeMux
+	handler                  http.Handler
 }
 
 type ServerOptions struct {
-	EnableAsyncIndexing bool
-	IndexWorkerCount    int
-	IndexWorkerPoll     time.Duration
-	EnableAdminHealth   bool
-	EnablePprof         bool
-	AdminAllowedCIDRs   []string
-	CORSAllowedOrigins  []string
-	TrustedProxyCIDRs   []string
-	EnableTenantContext bool
-	TenantHeader        string
-	DefaultTenantID     string
-	RestrictToPublic    bool
-	MaxPublicRepos      int
-	RequirePrivatePlan  bool
-	MaxPrivateRepos     int
-	PrivateRepoAllowed  []string
-	PolarWebhookSecret  string
-	PolarProductIDs     []string
+	EnableAsyncIndexing      bool
+	IndexWorkerCount         int
+	IndexWorkerPoll          time.Duration
+	EnableAdminHealth        bool
+	EnablePprof              bool
+	AdminAllowedCIDRs        []string
+	CORSAllowedOrigins       []string
+	TrustedProxyCIDRs        []string
+	EnableTenantContext      bool
+	TenantHeader             string
+	DefaultTenantID          string
+	RestrictToPublic         bool
+	MaxPublicRepos           int
+	RequirePrivatePlan       bool
+	MaxPrivateRepos          int
+	PrivateRepoAllowed       []string
+	RequireVerifiedEmail     bool
+	RequirePasskeyEnrollment bool
+	EnableOrganizations      bool
+	PolarWebhookSecret       string
+	PolarProductIDs          []string
 }
 
 type middlewareFunc func(http.Handler) http.Handler
@@ -117,37 +123,40 @@ func NewServerWithOptions(db database.DB, authSvc *auth.Service, repoSvc *servic
 		polarProductIDs[id] = struct{}{}
 	}
 	s := &Server{
-		db:                 db,
-		authSvc:            authSvc,
-		repoSvc:            repoSvc,
-		browseSvc:          browseSvc,
-		diffSvc:            diffSvc,
-		prSvc:              prSvc,
-		issueSvc:           issueSvc,
-		webhookSvc:         webhookSvc,
-		notifySvc:          notifySvc,
-		codeIntelSvc:       codeIntelSvc,
-		lineageSvc:         lineageSvc,
-		indexQueue:         indexQueue,
-		asyncIndex:         opts.EnableAsyncIndexing,
-		rateLimiter:        newRequestRateLimiter(),
-		httpMetrics:        httpMetrics,
-		passkey:           initWebAuthn(),
-		enableAdminHealth: opts.EnableAdminHealth,
-		enablePprof:        opts.EnablePprof,
-		corsAllowedOrigins: append([]string(nil), opts.CORSAllowedOrigins...),
-		restrictPublicOnly: opts.RestrictToPublic,
-		maxPublicRepos:     opts.MaxPublicRepos,
-		requirePrivatePlan: opts.RequirePrivatePlan,
-		maxPrivateRepos:    opts.MaxPrivateRepos,
-		privateRepoAllowed: privateRepoAllowed,
-		polarWebhookSecret: strings.TrimSpace(opts.PolarWebhookSecret),
-		polarProductIDs:    polarProductIDs,
-		clientIPResolver:   clientIPResolver,
-		tenantContext:      newTenantContextOptions(opts.EnableTenantContext, opts.TenantHeader, opts.DefaultTenantID),
-		adminRouteAccess:   newAdminRouteAccess(adminCIDRs, clientIPResolver.clientIPFromRequest),
-		realtime:           newRepoEventBroker(),
-		mux:                http.NewServeMux(),
+		db:                       db,
+		authSvc:                  authSvc,
+		repoSvc:                  repoSvc,
+		browseSvc:                browseSvc,
+		diffSvc:                  diffSvc,
+		prSvc:                    prSvc,
+		issueSvc:                 issueSvc,
+		webhookSvc:               webhookSvc,
+		notifySvc:                notifySvc,
+		codeIntelSvc:             codeIntelSvc,
+		lineageSvc:               lineageSvc,
+		indexQueue:               indexQueue,
+		asyncIndex:               opts.EnableAsyncIndexing,
+		rateLimiter:              newRequestRateLimiter(),
+		httpMetrics:              httpMetrics,
+		passkey:                  initWebAuthn(),
+		enableAdminHealth:        opts.EnableAdminHealth,
+		enablePprof:              opts.EnablePprof,
+		corsAllowedOrigins:       append([]string(nil), opts.CORSAllowedOrigins...),
+		restrictPublicOnly:       opts.RestrictToPublic,
+		maxPublicRepos:           opts.MaxPublicRepos,
+		requirePrivatePlan:       opts.RequirePrivatePlan,
+		maxPrivateRepos:          opts.MaxPrivateRepos,
+		privateRepoAllowed:       privateRepoAllowed,
+		requireVerifiedEmail:     opts.RequireVerifiedEmail,
+		requirePasskeyEnrollment: opts.RequirePasskeyEnrollment,
+		enableOrganizations:      opts.EnableOrganizations,
+		polarWebhookSecret:       strings.TrimSpace(opts.PolarWebhookSecret),
+		polarProductIDs:          polarProductIDs,
+		clientIPResolver:         clientIPResolver,
+		tenantContext:            newTenantContextOptions(opts.EnableTenantContext, opts.TenantHeader, opts.DefaultTenantID),
+		adminRouteAccess:         newAdminRouteAccess(adminCIDRs, clientIPResolver.clientIPFromRequest),
+		realtime:                 newRepoEventBroker(),
+		mux:                      http.NewServeMux(),
 	}
 	if s.asyncIndex {
 		s.indexWorker = s.newIndexWorker(opts.IndexWorkerCount, opts.IndexWorkerPoll)
@@ -159,6 +168,10 @@ func NewServerWithOptions(db database.DB, authSvc *auth.Service, repoSvc *servic
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.handler.ServeHTTP(w, r)
+}
+
+func (s *Server) handleOrganizationsDisabled(w http.ResponseWriter, r *http.Request) {
+	jsonError(w, "organizations feature is disabled", http.StatusNotFound)
 }
 
 func (s *Server) buildHandler() http.Handler {
@@ -240,8 +253,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/user/ssh-keys", s.requireAuth(s.handleListSSHKeys))
 	s.mux.HandleFunc("POST /api/v1/user/ssh-keys", s.requireAuth(s.handleCreateSSHKey))
 	s.mux.HandleFunc("DELETE /api/v1/user/ssh-keys/{id}", s.requireAuth(s.handleDeleteSSHKey))
+	s.mux.HandleFunc("GET /api/v1/user/passkeys", s.requireAuth(s.handleListPasskeys))
 	s.mux.HandleFunc("GET /api/v1/user/repo-policy", s.requireAuth(s.handleGetRepoCreationPolicy))
 	s.mux.HandleFunc("GET /api/v1/user/starred", s.requireAuth(s.handleListUserStarredRepos))
+	s.mux.HandleFunc("GET /api/v1/user/subscription", s.requireAuth(s.handleGetSubscription))
 	s.mux.HandleFunc("GET /api/v1/notifications", s.requireAuth(s.handleListNotifications))
 	s.mux.HandleFunc("GET /api/v1/notifications/unread-count", s.requireAuth(s.handleUnreadNotificationsCount))
 	s.mux.HandleFunc("POST /api/v1/notifications/read-all", s.requireAuth(s.handleMarkAllNotificationsRead))
@@ -328,15 +343,26 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/callgraph/{ref}", s.handleCallGraph)
 	s.mux.HandleFunc("GET /api/v1/repos/{owner}/{repo}/impact/{ref}", s.handleImpactAnalysis)
 
-	// Organizations
-	s.mux.HandleFunc("POST /api/v1/orgs", s.requireAuth(s.handleCreateOrg))
-	s.mux.HandleFunc("GET /api/v1/orgs/{org}", s.handleGetOrg)
-	s.mux.HandleFunc("DELETE /api/v1/orgs/{org}", s.requireAuth(s.handleDeleteOrg))
-	s.mux.HandleFunc("GET /api/v1/orgs/{org}/members", s.handleListOrgMembers)
-	s.mux.HandleFunc("POST /api/v1/orgs/{org}/members", s.requireAuth(s.handleAddOrgMember))
-	s.mux.HandleFunc("DELETE /api/v1/orgs/{org}/members/{username}", s.requireAuth(s.handleRemoveOrgMember))
-	s.mux.HandleFunc("GET /api/v1/orgs/{org}/repos", s.handleListOrgRepos)
-	s.mux.HandleFunc("GET /api/v1/user/orgs", s.requireAuth(s.handleListUserOrgs))
+	// Organizations (optional)
+	if s.enableOrganizations {
+		s.mux.HandleFunc("POST /api/v1/orgs", s.requireAuth(s.handleCreateOrg))
+		s.mux.HandleFunc("GET /api/v1/orgs/{org}", s.handleGetOrg)
+		s.mux.HandleFunc("DELETE /api/v1/orgs/{org}", s.requireAuth(s.handleDeleteOrg))
+		s.mux.HandleFunc("GET /api/v1/orgs/{org}/members", s.handleListOrgMembers)
+		s.mux.HandleFunc("POST /api/v1/orgs/{org}/members", s.requireAuth(s.handleAddOrgMember))
+		s.mux.HandleFunc("DELETE /api/v1/orgs/{org}/members/{username}", s.requireAuth(s.handleRemoveOrgMember))
+		s.mux.HandleFunc("GET /api/v1/orgs/{org}/repos", s.handleListOrgRepos)
+		s.mux.HandleFunc("GET /api/v1/user/orgs", s.requireAuth(s.handleListUserOrgs))
+	} else {
+		s.mux.HandleFunc("POST /api/v1/orgs", s.handleOrganizationsDisabled)
+		s.mux.HandleFunc("GET /api/v1/orgs/{org}", s.handleOrganizationsDisabled)
+		s.mux.HandleFunc("DELETE /api/v1/orgs/{org}", s.handleOrganizationsDisabled)
+		s.mux.HandleFunc("GET /api/v1/orgs/{org}/members", s.handleOrganizationsDisabled)
+		s.mux.HandleFunc("POST /api/v1/orgs/{org}/members", s.handleOrganizationsDisabled)
+		s.mux.HandleFunc("DELETE /api/v1/orgs/{org}/members/{username}", s.handleOrganizationsDisabled)
+		s.mux.HandleFunc("GET /api/v1/orgs/{org}/repos", s.handleOrganizationsDisabled)
+		s.mux.HandleFunc("GET /api/v1/user/orgs", s.handleOrganizationsDisabled)
+	}
 
 	validateProtectedRefUpdate := func(ctx context.Context, repoID int64, refName string, oldHash, newHash object.Hash) error {
 		if !strings.HasPrefix(refName, "heads/") || newHash == "" {

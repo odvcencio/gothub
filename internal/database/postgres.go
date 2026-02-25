@@ -865,6 +865,49 @@ func (p *PostgresDB) GetUserByEmail(ctx context.Context, email string) (*models.
 		`SELECT id, username, email, password_hash, is_admin, created_at FROM users WHERE email = $1 AND tenant_id = $2`, email, tenantID))
 }
 
+func (p *PostgresDB) HasVerifiedEmail(ctx context.Context, userID int64) (bool, error) {
+	tenantID := tenantIDForContext(ctx)
+	var exists int
+	err := p.db.QueryRowContext(ctx,
+		`SELECT 1
+		 FROM magic_link_tokens m
+		 JOIN users u ON u.id = m.user_id
+		 WHERE m.user_id = $1
+		   AND m.used_at IS NOT NULL
+		   AND u.tenant_id = $2
+		 LIMIT 1`,
+		userID, tenantID,
+	).Scan(&exists)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		return false, err
+	}
+	return exists == 1, nil
+}
+
+func (p *PostgresDB) HasWebAuthnCredential(ctx context.Context, userID int64) (bool, error) {
+	tenantID := tenantIDForContext(ctx)
+	var exists int
+	err := p.db.QueryRowContext(ctx,
+		`SELECT 1
+		 FROM webauthn_credentials c
+		 JOIN users u ON u.id = c.user_id
+		 WHERE c.user_id = $1
+		   AND u.tenant_id = $2
+		 LIMIT 1`,
+		userID, tenantID,
+	).Scan(&exists)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		return false, err
+	}
+	return exists == 1, nil
+}
+
 func (p *PostgresDB) scanUser(row *sql.Row) (*models.User, error) {
 	u := &models.User{}
 	if err := row.Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.IsAdmin, &u.CreatedAt); err != nil {
@@ -931,6 +974,26 @@ func (p *PostgresDB) HasUserEntitlement(ctx context.Context, userID int64, featu
 		return false, err
 	}
 	return exists == 1, nil
+}
+
+func (p *PostgresDB) GetUserEntitlements(ctx context.Context, userID int64) ([]*models.UserEntitlement, error) {
+	tenantID := tenantIDForContext(ctx)
+	rows, err := p.db.QueryContext(ctx,
+		`SELECT id, user_id, feature, source, external_customer_id, active, expires_at, metadata_json, created_at, updated_at
+		 FROM user_entitlements WHERE user_id = $1 AND tenant_id = $2`, userID, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []*models.UserEntitlement
+	for rows.Next() {
+		e := &models.UserEntitlement{}
+		if err := rows.Scan(&e.ID, &e.UserID, &e.Feature, &e.Source, &e.ExternalCustomerID, &e.Active, &e.ExpiresAt, &e.MetadataJSON, &e.CreatedAt, &e.UpdatedAt); err != nil {
+			return nil, err
+		}
+		result = append(result, e)
+	}
+	return result, rows.Err()
 }
 
 func (p *PostgresDB) CreateMagicLinkToken(ctx context.Context, token *models.MagicLinkToken) error {

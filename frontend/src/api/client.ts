@@ -1,4 +1,5 @@
 const BASE = '/api/v1';
+const AUTH_TOKEN_EVENT = 'gothub:auth-token-change';
 
 let token: string | null = localStorage.getItem('gothub_token');
 let redirectingToLogin = false;
@@ -7,9 +8,19 @@ export function setToken(t: string | null) {
   token = t;
   if (t) localStorage.setItem('gothub_token', t);
   else localStorage.removeItem('gothub_token');
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new Event(AUTH_TOKEN_EVENT));
+  }
 }
 
 export function getToken() { return token; }
+
+export function subscribeAuthTokenChange(listener: () => void): () => void {
+  if (typeof window === 'undefined') return () => {};
+  const handler = () => listener();
+  window.addEventListener(AUTH_TOKEN_EVENT, handler);
+  return () => window.removeEventListener(AUTH_TOKEN_EVENT, handler);
+}
 
 function isAuthRequest(path: string): boolean {
   return path.startsWith('/auth/');
@@ -66,14 +77,22 @@ export interface APIUser {
 }
 
 export interface AuthResponse {
-  token: string;
+  token?: string;
   user: APIUser;
+  requires_email_verification?: boolean;
+  requires_passkey_enrollment?: boolean;
+  magic_link_sent?: boolean;
+  magic_token?: string;
+  magic_expires_at?: string;
 }
 
 export interface AuthCapabilities {
   magic_link_enabled: boolean;
   ssh_auth_enabled: boolean;
   passkey_enabled: boolean;
+  organizations_enabled?: boolean;
+  require_verified_email?: boolean;
+  require_passkey_enrollment?: boolean;
 }
 
 export interface Notification {
@@ -332,6 +351,13 @@ export interface SSHKey {
   [key: string]: unknown;
 }
 
+export interface PasskeyCredential {
+  id: number;
+  credential_id: string;
+  created_at: string;
+  last_used_at?: string;
+}
+
 export interface Collaborator {
   user_id?: number;
   username: string;
@@ -496,7 +522,8 @@ export const listRepoForks = (owner: string, repo: string, page?: number, perPag
   if (page && page > 0) query.set('page', String(page));
   if (perPage && perPage > 0) query.set('per_page', String(perPage));
   const suffix = query.toString();
-  return request<Repository[]>('GET', `/repos/${owner}/${repo}/forks${suffix ? '?' + suffix : ''}`);
+  return request<Repository[] | null>('GET', `/repos/${owner}/${repo}/forks${suffix ? '?' + suffix : ''}`)
+    .then((items) => (Array.isArray(items) ? items : []));
 };
 export const listRepoRunnerTokens = (owner: string, repo: string) =>
   request<RunnerToken[]>('GET', `/repos/${owner}/${repo}/runners/tokens`);
@@ -506,9 +533,21 @@ export const deleteRepoRunnerToken = (owner: string, repo: string, id: number) =
   request<void>('DELETE', `/repos/${owner}/${repo}/runners/tokens/${id}`);
 export const getRepo = (owner: string, repo: string) =>
   request<Repository>('GET', `/repos/${owner}/${repo}`);
-export const listUserRepos = () => request<Repository[]>('GET', '/user/repos');
+export const listUserRepos = () =>
+  request<Repository[] | null>('GET', '/user/repos')
+    .then((items) => (Array.isArray(items) ? items : []));
 export const getRepoCreationPolicy = () => request<RepoCreationPolicy>('GET', '/user/repo-policy');
 export const listUserStarredRepos = () => request<Repository[]>('GET', '/user/starred');
+
+export interface SubscriptionStatus {
+  has_private_repos: boolean;
+  active: boolean;
+  feature?: string;
+  source?: string;
+  expires_at?: string;
+}
+
+export const getUserSubscription = () => request<SubscriptionStatus>('GET', '/user/subscription');
 export const getRepoStars = (owner: string, repo: string) =>
   request<RepoStars>('GET', `/repos/${owner}/${repo}/stars`);
 export const starRepo = (owner: string, repo: string) =>
@@ -622,6 +661,7 @@ export const listSSHKeys = () => request<SSHKey[]>('GET', '/user/ssh-keys');
 export const createSSHKey = (name: string, publicKey: string) =>
   request<SSHKey>('POST', '/user/ssh-keys', { name, public_key: publicKey });
 export const deleteSSHKey = (id: number) => request<void>('DELETE', `/user/ssh-keys/${id}`);
+export const listPasskeys = () => request<PasskeyCredential[]>('GET', '/user/passkeys');
 
 // Collaborators
 export const listCollaborators = (owner: string, repo: string) =>

@@ -603,6 +603,43 @@ func (s *SQLiteDB) GetUserByEmail(ctx context.Context, email string) (*models.Us
 		`SELECT id, username, email, password_hash, is_admin, created_at FROM users WHERE email = ?`, email))
 }
 
+func (s *SQLiteDB) HasVerifiedEmail(ctx context.Context, userID int64) (bool, error) {
+	var exists int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT 1
+		 FROM magic_link_tokens
+		 WHERE user_id = ?
+		   AND used_at IS NOT NULL
+		 LIMIT 1`,
+		userID,
+	).Scan(&exists)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		return false, err
+	}
+	return exists == 1, nil
+}
+
+func (s *SQLiteDB) HasWebAuthnCredential(ctx context.Context, userID int64) (bool, error) {
+	var exists int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT 1
+		 FROM webauthn_credentials
+		 WHERE user_id = ?
+		 LIMIT 1`,
+		userID,
+	).Scan(&exists)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		return false, err
+	}
+	return exists == 1, nil
+}
+
 func (s *SQLiteDB) scanUser(row *sql.Row) (*models.User, error) {
 	u := &models.User{}
 	if err := row.Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.IsAdmin, &u.CreatedAt); err != nil {
@@ -663,6 +700,25 @@ func (s *SQLiteDB) HasUserEntitlement(ctx context.Context, userID int64, feature
 		return false, err
 	}
 	return exists == 1, nil
+}
+
+func (s *SQLiteDB) GetUserEntitlements(ctx context.Context, userID int64) ([]*models.UserEntitlement, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, user_id, feature, source, external_customer_id, active, expires_at, metadata_json, created_at, updated_at
+		 FROM user_entitlements WHERE user_id = ?`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []*models.UserEntitlement
+	for rows.Next() {
+		e := &models.UserEntitlement{}
+		if err := rows.Scan(&e.ID, &e.UserID, &e.Feature, &e.Source, &e.ExternalCustomerID, &e.Active, &e.ExpiresAt, &e.MetadataJSON, &e.CreatedAt, &e.UpdatedAt); err != nil {
+			return nil, err
+		}
+		result = append(result, e)
+	}
+	return result, rows.Err()
 }
 
 func (s *SQLiteDB) CreateMagicLinkToken(ctx context.Context, token *models.MagicLinkToken) error {
